@@ -6,9 +6,13 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"net/http"
 	"strings"
+
+	"github.com/ia-dev-sindireceita/payment/internal/app"
 )
 
 type ctxKey int
@@ -43,6 +47,24 @@ type TenantAuthenticator interface {
 // denies the request (deny-by-default).
 type AdminAuthenticator interface {
 	AuthenticateAdmin(token string) (role Role, ok bool)
+}
+
+// AdminPrincipal is the server-side identity of an authenticated admin caller:
+// the authorization role plus a stable operator id used to attribute audit-trail
+// entries. Both are derived from the token server-side — never from client input
+// — so the "who" in the audit trail cannot be forged by the caller.
+type AdminPrincipal struct {
+	// OperatorID is a stable, non-reversible pseudonym for the admin token. It is
+	// safe to record in the audit trail and logs (it never exposes the token).
+	OperatorID string
+	Role       Role
+}
+
+// AdminPrincipalAuthenticator authenticates an admin token and resolves its full
+// principal (role + operator id). It is the identity source the admin middleware
+// uses so privileged actions can be attributed in the audit trail.
+type AdminPrincipalAuthenticator interface {
+	AuthenticateAdminPrincipal(token string) (AdminPrincipal, bool)
 }
 
 // WebhookAuthenticator authenticates an inbound bank webhook. In production this
@@ -115,8 +137,19 @@ func (a *StaticTokenAuth) AuthenticateTenant(token string) (string, bool) {
 // early return, so timing does not reveal which token (if any) matched (mirrors
 // the webhook secret check). An empty or unknown token is denied.
 func (a *StaticTokenAuth) AuthenticateAdmin(token string) (Role, bool) {
+	p, ok := a.AuthenticateAdminPrincipal(token)
+	return p.Role, ok
+}
+
+// AuthenticateAdminPrincipal resolves an admin token to its full principal (role
+// + operator id). Like AuthenticateAdmin it scans every registered token in
+// constant time without early return so timing leaks nothing about which token
+// matched. The operator id is derived from the matched token via a one-way hash
+// (deriveOperatorID): it is stable per token and safe to record, and it never
+// reveals the token itself. An empty or unknown token is denied.
+func (a *StaticTokenAuth) AuthenticateAdminPrincipal(token string) (AdminPrincipal, bool) {
 	if token == "" {
-		return "", false
+		return AdminPrincipal{}, false
 	}
 	tb := []byte(token)
 	var matched Role
@@ -128,9 +161,18 @@ func (a *StaticTokenAuth) AuthenticateAdmin(token string) (Role, bool) {
 		}
 	}
 	if found == 1 {
-		return matched, true
+		return AdminPrincipal{OperatorID: deriveOperatorID(token), Role: matched}, true
 	}
-	return "", false
+	return AdminPrincipal{}, false
+}
+
+// deriveOperatorID maps an admin token to a stable, non-reversible operator id
+// for audit attribution. It is a SHA-256 of the token, truncated and prefixed —
+// recording it never exposes the underlying token while still uniquely (for
+// audit purposes) identifying the operator.
+func deriveOperatorID(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "op-" + hex.EncodeToString(sum[:8])
 }
 
 // AuthenticateWebhook compares the provided secret in constant time.
@@ -167,17 +209,21 @@ func tenantAuthMiddleware(auth TenantAuthenticator) func(http.Handler) http.Hand
 }
 
 // adminAuthMiddleware enforces admin authentication and injects the resolved
-// role into the request context for requireRole to consume. Deny-by-default: an
-// unauthenticated request is rejected before any handler runs.
-func adminAuthMiddleware(auth AdminAuthenticator) func(http.Handler) http.Handler {
+// principal: the role (for requireRole) and the operator id (for audit
+// attribution, via the app-layer context key). Deny-by-default: an
+// unauthenticated request is rejected before any handler runs. The operator id
+// is derived server-side from the token, so the audit "who" cannot be forged by
+// the client.
+func adminAuthMiddleware(auth AdminPrincipalAuthenticator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			role, ok := auth.AuthenticateAdmin(bearerToken(r))
+			p, ok := auth.AuthenticateAdminPrincipal(bearerToken(r))
 			if !ok {
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
-			ctx := context.WithValue(r.Context(), ctxRole, role)
+			ctx := context.WithValue(r.Context(), ctxRole, p.Role)
+			ctx = app.WithOperatorID(ctx, p.OperatorID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

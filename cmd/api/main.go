@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
+	auditlog "github.com/ia-dev-sindireceita/payment/internal/adapters/audit/inmemory"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/bank"
 	httpadapter "github.com/ia-dev-sindireceita/payment/internal/adapters/http"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/messaging/inmemory"
@@ -52,6 +53,11 @@ func run() error {
 
 	store := sqlite.NewStore(db)
 	creds := secret.NewStore(cfg.BankCreds)
+	// Append-only audit trail for privileged admin-plane actions. The in-memory
+	// log is the foundation default; swap for a persisted append-only adapter
+	// without touching the use-cases. Wiring it here is mandatory — AdminService
+	// degrades to a no-op log when Audit is nil, which must never happen in prod.
+	audit := auditlog.NewLog()
 	deps := app.Deps{
 		Payments:    store,
 		Tenants:     store,
@@ -62,6 +68,7 @@ func run() error {
 		Bank:        bank.NewStubProvider(creds),
 		Credentials: creds,
 		CredWriter:  creds,
+		Audit:       audit,
 		Clock:       system.Clock{},
 		IDs:         system.IDProvider{},
 		// Transactional boundary for the multi-write use-cases (charge creation,

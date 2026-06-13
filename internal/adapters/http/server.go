@@ -21,7 +21,7 @@ type Server struct {
 	ui          *adminweb.Renderer
 	webhooks    *app.WebhookService
 	tenantAuth  TenantAuthenticator
-	adminAuth   AdminAuthenticator
+	adminAuth   AdminPrincipalAuthenticator
 	webhookAuth WebhookAuthenticator
 	csrf        CSRFGuard
 }
@@ -36,7 +36,7 @@ type Config struct {
 	UI          *adminweb.Renderer
 	Webhooks    *app.WebhookService
 	TenantAuth  TenantAuthenticator
-	AdminAuth   AdminAuthenticator
+	AdminAuth   AdminPrincipalAuthenticator
 	WebhookAuth WebhookAuthenticator
 	// SecureCookies sets the Secure attribute on cookies this adapter issues
 	// (CSRF token; the admin-UI session cookie via Server.CSRF). Driven by config
