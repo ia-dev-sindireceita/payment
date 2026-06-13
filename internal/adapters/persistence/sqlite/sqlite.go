@@ -41,7 +41,19 @@ func Open(dsn string) (*sql.DB, error) {
 }
 
 // Migrate applies all *.up.sql files from the given filesystem in lexical order.
+// Applied migrations are recorded in a schema_migrations ledger so re-running
+// Migrate is idempotent even for non-idempotent DDL (e.g. ALTER TABLE ADD
+// COLUMN, which SQLite cannot guard with IF NOT EXISTS). Each migration runs in
+// its own transaction: a failing migration rolls back and is not recorded.
 func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
+	if _, err := db.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS schema_migrations (
+		     name       TEXT PRIMARY KEY,
+		     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+		 )`); err != nil {
+		return fmt.Errorf("ensure schema_migrations: %w", err)
+	}
+
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
@@ -54,13 +66,54 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 	}
 	sort.Strings(ups)
 	for _, name := range ups {
+		applied, err := migrationApplied(ctx, db, name)
+		if err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
 		b, err := fs.ReadFile(fsys, name)
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if _, err := db.ExecContext(ctx, string(b)); err != nil {
-			return fmt.Errorf("apply migration %s: %w", name, err)
+		if err := applyMigration(ctx, db, name, string(b)); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func migrationApplied(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var found string
+	err := db.QueryRowContext(ctx, `SELECT name FROM schema_migrations WHERE name = ?`, name).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check migration %s: %w", name, err)
+	}
+	return true, nil
+}
+
+func applyMigration(ctx context.Context, db *sql.DB, name, body string) (err error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", name, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.ExecContext(ctx, body); err != nil {
+		return fmt.Errorf("apply migration %s: %w", name, err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
+		return fmt.Errorf("record migration %s: %w", name, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", name, err)
 	}
 	return nil
 }
@@ -84,30 +137,69 @@ var (
 
 // --- Tenants ---
 
-// SaveTenant inserts or updates a tenant.
+// SaveTenant inserts or updates a tenant (including profile fields).
 func (s *Store) SaveTenant(ctx context.Context, t *tenant.Tenant) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tenants (id, name, active, created_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET name = excluded.name, active = excluded.active`,
-		t.ID(), t.Name(), boolToInt(t.Active()), t.CreatedAt().Format(tsLayout))
+		`INSERT INTO tenants (id, name, display_name, cnpj, email, active, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		     name = excluded.name,
+		     display_name = excluded.display_name,
+		     cnpj = excluded.cnpj,
+		     email = excluded.email,
+		     active = excluded.active`,
+		t.ID(), t.Name(), t.DisplayName(), t.CNPJ(), t.Email(),
+		boolToInt(t.Active()), t.CreatedAt().Format(tsLayout))
 	if err != nil {
 		return fmt.Errorf("save tenant: %w", err)
 	}
 	return nil
 }
 
+const tenantCols = `id, name, display_name, cnpj, email, active, created_at`
+
+func scanTenant(sc interface{ Scan(...any) error }) (*tenant.Tenant, error) {
+	var id, name, displayName, cnpj, email, createdAt string
+	var active int
+	if err := sc.Scan(&id, &name, &displayName, &cnpj, &email, &active, &createdAt); err != nil {
+		return nil, err
+	}
+	return tenant.RehydrateProfile(id, name, displayName, cnpj, email, active != 0, parseTime(createdAt)), nil
+}
+
 // FindTenantByID returns a tenant or ErrNotFound.
 func (s *Store) FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, active, created_at FROM tenants WHERE id = ?`, id)
-	var gotID, name, createdAt string
-	var active int
-	if err := row.Scan(&gotID, &name, &active, &createdAt); err != nil {
+	row := s.db.QueryRowContext(ctx, `SELECT `+tenantCols+` FROM tenants WHERE id = ?`, id)
+	t, err := scanTenant(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, shared.ErrNotFound
 		}
 		return nil, fmt.Errorf("scan tenant: %w", err)
 	}
-	return tenant.Rehydrate(gotID, name, active != 0, parseTime(createdAt)), nil
+	return t, nil
+}
+
+// ListTenants returns all tenants ordered by creation time descending (newest
+// first), matching the admin console's "recently created at the top" layout.
+func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+tenantCols+` FROM tenants ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list tenants: %w", err)
+	}
+	defer rows.Close()
+	var out []*tenant.Tenant
+	for rows.Next() {
+		t, err := scanTenant(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan tenant: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tenants: %w", err)
+	}
+	return out, nil
 }
 
 // --- Payments (tenant-scoped) ---

@@ -7,6 +7,7 @@ package inmemory
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
@@ -63,6 +64,25 @@ func (s *Store) FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, 
 		return nil, shared.ErrNotFound
 	}
 	return t, nil
+}
+
+// ListTenants returns all tenants ordered newest-first (by creation time, then
+// id) to match the admin console layout. It returns a fresh slice each call.
+func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*tenant.Tenant, 0, len(s.tenants))
+	for _, t := range s.tenants {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ci, cj := out[i].CreatedAt(), out[j].CreatedAt()
+		if ci.Equal(cj) {
+			return out[i].ID() > out[j].ID()
+		}
+		return ci.After(cj)
+	})
+	return out, nil
 }
 
 // SavePayment stores a payment scoped by tenant.
