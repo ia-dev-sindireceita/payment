@@ -64,6 +64,9 @@ func run() error {
 		CredWriter:  creds,
 		Clock:       system.Clock{},
 		IDs:         system.IDProvider{},
+		// Transactional boundary for the multi-write use-cases (charge creation,
+		// webhook settlement) — required for financial integrity (SIN-64719).
+		UoW: store,
 	}
 
 	// Derive admin roles server-side from configured tokens (least privilege):

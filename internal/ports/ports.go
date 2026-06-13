@@ -62,6 +62,32 @@ type LedgerRepository interface {
 	AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) error
 }
 
+// Repository is the tenant-scoped persistence surface that can take part in a
+// single unit of work. It bundles the individual repository ports so a use-case
+// can perform several writes that must commit or roll back together — the
+// transactional boundary financial integrity depends on (no payment without its
+// ledger entry, no event marked processed without its settlement).
+type Repository interface {
+	PaymentRepository
+	TenantRepository
+	PricingRepository
+	LedgerRepository
+	ProcessedEventStore
+}
+
+// UnitOfWork runs fn inside one atomic transaction. Every write performed through
+// the supplied Repository commits together when fn returns nil and rolls back
+// together when fn returns a non-nil error (or panics). Multi-write use-cases
+// (charge creation, webhook settlement) wrap their writes in WithinTx so a
+// partial failure can never leave the system in an inconsistent state.
+//
+// A SavePayment that would violate the per-tenant idempotency-key uniqueness must
+// surface shared.ErrConflict so callers can resolve the race to the winning
+// payment instead of double-charging.
+type UnitOfWork interface {
+	WithinTx(ctx context.Context, fn func(r Repository) error) error
+}
+
 // ProcessedEventStore records which external events (webhooks) have already been
 // handled, providing webhook idempotency / anti-replay (threat W2).
 type ProcessedEventStore interface {
