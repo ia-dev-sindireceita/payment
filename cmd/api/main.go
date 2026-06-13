@@ -101,7 +101,19 @@ func run() error {
 			adminRoles[t] = httpadapter.RoleOperator
 		}
 	}
-	auth := httpadapter.NewStaticTokenAuthWithRoles(cfg.TenantTokens, adminRoles, cfg.WebhookSecret)
+	// Per-tenant webhook identities: join each opaque callback ref (ref→tenant)
+	// with the tenant's C6 client_id (from its bank credential) so the webhook
+	// handler can cross-check the untrusted body's client_id against the channel.
+	// A tenant without a configured credential simply has an empty client_id and
+	// the cross-check is skipped (the channel remains authoritative).
+	webhookRefs := make(map[string]httpadapter.WebhookIdentity, len(cfg.WebhookRefs))
+	for ref, tenantID := range cfg.WebhookRefs {
+		webhookRefs[ref] = httpadapter.WebhookIdentity{
+			TenantID: tenantID,
+			ClientID: cfg.BankCreds[tenantID].ClientID,
+		}
+	}
+	auth := httpadapter.NewStaticTokenAuthWithRoles(cfg.TenantTokens, adminRoles, webhookRefs)
 
 	// Admin HTML console (SIN-64727): parse templates up-front so a bad template
 	// fails startup, not the first request.

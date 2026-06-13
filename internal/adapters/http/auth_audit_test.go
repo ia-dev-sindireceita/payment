@@ -32,7 +32,7 @@ func TestAuthenticateAdminPrincipal(t *testing.T) {
 	auth := httpadapter.NewStaticTokenAuthWithRoles(nil, map[string]httpadapter.Role{
 		"adm": httpadapter.RoleAdmin,
 		"ops": httpadapter.RoleOperator,
-	}, "")
+	}, nil)
 
 	p, ok := auth.AuthenticateAdminPrincipal("adm")
 	if !ok || p.Role != httpadapter.RoleAdmin {
@@ -84,7 +84,7 @@ func TestAdminWriteRecordsAuditWithOperator(t *testing.T) {
 		IDs:         system.IDProvider{},
 	}
 	admin := app.NewAdminService(deps)
-	auth := httpadapter.NewStaticTokenAuth(nil, []string{adminToken}, webhookSec)
+	auth := httpadapter.NewStaticTokenAuth(nil, []string{adminToken}, nil)
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:     app.NewChargeService(deps),
 		Admin:       admin,

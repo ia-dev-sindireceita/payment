@@ -6,8 +6,10 @@ package http
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"net/http"
 	"strings"
@@ -67,38 +69,64 @@ type AdminPrincipalAuthenticator interface {
 	AuthenticateAdminPrincipal(token string) (AdminPrincipal, bool)
 }
 
-// WebhookAuthenticator authenticates an inbound bank webhook. In production this
-// is mTLS client-cert validation; the scaffold verifies a shared secret in
-// constant time. Either way the posture is failure-closed (threat W1).
+// WebhookIdentity is the server-side identity that a valid per-tenant callback
+// reference resolves to. TenantID is authoritative: it scopes the anti-replay
+// namespace (processed_events) and the reconcile (GetCharge). ClientID is the
+// tenant's C6 client_id, used ONLY to cross-check the untrusted webhook body
+// (defense-in-depth, ADR-0002 item 3). Both are bound to the tenantRef at
+// registration; the caller never supplies them.
+type WebhookIdentity struct {
+	TenantID string
+	ClientID string
+}
+
+// WebhookAuthenticator resolves an inbound C6 webhook's opaque per-tenant callback
+// reference (tenantRef, carried in the URL path) to the tenant it was minted for.
+//
+// The C6 webhook contract carries NO message authenticity — no HMAC, signature or
+// key-id (notificações.yaml, anexo SIN-64704) — so the unguessable per-tenant URL
+// itself IS the credential (capability URL): holding a valid tenantRef
+// authenticates the channel and binds it to exactly one tenant (ADR-0002 / F4,
+// SIN-64720). The body's client_id is never the source of truth for the tenant.
+//
+// Resolution is failure-closed and must not be an enumeration oracle: an unknown
+// ref returns the same (zero, false) as a wrong one, so the handler answers a
+// uniform 401 and the response never reveals whether a tenant exists for a ref.
 type WebhookAuthenticator interface {
-	AuthenticateWebhook(secret string) bool
+	AuthenticateWebhook(tenantRef string) (WebhookIdentity, bool)
 }
 
 // StaticTokenAuth is a config-driven authenticator: opaque tokens map to tenant
-// ids; admin tokens map to roles; a webhook secret. Tokens/secrets come from
-// config, not code. Suitable for the foundation; replace with a real IdP/mTLS
-// adapter later.
+// ids; admin tokens map to roles; opaque per-tenant webhook refs map to a tenant
+// identity. Tokens/secrets come from config, not code. Suitable for the
+// foundation; replace with a real IdP adapter later.
 type StaticTokenAuth struct {
-	tenantTokens  map[string]string // token -> tenantID
-	adminRoles    map[string]Role   // admin token -> role
-	webhookSecret string
+	tenantTokens map[string]string          // token -> tenantID
+	adminRoles   map[string]Role            // admin token -> role
+	webhookRefs  map[string]WebhookIdentity // sha256(tenantRef) -> identity
 }
 
 // NewStaticTokenAuth builds a StaticTokenAuth where every admin token has the
 // full RoleAdmin role. It is a thin wrapper over NewStaticTokenAuthWithRoles for
 // the common single-role case.
-func NewStaticTokenAuth(tenantTokens map[string]string, adminTokens []string, webhookSecret string) *StaticTokenAuth {
+func NewStaticTokenAuth(tenantTokens map[string]string, adminTokens []string, webhookRefs map[string]WebhookIdentity) *StaticTokenAuth {
 	roles := make(map[string]Role, len(adminTokens))
 	for _, t := range adminTokens {
 		roles[t] = RoleAdmin
 	}
-	return NewStaticTokenAuthWithRoles(tenantTokens, roles, webhookSecret)
+	return NewStaticTokenAuthWithRoles(tenantTokens, roles, webhookRefs)
 }
 
 // NewStaticTokenAuthWithRoles builds a StaticTokenAuth from explicit token→role
 // assignments. Empty tokens and empty/unknown roles are dropped so a
 // misconfigured entry can never silently grant access (deny-by-default).
-func NewStaticTokenAuthWithRoles(tenantTokens map[string]string, adminRoles map[string]Role, webhookSecret string) *StaticTokenAuth {
+//
+// Webhook refs are stored hashed (sha256), so the raw capability secret is not
+// held in memory, and indexed by hash for O(1) lookup. A ref whose format is
+// invalid (see validTenantRef) or whose tenant id is empty is dropped: a
+// misconfigured ref disables that tenant's webhook (failure-closed) rather than
+// registering a weak credential.
+func NewStaticTokenAuthWithRoles(tenantTokens map[string]string, adminRoles map[string]Role, webhookRefs map[string]WebhookIdentity) *StaticTokenAuth {
 	tt := make(map[string]string, len(tenantTokens))
 	for k, v := range tenantTokens {
 		tt[k] = v
@@ -110,7 +138,14 @@ func NewStaticTokenAuthWithRoles(tenantTokens map[string]string, adminRoles map[
 		}
 		ar[tok] = role
 	}
-	return &StaticTokenAuth{tenantTokens: tt, adminRoles: ar, webhookSecret: webhookSecret}
+	wr := make(map[string]WebhookIdentity, len(webhookRefs))
+	for ref, id := range webhookRefs {
+		if !validTenantRef(ref) || id.TenantID == "" {
+			continue
+		}
+		wr[hashTenantRef(ref)] = id
+	}
+	return &StaticTokenAuth{tenantTokens: tt, adminRoles: ar, webhookRefs: wr}
 }
 
 // valid reports whether r is a known role.
@@ -175,12 +210,68 @@ func deriveOperatorID(token string) string {
 	return "op-" + hex.EncodeToString(sum[:8])
 }
 
-// AuthenticateWebhook compares the provided secret in constant time.
-func (a *StaticTokenAuth) AuthenticateWebhook(secret string) bool {
-	if a.webhookSecret == "" || secret == "" {
-		return false // failure-closed: no secret configured => deny
+// AuthenticateWebhook resolves an opaque per-tenant callback ref to its tenant
+// identity. The ref is the credential (the C6 webhook is unsigned); a malformed or
+// unregistered ref denies with the same (zero, false), so the caller cannot tell
+// "no such tenant" from "wrong ref" (no enumeration oracle). The lookup is an O(1)
+// map keyed by the ref's sha256 — the raw ref is never compared or stored, and the
+// uniform deny makes lookup timing irrelevant to existence.
+func (a *StaticTokenAuth) AuthenticateWebhook(tenantRef string) (WebhookIdentity, bool) {
+	if !validTenantRef(tenantRef) {
+		return WebhookIdentity{}, false // failure-closed
 	}
-	return subtle.ConstantTimeCompare([]byte(secret), []byte(a.webhookSecret)) == 1
+	id, ok := a.webhookRefs[hashTenantRef(tenantRef)]
+	if !ok {
+		return WebhookIdentity{}, false
+	}
+	return id, true
+}
+
+// tenantRefBytes is the entropy of a minted tenantRef: 32 bytes (256 bits) makes
+// the capability URL infeasible to guess.
+const tenantRefBytes = 32
+
+// tenantRefLen is the fixed length of a tenantRef once base64url-encoded (no
+// padding): ceil(32*8/6) = 43 characters.
+const tenantRefLen = 43
+
+// GenerateTenantRef mints a fresh, unguessable per-tenant callback reference: 32
+// random bytes (256 bits) encoded base64url without padding (43 chars). It is the
+// secret embedded in a tenant's webhook URL (/webhooks/c6/{tenantRef}); register
+// the returned value and hand the full URL to C6. Returns an error only if the
+// system CSPRNG fails.
+func GenerateTenantRef() (string, error) {
+	b := make([]byte, tenantRefBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// validTenantRef reports whether ref is structurally a tenantRef: exactly
+// tenantRefLen base64url characters ([A-Za-z0-9_-], no padding). Enforcing a fixed
+// shape before any lookup rejects path-traversal/percent-encoded inputs uniformly
+// (same 401) and keeps a malformed ref from ever reaching the credential map.
+func validTenantRef(ref string) bool {
+	if len(ref) != tenantRefLen {
+		return false
+	}
+	for i := 0; i < len(ref); i++ {
+		c := ref[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// hashTenantRef maps a tenantRef to the hex sha256 used as the credential-map key,
+// so the raw capability secret is never stored in memory.
+func hashTenantRef(ref string) string {
+	sum := sha256.Sum256([]byte(ref))
+	return hex.EncodeToString(sum[:])
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>" header.
