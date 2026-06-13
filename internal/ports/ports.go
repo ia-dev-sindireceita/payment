@@ -215,16 +215,44 @@ type BankProvider interface {
 //   - QRCodeLocation is the URL from which the QR-code image can be rendered.
 //   - ExpiresAt is the instant the QR/charge expires; the zero value means the PSP
 //     did not return an expiry. Callers treat now > ExpiresAt as an expired QR.
+//   - ExpectedAmountCents is the charge's original amount (valor.original) in
+//     cents — what the payer was asked to pay.
+//   - ReceivedAmountCents is the sum of the reconciled PIX receipts (the pix[]
+//     array, each pix.valor) in cents — what was actually received. It is zero
+//     while the charge is unpaid (ATIVA) and equals the expected amount on a
+//     correctly paid CONCLUIDA charge.
+//
+// Reconciling only Status proves the charge is marked paid; it does NOT prove the
+// payer paid the right amount. Settlement MUST also assert the money adds up
+// (AmountReconciled) before liquidating, otherwise a charge paid to a lesser value
+// (partial payment, adjustable cob, manipulation) would settle for the wrong
+// amount (reconcile-before-settle, threat W3).
 //
 // It is intentionally distinct from ChargeResult: a PIX charge carries QR
 // lifecycle data a plain charge does not, and keeping it separate avoids widening
 // the generic charge result with PIX-only fields.
 type PixChargeResult struct {
-	TxID           string
-	Status         string
-	QRCodePayload  string
-	QRCodeLocation string
-	ExpiresAt      time.Time
+	TxID                string
+	Status              string
+	QRCodePayload       string
+	QRCodeLocation      string
+	ExpiresAt           time.Time
+	ExpectedAmountCents int64
+	ReceivedAmountCents int64
+}
+
+// AmountReconciled reports whether the amount received on this charge exactly
+// matches the amount that was expected (original). It is the money half of
+// reconcile-before-settle: a settlement use-case asserts this — inside its
+// transactional boundary (WithinTx) and in addition to a CONCLUIDA, non-expired
+// status — before liquidating, treating a false result as a divergence
+// (shared.ErrAmountMismatch) that blocks settlement and raises an audit event.
+//
+// A non-positive expected amount is never reconciled: it is a degenerate charge,
+// and settling against it would fail open. Overpayment (received > expected) is a
+// divergence too, so the check is strict equality rather than ">=".
+func (r PixChargeResult) AmountReconciled() bool {
+	return r.ExpectedAmountCents > 0 && r.ReceivedAmountCents == r.ExpectedAmountCents
 }
 
 // PixProvider is the output port for immediate PIX charges at the bank/PSP,

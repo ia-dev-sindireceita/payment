@@ -30,6 +30,13 @@ var (
 	// unavailable: a transport/TLS failure, a timeout, a 429, or a 5xx. It is
 	// generally retryable with backoff, unlike ErrUnauthorized or ErrValidation.
 	ErrUnavailable = errors.New("unavailable")
+	// ErrAmountMismatch indicates a reconciled charge whose received amount does
+	// not equal the expected (original) amount — a partial payment, an adjustable
+	// charge paid to a different value, or manipulation. Settlement MUST refuse to
+	// liquidate on this signal and emit an audit event (reconcile-before-settle,
+	// threat W3). It is distinct from ErrValidation: the input was well-formed, the
+	// reconciled money simply does not add up.
+	ErrAmountMismatch = errors.New("amount mismatch")
 )
 
 // ValidationError wraps ErrValidation with the offending field and a message so
