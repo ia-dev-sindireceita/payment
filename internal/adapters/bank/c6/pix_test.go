@@ -434,3 +434,63 @@ func TestPixTxIDValid(t *testing.T) {
 		t.Fatal("txid collided across distinct keys")
 	}
 }
+
+// TestCreateImmediateChargeEmptyAnchorRejected proves the boundary guard: a
+// request whose idempotency anchor is empty (both IdempotencyKey and PaymentID
+// unset) is rejected with ErrValidation before any txid is derived, and the PIX
+// endpoint is never touched. Without the guard the txid would be the constant
+// sha256("")[:32] and two distinct charges would collide on the idempotent PUT
+// (silent wrong-amount). SEC-1, SIN-64769.
+func TestCreateImmediateChargeEmptyAnchorRejected(t *testing.T) {
+	t.Parallel()
+	ts := newPixTestServer(t)
+	p := ts.provider(t, oneTenant("t1", "c", "s"), nil)
+
+	_, err := p.CreateImmediateCharge(context.Background(), "t1", ports.ChargeRequest{
+		TenantID: "t1", AmountCents: 1050, Currency: "BRL", // no IdempotencyKey, no PaymentID
+	}, time.Hour)
+	if !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("empty anchor must map to ErrValidation, got %v", err)
+	}
+	ts.mu.Lock()
+	hits := ts.putHits
+	ts.mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("PIX endpoint must not be touched on an empty anchor, putHits=%d", hits)
+	}
+}
+
+// TestCreateImmediateChargeNonPositiveAmountRejected proves the boundary guard
+// for a non-positive amount: there is no domain guarantee of AmountCents > 0, so
+// the adapter rejects <=0 with ErrValidation and never touches the PSP. SEC-3,
+// SIN-64769.
+func TestCreateImmediateChargeNonPositiveAmountRejected(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		amount int64
+	}{
+		{"zero", 0},
+		{"negative", -100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := newPixTestServer(t)
+			p := ts.provider(t, oneTenant("t1", "c", "s"), nil)
+
+			_, err := p.CreateImmediateCharge(context.Background(), "t1", ports.ChargeRequest{
+				TenantID: "t1", PaymentID: "pay-1", IdempotencyKey: "idem-1", AmountCents: tc.amount, Currency: "BRL",
+			}, time.Hour)
+			if !errors.Is(err, shared.ErrValidation) {
+				t.Fatalf("amount %d must map to ErrValidation, got %v", tc.amount, err)
+			}
+			ts.mu.Lock()
+			hits := ts.putHits
+			ts.mu.Unlock()
+			if hits != 0 {
+				t.Fatalf("PIX endpoint must not be touched on a non-positive amount, putHits=%d", hits)
+			}
+		})
+	}
+}

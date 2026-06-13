@@ -86,6 +86,22 @@ func (p *Provider) CreateImmediateCharge(ctx context.Context, tenantID string, r
 		return ports.PixChargeResult{}, err
 	}
 
+	// Complete mediation at the money-movement seam: refuse to derive a txid from
+	// an empty idempotency anchor. idempotencyKey(req) is "" only when BOTH
+	// IdempotencyKey and PaymentID are empty; deriving from "" would make every
+	// such charge share the constant txid sha256("")[:32], so two distinct charges
+	// would collide on the idempotent PUT and the PSP would return the first one —
+	// a silent wrong-amount. Fail securely here rather than trusting upstream to
+	// always supply an anchor. Likewise reject a non-positive amount at the
+	// boundary: there is no domain guard upstream and a <=0 valor is never a valid
+	// PIX charge (SIN-64769, SEC-1/SEC-3).
+	if idempotencyKey(req) == "" {
+		return ports.PixChargeResult{}, &Error{Op: "create_pix", sentinel: shared.ErrValidation}
+	}
+	if req.AmountCents <= 0 {
+		return ports.PixChargeResult{}, &Error{Op: "create_pix", sentinel: shared.ErrValidation}
+	}
+
 	if expiresIn <= 0 {
 		expiresIn = defaultPixExpiry
 	}
