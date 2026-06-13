@@ -20,6 +20,16 @@ var (
 	ErrTenantScope = errors.New("tenant scope violation")
 	// ErrInvalidTransition indicates an illegal aggregate state transition.
 	ErrInvalidTransition = errors.New("invalid state transition")
+	// ErrUnauthorized indicates an upstream dependency (the bank/PSP) rejected our
+	// authentication — e.g. invalid OAuth2 client credentials, an expired or wrong
+	// scope, or a refused token. It is NOT a client-facing authz decision (that is
+	// enforced at the inbound HTTP boundary); it means our own credential material
+	// for an external system is wrong, so a blind retry will not help.
+	ErrUnauthorized = errors.New("unauthorized")
+	// ErrUnavailable indicates an upstream dependency (the bank/PSP) is temporarily
+	// unavailable: a transport/TLS failure, a timeout, a 429, or a 5xx. It is
+	// generally retryable with backoff, unlike ErrUnauthorized or ErrValidation.
+	ErrUnavailable = errors.New("unavailable")
 )
 
 // ValidationError wraps ErrValidation with the offending field and a message so
