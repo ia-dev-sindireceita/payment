@@ -170,15 +170,26 @@ func run() error {
 // newBankProvider selects the bank adapter. When the C6 base URL is configured it
 // builds the real C6 provider (OAuth2 + HTTPS transport + error mapping);
 // otherwise it returns the in-memory stub so local dev and tests still boot.
+//
+// For C6 the settlement reconcile read is routed through the BACEN-verified PIX
+// immediate-charge read (GetImmediateCharge / GET …/v1/pix/{txid}), NOT the
+// speculative generic GET /charges/{txid} (SIN-64780 routing decision, CTO on
+// SIN-64791). The C6 provider satisfies both BankProvider and PixProvider, so it
+// is wrapped in PixSettlementProvider: charge creation stays on the generic port
+// while the settlement reconcile read resolves through the verified PIX shape.
 func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.BankProvider, error) {
 	if cfg.C6.BaseURL == "" {
 		log.Print("api: PAYMENT_C6_BASE_URL not set — using in-memory bank stub")
 		return bank.NewStubProvider(creds), nil
 	}
-	return c6.New(c6.Config{
+	c6p, err := c6.New(c6.Config{
 		BaseURL:  cfg.C6.BaseURL,
 		TokenURL: cfg.C6.TokenURL,
 		Scope:    cfg.C6.Scope,
 		Timeout:  cfg.C6.Timeout,
 	}, creds)
+	if err != nil {
+		return nil, err
+	}
+	return bank.NewPixSettlementProvider(c6p, c6p), nil
 }
