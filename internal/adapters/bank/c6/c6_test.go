@@ -362,3 +362,86 @@ func TestSecretNeverLeaks(t *testing.T) {
 		t.Fatalf("error leaked the client secret: %q", err.Error())
 	}
 }
+
+// TestGetChargeReconcilesAmount asserts the generic charge GET parses the
+// expected amount from valor.original and the received amount from the sum of the
+// pix[] receipts, so the settlement use-case can reconcile the money (SIN-64777).
+func TestGetChargeReconcilesAmount(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ts.getHandler = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"txid":"tx_123","status":"paid","valor":{"original":"100.00"},"pix":[{"valor":"60.00"},{"valor":"40.00"}]}`))
+	}
+	p := ts.provider(t, oneTenant("t1", "client-1", "secret-1"))
+
+	res, err := p.GetCharge(context.Background(), "t1", "tx_123")
+	if err != nil {
+		t.Fatalf("GetCharge: %v", err)
+	}
+	if res.ExpectedAmountCents != 10000 {
+		t.Fatalf("expected 10000 cents, got %d", res.ExpectedAmountCents)
+	}
+	if res.ReceivedAmountCents != 10000 {
+		t.Fatalf("received: want 10000 cents (60.00+40.00), got %d", res.ReceivedAmountCents)
+	}
+	if !res.AmountReconciled() {
+		t.Fatal("a fully-paid charge must reconcile")
+	}
+}
+
+// TestGetChargeAmountDivergence asserts a partially-paid charge the PSP marked
+// paid does NOT reconcile — the money half of reconcile-before-settle.
+func TestGetChargeAmountDivergence(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ts.getHandler = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"txid":"tx_123","status":"paid","valor":{"original":"100.00"},"pix":[{"valor":"60.00"}]}`))
+	}
+	p := ts.provider(t, oneTenant("t1", "client-1", "secret-1"))
+
+	res, err := p.GetCharge(context.Background(), "t1", "tx_123")
+	if err != nil {
+		t.Fatalf("GetCharge: %v", err)
+	}
+	if res.ReceivedAmountCents != 6000 || res.ExpectedAmountCents != 10000 {
+		t.Fatalf("unexpected amounts: %+v", res)
+	}
+	if res.AmountReconciled() {
+		t.Fatal("a partially-paid charge must NOT reconcile")
+	}
+}
+
+// TestGetChargeMalformedAmountFailsSecure asserts a present-but-malformed
+// valor.original is treated as a corrupt money field (ErrUnavailable), never read
+// as zero — fail-secure, mirroring the PIX path.
+func TestGetChargeMalformedAmountFailsSecure(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ts.getHandler = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"txid":"tx_123","status":"paid","valor":{"original":"abc"}}`))
+	}
+	p := ts.provider(t, oneTenant("t1", "client-1", "secret-1"))
+
+	if _, err := p.GetCharge(context.Background(), "t1", "tx_123"); !errors.Is(err, shared.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable for malformed amount, got %v", err)
+	}
+}
+
+// TestGetChargeMalformedReceiptFailsSecure asserts a malformed pix[] receipt
+// amount also fails secure rather than under-counting the received total.
+func TestGetChargeMalformedReceiptFailsSecure(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ts.getHandler = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"txid":"tx_123","status":"paid","valor":{"original":"100.00"},"pix":[{"valor":"oops"}]}`))
+	}
+	p := ts.provider(t, oneTenant("t1", "client-1", "secret-1"))
+
+	if _, err := p.GetCharge(context.Background(), "t1", "tx_123"); !errors.Is(err, shared.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable for malformed receipt, got %v", err)
+	}
+}

@@ -208,11 +208,20 @@ func (p *Provider) toPixResult(b pixChargeResponseBody, op string) (ports.PixCha
 	}, nil
 }
 
+// maxAmountReais is the per-charge sanity ceiling on the integer (reais) part of
+// an amount. cents = ip*100 + fp can integer-overflow int64 for absurd magnitudes
+// (ip ≳ 9.2e16), wrapping a huge positive amount to a negative one; fail-secure
+// cushions it (a negative expected fails AmountReconciled's >0 guard) but we
+// reject it explicitly so a corrupt/oversized money field is denied at the parse
+// boundary rather than relying on a downstream guard. R$1e12 (→ 1e14 cents) sits
+// far below the int64 ceiling and far above any legitimate single charge.
+const maxAmountReais = 1_000_000_000_000
+
 // parseAmountCents parses a BACEN decimal amount string ("10.50") into integer
 // cents (1050). It is the inverse of formatAmount and tolerates 0..2 fractional
 // digits. An empty string yields zero cents with no error (the amount was not
-// reported); any other malformed input is an error so callers never read corrupt
-// money as zero.
+// reported); any other malformed input — including a magnitude above the
+// per-charge ceiling — is an error so callers never read corrupt money as zero.
 func parseAmountCents(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -232,6 +241,9 @@ func parseAmountCents(s string) (int64, error) {
 	ip, err := strconv.ParseInt(intPart, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("malformed amount %q: %w", s, err)
+	}
+	if ip > maxAmountReais {
+		return 0, fmt.Errorf("amount %q exceeds per-charge ceiling", s)
 	}
 	var fp int64
 	if fracPart != "" {

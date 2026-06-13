@@ -100,3 +100,40 @@ func TestStubIdempotencyKeyDedup(t *testing.T) {
 		t.Fatalf("cross-tenant same key: %v", err)
 	}
 }
+
+func TestStubMarkSettledReconcilesFullAmount(t *testing.T) {
+	t.Parallel()
+	creds := secret.NewStore(map[string]ports.BankCredential{"t1": {ClientID: "c", Secret: "s"}})
+	p := bank.NewStubProvider(creds)
+	ctx := context.Background()
+
+	res, err := p.CreateCharge(ctx, "t1", ports.ChargeRequest{TenantID: "t1", PaymentID: "pay1", AmountCents: 100, Currency: "BRL"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if res.ExpectedAmountCents != 100 || res.ReceivedAmountCents != 0 {
+		t.Fatalf("pending charge: %+v", res)
+	}
+	p.MarkSettled("t1", res.TxID)
+	got, _ := p.GetCharge(ctx, "t1", res.TxID)
+	if got.ReceivedAmountCents != 100 || !got.AmountReconciled() {
+		t.Fatalf("full settlement must reconcile: %+v", got)
+	}
+}
+
+func TestStubMarkSettledWithReceivedDiverges(t *testing.T) {
+	t.Parallel()
+	creds := secret.NewStore(map[string]ports.BankCredential{"t1": {ClientID: "c", Secret: "s"}})
+	p := bank.NewStubProvider(creds)
+	ctx := context.Background()
+
+	res, _ := p.CreateCharge(ctx, "t1", ports.ChargeRequest{TenantID: "t1", PaymentID: "pay1", AmountCents: 100})
+	p.MarkSettledWithReceived("t1", res.TxID, 60)
+	got, _ := p.GetCharge(ctx, "t1", res.TxID)
+	if got.Status != "paid" {
+		t.Fatalf("status: %q", got.Status)
+	}
+	if got.ReceivedAmountCents != 60 || got.AmountReconciled() {
+		t.Fatalf("partial settlement must NOT reconcile: %+v", got)
+	}
+}

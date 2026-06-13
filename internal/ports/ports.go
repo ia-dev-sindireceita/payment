@@ -187,10 +187,47 @@ type ChargeRequest struct {
 	IdempotencyKey string
 }
 
-// ChargeResult is the bank's response to a charge creation.
+// ChargeResult is the bank's response to a generic charge (the non-PIX charge
+// surface, e.g. C6 GET /charges/{txid}). It carries the reconciled lifecycle
+// status plus the money needed to reconcile a settlement.
+//
+//   - Status is the PSP's charge status verbatim ("paid", "pending", ...).
+//     Settlement reads this from GetCharge, never from a raw webhook
+//     (reconcile-before-settle, threat W3).
+//   - ExpectedAmountCents is the charge's original amount (valor.original) in
+//     cents — what the payer was asked to pay.
+//   - ReceivedAmountCents is the amount actually received in cents (the sum of
+//     the reconciled receipts). It is zero while the charge is unpaid and equals
+//     the expected amount on a correctly paid charge.
+//
+// Reconciling only Status proves the charge is marked paid; it does NOT prove the
+// payer paid the right amount. Settlement MUST also assert the money adds up
+// (AmountReconciled) before liquidating — a partial payment, an adjustable charge
+// paid to a different value, or manipulation would otherwise settle for the wrong
+// amount (reconcile-before-settle, threat W3).
+//
+// It is intentionally kept distinct from PixChargeResult (ISP): a PIX charge
+// carries QR lifecycle data a generic charge does not, so the two result types are
+// not collapsed even though both now carry expected/received cents.
 type ChargeResult struct {
-	TxID   string
-	Status string
+	TxID                string
+	Status              string
+	ExpectedAmountCents int64
+	ReceivedAmountCents int64
+}
+
+// AmountReconciled reports whether the amount received on this charge exactly
+// matches the amount that was expected (original). It mirrors
+// PixChargeResult.AmountReconciled: a non-positive expected amount is never
+// reconciled (a degenerate charge would otherwise fail open), and overpayment
+// (received > expected) is a divergence too, so the check is strict equality.
+//
+// The generic webhook settlement path asserts this inside its transactional
+// boundary, in addition to a paid status, before liquidating; a false result is a
+// divergence (shared.ErrAmountMismatch territory) that blocks settlement and
+// raises an audit event.
+func (r ChargeResult) AmountReconciled() bool {
+	return r.ExpectedAmountCents > 0 && r.ReceivedAmountCents == r.ExpectedAmountCents
 }
 
 // BankProvider is the output port for the bank/PSP (C6 first). A stub

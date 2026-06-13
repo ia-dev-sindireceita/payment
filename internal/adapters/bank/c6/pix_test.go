@@ -698,3 +698,37 @@ func TestFormatParseAmountRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestParseAmountCentsOverflowCeiling asserts the shared parser rejects amounts
+// above the per-charge sanity ceiling explicitly, rather than relying on int64
+// wrap-around being caught downstream by the >0 reconciliation guard (SIN-64777
+// defense-in-depth). The ceiling boundary itself is accepted.
+func TestParseAmountCentsOverflowCeiling(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{"at ceiling accepted", "1000000000000.00", false},
+		{"just above ceiling rejected", "1000000000001.00", true},
+		{"absurd magnitude that would overflow int64 rejected", "100000000000000000.00", true},
+		{"absurd negative magnitude rejected", "-100000000000000000.00", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseAmountCents(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseAmountCents(%q): want error, got %d", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseAmountCents(%q): unexpected error %v", tc.in, err)
+			}
+		})
+	}
+}

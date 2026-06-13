@@ -75,3 +75,69 @@ func TestKnownActionsValid(t *testing.T) {
 		}
 	}
 }
+
+func TestNewSettlementMismatchEntry(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1000, 0).UTC()
+	e, err := audit.NewSettlementMismatchEntry("  id-1  ", "system:c6-webhook", "  ten-9  ", "  tx_abc  ", 10000, 6000, at)
+	if err != nil {
+		t.Fatalf("NewSettlementMismatchEntry: %v", err)
+	}
+	if e.ID() != "id-1" {
+		t.Fatalf("id not trimmed: %q", e.ID())
+	}
+	if e.OperatorID() != "system:c6-webhook" {
+		t.Fatalf("operator: %q", e.OperatorID())
+	}
+	if e.Action() != audit.ActionSettlementAmountMismatch {
+		t.Fatalf("action: %q", e.Action())
+	}
+	if e.TenantID() != "ten-9" {
+		t.Fatalf("tenant not trimmed: %q", e.TenantID())
+	}
+	if e.TxID() != "tx_abc" {
+		t.Fatalf("txid not trimmed: %q", e.TxID())
+	}
+	if e.ExpectedCents() != 10000 || e.ReceivedCents() != 6000 {
+		t.Fatalf("amounts: expected=%d received=%d", e.ExpectedCents(), e.ReceivedCents())
+	}
+	if !e.At().Equal(at) {
+		t.Fatalf("at: %v", e.At())
+	}
+}
+
+func TestNewSettlementMismatchEntryValidation(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1000, 0).UTC()
+	cases := []struct {
+		name             string
+		id, tenant, txID string
+	}{
+		{"empty id", "", "ten", "tx"},
+		{"blank id", "   ", "ten", "tx"},
+		{"empty tenant", "id", "", "tx"},
+		{"empty txid", "id", "ten", ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := audit.NewSettlementMismatchEntry(tc.id, "system:c6-webhook", tc.tenant, tc.txID, 1, 1, at); err == nil {
+				t.Fatalf("%s: want error, got nil", tc.name)
+			}
+		})
+	}
+}
+
+// TestSettlementMismatchActionIsValid asserts the new action is in the
+// deny-by-default vocabulary so NewEntry accepts it too (admin entries built with
+// it still validate), and an unknown action is still rejected.
+func TestSettlementMismatchActionIsValid(t *testing.T) {
+	t.Parallel()
+	if _, err := audit.NewEntry("id", "op", audit.ActionSettlementAmountMismatch, "ten", time.Now()); err != nil {
+		t.Fatalf("settlement.amount_mismatch should be a valid action: %v", err)
+	}
+	if _, err := audit.NewEntry("id", "op", audit.Action("bogus.unknown"), "ten", time.Now()); err == nil {
+		t.Fatal("unknown action must be rejected (deny-by-default)")
+	}
+}
