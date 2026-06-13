@@ -220,6 +220,36 @@ func (p *Provider) GetCharge(ctx context.Context, tenantID, txID string) (ports.
 	return ports.ChargeResult{TxID: out.TxID, Status: out.Status}, nil
 }
 
+// authedJSONRequest builds an HTTP request for tenant carrying a fresh per-tenant
+// OAuth2 bearer token and JSON Accept/Content-Type headers. When body is non-nil
+// it is sent as the JSON request body. idem, when non-empty, is forwarded as the
+// PSP Idempotency-Key so retried/concurrent writes collapse to one effect. It
+// centralises the auth + header plumbing the consent/boleto/checkout operations
+// share so each operation file stays focused on its own request/response shape.
+func (p *Provider) authedJSONRequest(ctx context.Context, tenantID, op, method, endpoint string, body []byte, idem string) (*http.Request, error) {
+	token, err := p.tokens.token(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, rdr)
+	if err != nil {
+		return nil, transportError(op)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if idem != "" {
+		req.Header.Set("Idempotency-Key", idem)
+	}
+	return req, nil
+}
+
 // do executes an authenticated request, maps a non-2xx into a domain error, and
 // decodes a 2xx body into dst. The response body is always drained and closed and
 // read under a size cap; raw body bytes never escape into an error.
