@@ -69,11 +69,20 @@ func (s *Server) Router() http.Handler {
 		r.Get("/charges/{id}", s.handleGetCharge)
 	})
 
-	// Admin plane (TB6) — admin auth, segregated from tenant plane.
+	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route
+	// is behind adminAuthMiddleware (deny-by-default; a tenant token never
+	// resolves to a role and is rejected). Mutations additionally require the full
+	// RoleAdmin; RoleOperator is read-only (least privilege). Read routes that
+	// admit operators are added by the admin-UI child guarded by
+	// requireRole(RoleAdmin, RoleOperator).
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(adminAuthMiddleware(s.adminAuth))
-		r.Post("/tenants", s.handleCreateTenant)
-		r.Post("/tenants/{tenantID}/pricing", s.handleSetPrice)
+		r.Group(func(r chi.Router) {
+			r.Use(requireRole(RoleAdmin))
+			r.Post("/tenants", s.handleCreateTenant)
+			r.Post("/tenants/{tenantID}/pricing", s.handleSetPrice)
+			r.Put("/tenants/{tenantID}/bank-credential", s.handleSetBankCredential)
+		})
 	})
 
 	// Bank webhook (TB1→TB5) — failure-closed auth in the handler, rate-limited.

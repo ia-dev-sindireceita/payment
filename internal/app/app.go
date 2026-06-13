@@ -22,6 +22,10 @@ type Deps struct {
 	Bus         ports.MessageBus
 	Bank        ports.BankProvider
 	Credentials ports.CredentialStore
-	Clock       ports.Clock
-	IDs         ports.IDProvider
+	// CredWriter is the admin-plane write path for per-tenant bank credentials.
+	// Kept separate from Credentials (the reader) so each service depends only on
+	// the capability it needs.
+	CredWriter ports.CredentialWriter
+	Clock      ports.Clock
+	IDs        ports.IDProvider
 }

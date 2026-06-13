@@ -13,25 +13,27 @@ import (
 
 // Config is the resolved process configuration.
 type Config struct {
-	HTTPAddr      string
-	DBPath        string
-	TenantTokens  map[string]string // token -> tenantID
-	AdminTokens   []string
-	WebhookSecret string
-	BankCreds     map[string]ports.BankCredential // tenantID -> credential
-	RabbitURL     string
+	HTTPAddr       string
+	DBPath         string
+	TenantTokens   map[string]string // token -> tenantID
+	AdminTokens    []string          // full-access admin tokens (RoleAdmin)
+	OperatorTokens []string          // read-only admin tokens (RoleOperator)
+	WebhookSecret  string
+	BankCreds      map[string]ports.BankCredential // tenantID -> credential
+	RabbitURL      string
 }
 
 // FromEnv builds a Config from environment variables, applying safe defaults.
 func FromEnv() Config {
 	return Config{
-		HTTPAddr:      getenv("PAYMENT_HTTP_ADDR", ":8080"),
-		DBPath:        getenv("PAYMENT_DB_PATH", "payment.db"),
-		TenantTokens:  parseKV(os.Getenv("PAYMENT_TENANT_TOKENS")),
-		AdminTokens:   splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
-		WebhookSecret: os.Getenv("PAYMENT_WEBHOOK_SECRET"),
-		BankCreds:     parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS")),
-		RabbitURL:     os.Getenv("PAYMENT_RABBIT_URL"),
+		HTTPAddr:       getenv("PAYMENT_HTTP_ADDR", ":8080"),
+		DBPath:         getenv("PAYMENT_DB_PATH", "payment.db"),
+		TenantTokens:   parseKV(os.Getenv("PAYMENT_TENANT_TOKENS")),
+		AdminTokens:    splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
+		OperatorTokens: splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
+		WebhookSecret:  os.Getenv("PAYMENT_WEBHOOK_SECRET"),
+		BankCreds:      parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS")),
+		RabbitURL:      os.Getenv("PAYMENT_RABBIT_URL"),
 	}
 }
 

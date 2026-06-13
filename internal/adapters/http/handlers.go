@@ -147,6 +147,35 @@ func (s *Server) handleSetPrice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, priceView{TenantID: p.TenantID(), Endpoint: p.Endpoint(), PriceCents: p.PriceCents()})
 }
 
+// setBankCredentialRequest carries a tenant's PSP credential. The secret is
+// write-only: it is accepted here and forwarded to the secret store, never read
+// back, logged or echoed in any response (threat C1/C4).
+type setBankCredentialRequest struct {
+	ClientID string `json:"client_id"`
+	Secret   string `json:"secret"`
+}
+
+// bankCredentialView confirms a credential write WITHOUT the secret.
+type bankCredentialView struct {
+	TenantID string `json:"tenant_id"`
+	ClientID string `json:"client_id"`
+	Status   string `json:"status"`
+}
+
+func (s *Server) handleSetBankCredential(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantID")
+	var req setBankCredentialRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.admin.SetBankCredential(r.Context(), tenantID, req.ClientID, req.Secret); err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	// Echo only non-secret fields so the secret never leaves the secret store.
+	writeJSON(w, http.StatusOK, bankCredentialView{TenantID: tenantID, ClientID: req.ClientID, Status: "ok"})
+}
+
 // --- Bank webhook ---
 
 type webhookRequest struct {

@@ -60,11 +60,25 @@ func run() error {
 		Bus:         inmemory.NewBus(),
 		Bank:        bank.NewStubProvider(creds),
 		Credentials: creds,
+		CredWriter:  creds,
 		Clock:       system.Clock{},
 		IDs:         system.IDProvider{},
 	}
 
-	auth := httpadapter.NewStaticTokenAuth(cfg.TenantTokens, cfg.AdminTokens, cfg.WebhookSecret)
+	// Derive admin roles server-side from configured tokens (least privilege):
+	// PAYMENT_ADMIN_TOKENS → full admin, PAYMENT_OPERATOR_TOKENS → read-only.
+	adminRoles := make(map[string]httpadapter.Role, len(cfg.AdminTokens)+len(cfg.OperatorTokens))
+	for _, t := range cfg.AdminTokens {
+		adminRoles[t] = httpadapter.RoleAdmin
+	}
+	for _, t := range cfg.OperatorTokens {
+		// An operator token that is also an admin token keeps the stronger admin
+		// role (do not downgrade).
+		if _, isAdmin := adminRoles[t]; !isAdmin {
+			adminRoles[t] = httpadapter.RoleOperator
+		}
+	}
+	auth := httpadapter.NewStaticTokenAuthWithRoles(cfg.TenantTokens, adminRoles, cfg.WebhookSecret)
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:     app.NewChargeService(deps),
 		Admin:       app.NewAdminService(deps),

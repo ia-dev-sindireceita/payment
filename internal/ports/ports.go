@@ -98,6 +98,14 @@ type CredentialStore interface {
 	GetBankCredential(ctx context.Context, tenantID string) (BankCredential, error)
 }
 
+// CredentialWriter is the write path for per-tenant bank credentials (admin
+// plane). It is kept separate from CredentialStore (the reader) so use-cases
+// depend only on the capability they need (ISP). The secret transits straight to
+// the store: it MUST NOT enter domain state, logs, errors or URLs (threat C1/C4).
+type CredentialWriter interface {
+	SetBankCredential(ctx context.Context, tenantID, clientID, secret string) error
+}
+
 // ChargeRequest is the input to create a charge at the bank.
 type ChargeRequest struct {
 	TenantID    string
