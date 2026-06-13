@@ -28,4 +28,10 @@ type Deps struct {
 	CredWriter ports.CredentialWriter
 	Clock      ports.Clock
 	IDs        ports.IDProvider
+	// UoW is the transactional boundary used by multi-write use-cases. Production
+	// wiring MUST supply one (the SQLite adapter implements it) so charge creation
+	// and settlement are atomic. When nil, services fall back to an autocommit
+	// unit of work (each write commits on its own) — acceptable only for unit
+	// tests that inject per-port fakes, never for storage-backed production use.
+	UoW ports.UnitOfWork
 }

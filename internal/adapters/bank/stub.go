@@ -55,6 +55,16 @@ func (s *StubProvider) GetCharge(ctx context.Context, tenantID, txID string) (po
 	return res, nil
 }
 
+// ChargeCount returns the number of distinct charges held by the stub. Because a
+// charge's txid is derived deterministically from the payment id, charging the
+// same payment id more than once collapses to a single entry — so this counts
+// distinct charges (test/dev hook for asserting no double-charge).
+func (s *StubProvider) ChargeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.charges)
+}
+
 // MarkSettled flips a charge to paid (test/dev hook simulating the bank settling).
 func (s *StubProvider) MarkSettled(tenantID, txID string) {
 	s.mu.Lock()

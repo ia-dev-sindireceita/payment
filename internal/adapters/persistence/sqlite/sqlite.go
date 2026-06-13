@@ -65,28 +65,63 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 	return nil
 }
 
-// Store implements the repository ports over a *sql.DB.
+// dbtx is the subset of *sql.DB / *sql.Tx the queries use, so the same query code
+// runs both autocommitted (on the pool) and inside a transaction.
+type dbtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// repo holds the SQL implementing the repository ports over a dbtx.
+type repo struct{ q dbtx }
+
+// Store implements the repository ports and the unit-of-work port over a *sql.DB.
+// Its repository methods run autocommitted on the connection pool; WithinTx runs
+// them inside a single transaction.
 type Store struct {
 	db *sql.DB
+	repo
 }
 
 // NewStore wraps a database handle.
-func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+func NewStore(db *sql.DB) *Store { return &Store{db: db, repo: repo{q: db}} }
 
-// Compile-time checks that Store satisfies the repository ports.
+// Compile-time checks that the adapter satisfies the persistence ports.
 var (
 	_ ports.PaymentRepository   = (*Store)(nil)
 	_ ports.TenantRepository    = (*Store)(nil)
 	_ ports.PricingRepository   = (*Store)(nil)
 	_ ports.LedgerRepository    = (*Store)(nil)
 	_ ports.ProcessedEventStore = (*Store)(nil)
+	_ ports.Repository          = (*Store)(nil)
+	_ ports.UnitOfWork          = (*Store)(nil)
+	_ ports.Repository          = repo{}
 )
+
+// WithinTx runs fn inside a single BEGIN/COMMIT transaction. All writes through
+// the supplied Repository commit together when fn returns nil and roll back when
+// it returns an error. This is the transactional boundary the multi-write
+// use-cases rely on for financial integrity (SIN-64719).
+func (s *Store) WithinTx(ctx context.Context, fn func(ports.Repository) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	if err := fn(repo{q: tx}); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
+	return nil
+}
 
 // --- Tenants ---
 
 // SaveTenant inserts or updates a tenant.
-func (s *Store) SaveTenant(ctx context.Context, t *tenant.Tenant) error {
-	_, err := s.db.ExecContext(ctx,
+func (r repo) SaveTenant(ctx context.Context, t *tenant.Tenant) error {
+	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO tenants (id, name, active, created_at) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET name = excluded.name, active = excluded.active`,
 		t.ID(), t.Name(), boolToInt(t.Active()), t.CreatedAt().Format(tsLayout))
@@ -97,8 +132,8 @@ func (s *Store) SaveTenant(ctx context.Context, t *tenant.Tenant) error {
 }
 
 // FindTenantByID returns a tenant or ErrNotFound.
-func (s *Store) FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, active, created_at FROM tenants WHERE id = ?`, id)
+func (r repo) FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, error) {
+	row := r.q.QueryRowContext(ctx, `SELECT id, name, active, created_at FROM tenants WHERE id = ?`, id)
 	var gotID, name, createdAt string
 	var active int
 	if err := row.Scan(&gotID, &name, &active, &createdAt); err != nil {
@@ -136,43 +171,48 @@ func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
 
 // --- Payments (tenant-scoped) ---
 
-// SavePayment inserts or updates a payment.
-func (s *Store) SavePayment(ctx context.Context, p *payment.Payment) error {
-	_, err := s.db.ExecContext(ctx,
+// SavePayment inserts or updates a payment. A second payment reusing a tenant's
+// idempotency key violates ux_payments_tenant_idempotency and surfaces as
+// shared.ErrConflict so the use-case can resolve the race (no double charge).
+func (r repo) SavePayment(ctx context.Context, p *payment.Payment) error {
+	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO payments (id, tenant_id, endpoint, amount_cents, currency, status, tx_id, idempotency_key, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET status = excluded.status, tx_id = excluded.tx_id, updated_at = excluded.updated_at`,
 		p.ID(), p.TenantID(), p.Endpoint(), p.Amount().Cents(), p.Amount().Currency(),
 		string(p.Status()), p.TxID(), p.IdempotencyKey(), p.CreatedAt().Format(tsLayout), p.UpdatedAt().Format(tsLayout))
 	if err != nil {
+		if isUniqueViolation(err) {
+			return shared.ErrConflict
+		}
 		return fmt.Errorf("save payment: %w", err)
 	}
 	return nil
 }
 
 // FindPaymentByID returns a tenant-scoped payment or ErrNotFound.
-func (s *Store) FindPaymentByID(ctx context.Context, tenantID, id string) (*payment.Payment, error) {
-	return s.queryPayment(ctx,
+func (r repo) FindPaymentByID(ctx context.Context, tenantID, id string) (*payment.Payment, error) {
+	return r.queryPayment(ctx,
 		`SELECT id, tenant_id, endpoint, amount_cents, currency, status, tx_id, idempotency_key, created_at, updated_at
 		 FROM payments WHERE tenant_id = ? AND id = ?`, tenantID, id)
 }
 
 // FindPaymentByIdempotencyKey returns a tenant-scoped payment by idempotency key.
-func (s *Store) FindPaymentByIdempotencyKey(ctx context.Context, tenantID, key string) (*payment.Payment, error) {
-	return s.queryPayment(ctx,
+func (r repo) FindPaymentByIdempotencyKey(ctx context.Context, tenantID, key string) (*payment.Payment, error) {
+	return r.queryPayment(ctx,
 		`SELECT id, tenant_id, endpoint, amount_cents, currency, status, tx_id, idempotency_key, created_at, updated_at
 		 FROM payments WHERE tenant_id = ? AND idempotency_key = ?`, tenantID, key)
 }
 
 // FindPaymentByTxID returns a tenant-scoped payment by bank tx id.
-func (s *Store) FindPaymentByTxID(ctx context.Context, tenantID, txID string) (*payment.Payment, error) {
-	return s.queryPayment(ctx,
+func (r repo) FindPaymentByTxID(ctx context.Context, tenantID, txID string) (*payment.Payment, error) {
+	return r.queryPayment(ctx,
 		`SELECT id, tenant_id, endpoint, amount_cents, currency, status, tx_id, idempotency_key, created_at, updated_at
 		 FROM payments WHERE tenant_id = ? AND tx_id = ?`, tenantID, txID)
 }
 
-func (s *Store) queryPayment(ctx context.Context, query string, args ...any) (*payment.Payment, error) {
-	row := s.db.QueryRowContext(ctx, query, args...)
+func (r repo) queryPayment(ctx context.Context, query string, args ...any) (*payment.Payment, error) {
+	row := r.q.QueryRowContext(ctx, query, args...)
 	var id, tenantID, endpoint, currency, status, txID, idemKey, createdAt, updatedAt string
 	var cents int64
 	if err := row.Scan(&id, &tenantID, &endpoint, &cents, &currency, &status, &txID, &idemKey, &createdAt, &updatedAt); err != nil {
@@ -191,8 +231,8 @@ func (s *Store) queryPayment(ctx context.Context, query string, args ...any) (*p
 // --- Pricing ---
 
 // GetEndpointPrice returns the price for a tenant × endpoint or ErrNotFound.
-func (s *Store) GetEndpointPrice(ctx context.Context, tenantID, endpoint string) (billing.EndpointPricing, error) {
-	row := s.db.QueryRowContext(ctx,
+func (r repo) GetEndpointPrice(ctx context.Context, tenantID, endpoint string) (billing.EndpointPricing, error) {
+	row := r.q.QueryRowContext(ctx,
 		`SELECT tenant_id, endpoint, price_cents FROM endpoint_pricing WHERE tenant_id = ? AND endpoint = ?`,
 		tenantID, endpoint)
 	var gotTenant, gotEndpoint string
@@ -207,8 +247,8 @@ func (s *Store) GetEndpointPrice(ctx context.Context, tenantID, endpoint string)
 }
 
 // UpsertEndpointPrice inserts or updates a pricing rule.
-func (s *Store) UpsertEndpointPrice(ctx context.Context, p billing.EndpointPricing) error {
-	_, err := s.db.ExecContext(ctx,
+func (r repo) UpsertEndpointPrice(ctx context.Context, p billing.EndpointPricing) error {
+	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO endpoint_pricing (tenant_id, endpoint, price_cents) VALUES (?, ?, ?)
 		 ON CONFLICT(tenant_id, endpoint) DO UPDATE SET price_cents = excluded.price_cents`,
 		p.TenantID(), p.Endpoint(), p.PriceCents())
@@ -249,8 +289,8 @@ func (s *Store) ListEndpointPrices(ctx context.Context, tenantID string) ([]bill
 // --- Ledger ---
 
 // AppendLedgerEntry appends a billable event (append-only).
-func (s *Store) AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) error {
-	_, err := s.db.ExecContext(ctx,
+func (r repo) AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) error {
+	_, err := r.q.ExecContext(ctx,
 		`INSERT INTO billing_ledger (id, tenant_id, endpoint, price_cents, reference, at) VALUES (?, ?, ?, ?, ?, ?)`,
 		e.ID(), e.TenantID(), e.Endpoint(), e.PriceCents(), e.Reference(), e.At().Format(tsLayout))
 	if err != nil {
@@ -292,8 +332,8 @@ func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billi
 
 // MarkProcessed atomically records an event key for a tenant. Returns false if
 // the key was already present (duplicate/replay).
-func (s *Store) MarkProcessed(ctx context.Context, tenantID, eventKey string) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
+func (r repo) MarkProcessed(ctx context.Context, tenantID, eventKey string) (bool, error) {
+	res, err := r.q.ExecContext(ctx,
 		`INSERT INTO processed_events (tenant_id, event_key, processed_at) VALUES (?, ?, ?)
 		 ON CONFLICT(tenant_id, event_key) DO NOTHING`,
 		tenantID, eventKey, time.Now().UTC().Format(tsLayout))
@@ -305,6 +345,14 @@ func (s *Store) MarkProcessed(ctx context.Context, tenantID, eventKey string) (b
 		return false, fmt.Errorf("rows affected: %w", err)
 	}
 	return n > 0, nil
+}
+
+// isUniqueViolation reports whether err is a SQLite UNIQUE constraint failure.
+// On the payments table the only such constraint reachable from an INSERT (the
+// primary key is absorbed by ON CONFLICT(id) DO UPDATE) is the per-tenant
+// idempotency-key index, so the use-case can treat it as an idempotency conflict.
+func isUniqueViolation(err error) bool {
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 func boolToInt(b bool) int {
