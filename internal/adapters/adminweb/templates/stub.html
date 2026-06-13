@@ -1,0 +1,10 @@
+{{define "body"}}
+{{if .BackHref}}<p class="breadcrumb"><a href="{{.BackHref}}" hx-get="{{.BackHref}}" hx-target="#main" hx-push-url="true">‹ Voltar</a></p>{{end}}
+<div class="topbar"><h1>{{.Heading}}</h1></div>
+<div class="card">
+  <div class="empty">
+    <h2>Em breve</h2>
+    <p>{{.Message}}</p>
+  </div>
+</div>
+{{end}}

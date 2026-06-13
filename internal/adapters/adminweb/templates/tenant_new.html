@@ -1,0 +1,49 @@
+{{define "body"}}
+<p class="breadcrumb"><a href="/console/tenants" hx-get="/console/tenants" hx-target="#main" hx-push-url="true">‹ Tenants</a> / Novo tenant</p>
+<div class="topbar"><h1>Novo tenant</h1></div>
+
+<form class="form card" method="post" action="/console/tenants"
+      hx-post="/console/tenants" hx-target="#main" hx-swap="innerHTML">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  {{if .Errors.form}}<div class="banner banner--danger" role="alert">{{.Errors.form}}</div>{{end}}
+
+  <div class="field{{if .Errors.name}} has-error{{end}}">
+    <label for="f-name">Razão social *</label>
+    <input id="f-name" name="name" value="{{.Form.name}}" required maxlength="200" autocomplete="organization"
+           {{if eq .FirstError "name"}}autofocus{{end}}
+           {{if .Errors.name}}aria-invalid="true" aria-describedby="e-name"{{end}}>
+    {{if .Errors.name}}<span class="error" id="e-name" role="alert">{{.Errors.name}}</span>{{end}}
+  </div>
+
+  <div class="field{{if .Errors.cnpj}} has-error{{end}}">
+    <label for="f-cnpj">CNPJ *</label>
+    <input id="f-cnpj" name="cnpj" value="{{.Form.cnpj}}" required inputmode="numeric"
+           placeholder="00.000.000/0000-00"
+           {{if eq .FirstError "cnpj"}}autofocus{{end}}
+           {{if .Errors.cnpj}}aria-invalid="true" aria-describedby="e-cnpj"{{else}}aria-describedby="h-cnpj"{{end}}>
+    {{if .Errors.cnpj}}<span class="error" id="e-cnpj" role="alert">{{.Errors.cnpj}}</span>{{else}}<span class="help" id="h-cnpj">Aceita com ou sem máscara.</span>{{end}}
+  </div>
+
+  <div class="field{{if .Errors.display_name}} has-error{{end}}">
+    <label for="f-display">Nome de exibição</label>
+    <input id="f-display" name="display_name" value="{{.Form.display_name}}" maxlength="200"
+           {{if eq .FirstError "display_name"}}autofocus{{end}}
+           {{if .Errors.display_name}}aria-invalid="true" aria-describedby="e-display"{{else}}aria-describedby="h-display"{{end}}>
+    {{if .Errors.display_name}}<span class="error" id="e-display" role="alert">{{.Errors.display_name}}</span>{{else}}<span class="help" id="h-display">Opcional. Padrão: a razão social.</span>{{end}}
+  </div>
+
+  <div class="field{{if .Errors.email}} has-error{{end}}">
+    <label for="f-email">E-mail de contato *</label>
+    <input id="f-email" name="email" type="email" value="{{.Form.email}}" required autocomplete="email"
+           {{if eq .FirstError "email"}}autofocus{{end}}
+           {{if .Errors.email}}aria-invalid="true" aria-describedby="e-email"{{end}}>
+    {{if .Errors.email}}<span class="error" id="e-email" role="alert">{{.Errors.email}}</span>{{end}}
+  </div>
+
+  <p class="muted">Após criar, configure credenciais e tarifação no detalhe do tenant.</p>
+  <div class="form-actions">
+    <a class="btn btn--secondary" href="/console/tenants" hx-get="/console/tenants" hx-target="#main" hx-push-url="true">Cancelar</a>
+    <button class="btn btn--primary" type="submit">Criar tenant</button>
+  </div>
+</form>
+{{end}}

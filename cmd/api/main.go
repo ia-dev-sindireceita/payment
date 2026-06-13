@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/bank"
 	httpadapter "github.com/ia-dev-sindireceita/payment/internal/adapters/http"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/messaging/inmemory"
@@ -64,6 +65,16 @@ func run() error {
 		IDs:         system.IDProvider{},
 	}
 
+	// Admin console (server-rendered HTMX). Secure cookie flag should be enabled
+	// behind TLS; left false here as the app runs plain-HTTP behind an ingress.
+	console, err := adminweb.New(
+		app.NewConsoleService(store, system.Clock{}, system.IDProvider{}),
+		adminweb.Options{Secure: false},
+	)
+	if err != nil {
+		return err
+	}
+
 	auth := httpadapter.NewStaticTokenAuth(cfg.TenantTokens, cfg.AdminTokens, cfg.WebhookSecret)
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:     app.NewChargeService(deps),
@@ -72,6 +83,7 @@ func run() error {
 		TenantAuth:  auth,
 		AdminAuth:   auth,
 		WebhookAuth: auth,
+		Console:     console.Routes(),
 	})
 
 	httpServer := &stdhttp.Server{

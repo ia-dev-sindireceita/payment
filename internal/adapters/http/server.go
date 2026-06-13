@@ -20,6 +20,7 @@ type Server struct {
 	tenantAuth  TenantAuthenticator
 	adminAuth   AdminAuthenticator
 	webhookAuth WebhookAuthenticator
+	console     http.Handler
 }
 
 // Config wires a Server's dependencies.
@@ -30,6 +31,10 @@ type Config struct {
 	TenantAuth  TenantAuthenticator
 	AdminAuth   AdminAuthenticator
 	WebhookAuth WebhookAuthenticator
+	// Console is the optional server-rendered admin console (adminweb adapter),
+	// mounted at /console. It is passed as an http.Handler so the API adapter
+	// stays decoupled from the console package. Nil disables the console.
+	Console http.Handler
 }
 
 // NewServer builds a Server from its config.
@@ -41,6 +46,7 @@ func NewServer(c Config) *Server {
 		tenantAuth:  c.TenantAuth,
 		adminAuth:   c.AdminAuth,
 		webhookAuth: c.WebhookAuth,
+		console:     c.Console,
 	}
 }
 
@@ -81,6 +87,13 @@ func (s *Server) Router() http.Handler {
 		r.Use(webhookLimiter.middleware(func(req *http.Request) string { return "ip:" + clientIP(req) }))
 		r.Post("/webhooks/bank", s.handleWebhook)
 	})
+
+	// Admin console (server-rendered HTMX UI). It carries its own CSRF and
+	// security-header middleware; mounted only when configured. Distinct from the
+	// programmatic /admin JSON plane above.
+	if s.console != nil {
+		r.Mount("/console", s.console)
+	}
 
 	return r
 }

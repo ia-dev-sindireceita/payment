@@ -1,0 +1,41 @@
+{{define "body"}}
+{{with .Tenant}}
+<p class="breadcrumb"><a href="/console/tenants" hx-get="/console/tenants" hx-target="#main" hx-push-url="true">‹ Tenants</a> / {{.DisplayName}}</p>
+<div class="topbar">
+  <div>
+    <h1>{{.DisplayName}} <span id="tenant-status">{{template "status_badge" .}}</span></h1>
+    <p class="muted">CNPJ {{.CNPJMasked}} · criado {{.CreatedAtBR}}</p>
+  </div>
+  <span id="tenant-status-action">{{template "status_action" .}}</span>
+</div>
+
+<nav class="tabs" aria-label="Seções do tenant">
+  <a href="/console/tenants/{{.ID}}" aria-current="page">Visão geral</a>
+  <a href="/console/tenants/{{.ID}}/credentials"
+     hx-get="/console/tenants/{{.ID}}/credentials" hx-target="#main" hx-push-url="true">Credenciais</a>
+  <a href="/console/tenants/{{.ID}}/pricing"
+     hx-get="/console/tenants/{{.ID}}/pricing" hx-target="#main" hx-push-url="true">Tarifação</a>
+  <a href="/console/tenants/{{.ID}}/consumption"
+     hx-get="/console/tenants/{{.ID}}/consumption" hx-target="#main" hx-push-url="true">Consumo</a>
+</nav>
+
+<div class="card-grid">
+  <div class="card">
+    <h2>Dados</h2>
+    <dl class="dl">
+      <dt>Razão social</dt><dd>{{.Name}}</dd>
+      <dt>Nome de exibição</dt><dd>{{.DisplayName}}</dd>
+      <dt>CNPJ</dt><dd>{{.CNPJMasked}}</dd>
+      <dt>E-mail</dt><dd>{{if .Email}}{{.Email}}{{else}}<span class="muted">—</span>{{end}}</dd>
+      <dt>Status</dt><dd>{{template "status_badge" .}}</dd>
+    </dl>
+  </div>
+  <div class="card">
+    <h2>Resumo do mês</h2>
+    <p class="muted">Métricas de consumo e faturamento aparecerão aqui quando a tela de Consumo &amp; Billing estiver disponível.</p>
+    <p><a class="btn btn--ghost" href="/console/tenants/{{.ID}}/consumption"
+          hx-get="/console/tenants/{{.ID}}/consumption" hx-target="#main" hx-push-url="true">Ver consumo ›</a></p>
+  </div>
+</div>
+{{end}}
+{{end}}

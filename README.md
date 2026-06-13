@@ -48,6 +48,7 @@ de terceiros. Todo efeito colateral fica atrás de um *port* (interface), com
 | `internal/adapters/secret` | `CredentialStore` — credenciais bancárias isoladas por tenant, fora do código. |
 | `internal/adapters/system` | `Clock` e `IDProvider` (id aleatório, não sequencial). |
 | `internal/adapters/http` | Driving adapter HTTP: API tenant, admin, webhook, auth, rate-limit. |
+| `internal/adapters/adminweb` | Console administrativo server-rendered (HTMX/Go): tenants A–C, design-system, CSRF, fallback sem JS. |
 | `internal/platform/config` | Configuração via ambiente (segredos fora do código). |
 | `cmd/api`, `cmd/worker` | Entrypoints: wiring dos adapters + graceful shutdown. |
 | `migrations` | SQL portável (SQLite agora, Postgres depois), com passo de rollback. |
@@ -60,6 +61,22 @@ memória) é mudança **só de wiring** em `cmd/` — o domínio e os use-cases 
 mudam. Ambos os adapters de `Repository` implementam as mesmas interfaces em
 `internal/ports` e há teste de integração para o adapter SQLite
 (`internal/adapters/persistence/sqlite/sqlite_test.go`).
+
+### Console administrativo (HTMX/Go) — `/console`
+
+Superfície staff server-rendered ([SIN-64710], wireframes [SIN-64707]). Primeira
+pintura é página inteira; HTMX faz *partial swaps* e *out-of-band* (toasts/badges);
+**toda mutação tem fallback `<form method=post>` sem JS**. Saída escapada por
+`html/template` (XSS), CSRF em todo POST (cookie HttpOnly + token sincronizado),
+e cabeçalhos `Content-Security-Policy`/`X-Frame-Options` estritos.
+
+Entregue nesta fatia: design-system (`tokens.css` + componentes), **Tela A** (lista
+de tenants com busca/filtro/empty/loading), **Tela B** (cadastro com validação 422
+inline e foco no primeiro erro) e **Tela C** (detalhe + ativar/suspender com modal
+de confirmação e badge/toast OOB). Telas **D** (credenciais, com SecurityEngineer),
+**E** (tarifação) e **F** (consumo & billing) são issues-filhas que reusam esta
+infra. Autenticação/RBAC do console é injetada via `adminweb.Options.Auth`
+(decisão de Security/CTO — `nil` = aberto, só para dev/teste).
 
 ## Multi-tenancy e segurança (resumo)
 
