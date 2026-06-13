@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
@@ -53,6 +55,14 @@ type pixValor struct {
 	Original string `json:"original"`
 }
 
+// pixReceipt is one received PIX transaction inside a charge's pix[] array. Each
+// carries the amount actually received as a BACEN decimal string ("10.00"); a
+// CONCLUIDA charge may carry one or more. Only valor is consumed — the endToEndId,
+// payer and timestamps are unmodelled on purpose.
+type pixReceipt struct {
+	Valor string `json:"valor"`
+}
+
 // pixLoc is the QR-code location descriptor returned by the PSP.
 type pixLoc struct {
 	Location string `json:"location"`
@@ -70,8 +80,13 @@ type pixChargeResponseBody struct {
 	TxID          string        `json:"txid"`
 	Status        string        `json:"status"`
 	Calendario    pixCalendario `json:"calendario"`
+	Valor         pixValor      `json:"valor"`
 	Loc           pixLoc        `json:"loc"`
 	PixCopiaECola string        `json:"pixCopiaECola"`
+	// Pix is the list of received transactions, present once the charge has been
+	// paid (CONCLUIDA). Reconciliation sums each receipt's valor to learn how much
+	// was actually received versus valor.original.
+	Pix []pixReceipt `json:"pix"`
 }
 
 // CreateImmediateCharge creates an immediate PIX charge at C6 via an idempotent
@@ -131,7 +146,7 @@ func (p *Provider) CreateImmediateCharge(ctx context.Context, tenantID string, r
 	if err := p.do(httpReq, "create_pix", &out); err != nil {
 		return ports.PixChargeResult{}, err
 	}
-	return p.toPixResult(out), nil
+	return p.toPixResult(out, "create_pix")
 }
 
 // GetImmediateCharge reconciles the authoritative state of a PIX charge from C6.
@@ -156,19 +171,83 @@ func (p *Provider) GetImmediateCharge(ctx context.Context, tenantID, txID string
 	if err := p.do(httpReq, "get_pix", &out); err != nil {
 		return ports.PixChargeResult{}, err
 	}
-	return p.toPixResult(out), nil
+	return p.toPixResult(out, "get_pix")
 }
 
 // toPixResult maps the PSP wire shape into the port result, computing the QR
-// expiry from the charge calendar.
-func (p *Provider) toPixResult(b pixChargeResponseBody) ports.PixChargeResult {
-	return ports.PixChargeResult{
-		TxID:           b.TxID,
-		Status:         b.Status,
-		QRCodePayload:  b.PixCopiaECola,
-		QRCodeLocation: b.Loc.Location,
-		ExpiresAt:      p.pixExpiresAt(b.Calendario),
+// expiry from the charge calendar and reconciling the money: valor.original is
+// the expected amount and the sum of the pix[] receipts is what was received.
+//
+// Amount parsing is fail-secure for settlement. An absent amount (empty string)
+// reconciles to zero cents — an unpaid charge carries no receipts and a create
+// response need not echo valor — and AmountReconciled then refuses to settle. A
+// present-but-malformed amount, however, is a corrupt money field we must not
+// silently read as zero, so it maps to ErrUnavailable (malformed upstream body),
+// matching how a malformed 2xx body is already handled.
+func (p *Provider) toPixResult(b pixChargeResponseBody, op string) (ports.PixChargeResult, error) {
+	expected, err := parseAmountCents(b.Valor.Original)
+	if err != nil {
+		return ports.PixChargeResult{}, &Error{Op: op, sentinel: shared.ErrUnavailable}
 	}
+	var received int64
+	for _, r := range b.Pix {
+		amount, err := parseAmountCents(r.Valor)
+		if err != nil {
+			return ports.PixChargeResult{}, &Error{Op: op, sentinel: shared.ErrUnavailable}
+		}
+		received += amount
+	}
+	return ports.PixChargeResult{
+		TxID:                b.TxID,
+		Status:              b.Status,
+		QRCodePayload:       b.PixCopiaECola,
+		QRCodeLocation:      b.Loc.Location,
+		ExpiresAt:           p.pixExpiresAt(b.Calendario),
+		ExpectedAmountCents: expected,
+		ReceivedAmountCents: received,
+	}, nil
+}
+
+// parseAmountCents parses a BACEN decimal amount string ("10.50") into integer
+// cents (1050). It is the inverse of formatAmount and tolerates 0..2 fractional
+// digits. An empty string yields zero cents with no error (the amount was not
+// reported); any other malformed input is an error so callers never read corrupt
+// money as zero.
+func parseAmountCents(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	intPart, fracPart := s, ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		intPart, fracPart = s[:i], s[i+1:]
+	}
+	if intPart == "" || len(fracPart) > 2 {
+		return 0, fmt.Errorf("malformed amount %q", s)
+	}
+	ip, err := strconv.ParseInt(intPart, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("malformed amount %q: %w", s, err)
+	}
+	var fp int64
+	if fracPart != "" {
+		// Pad to 2 digits so "10.5" -> 50 cents, "10.05" -> 5 cents.
+		for len(fracPart) < 2 {
+			fracPart += "0"
+		}
+		if fp, err = strconv.ParseInt(fracPart, 10, 64); err != nil {
+			return 0, fmt.Errorf("malformed amount %q: %w", s, err)
+		}
+	}
+	cents := ip*100 + fp
+	if neg {
+		cents = -cents
+	}
+	return cents, nil
 }
 
 // pixExpiresAt derives the QR expiry instant: the PSP-assigned creation time plus

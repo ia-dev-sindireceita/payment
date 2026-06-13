@@ -494,3 +494,207 @@ func TestCreateImmediateChargeNonPositiveAmountRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestGetImmediateChargeReconcilesAmount proves the reconciled result carries
+// both the expected (valor.original) and received (sum of pix[].valor) amounts,
+// and that a CONCLUIDA charge paid in full reconciles.
+func TestGetImmediateChargeReconcilesAmount(t *testing.T) {
+	t.Parallel()
+	ts := newPixTestServer(t)
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	ts.cobs["tx-paid"] = pixChargeResponseBody{
+		TxID:       "tx-paid",
+		Status:     "CONCLUIDA",
+		Calendario: pixCalendario{Criacao: now.Add(-time.Minute).Format(time.RFC3339), Expiracao: 3600},
+		Valor:      pixValor{Original: "10.50"},
+		Pix:        []pixReceipt{{Valor: "10.50"}},
+	}
+	p := ts.provider(t, oneTenant("t1", "c", "s"), fixedClock(now))
+
+	res, err := p.GetImmediateCharge(context.Background(), "t1", "tx-paid")
+	if err != nil {
+		t.Fatalf("GetImmediateCharge: %v", err)
+	}
+	if res.ExpectedAmountCents != 1050 {
+		t.Fatalf("expected amount: want 1050, got %d", res.ExpectedAmountCents)
+	}
+	if res.ReceivedAmountCents != 1050 {
+		t.Fatalf("received amount: want 1050, got %d", res.ReceivedAmountCents)
+	}
+	if !res.AmountReconciled() {
+		t.Fatalf("a fully-paid charge must reconcile: %+v", res)
+	}
+}
+
+// TestGetImmediateChargeAmountMismatch proves a charge paid to a lesser value
+// does not reconcile even when its status is CONCLUIDA — the signal a settlement
+// use-case uses to refuse liquidation (threat W3).
+func TestGetImmediateChargeAmountMismatch(t *testing.T) {
+	t.Parallel()
+	ts := newPixTestServer(t)
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	ts.cobs["tx-partial"] = pixChargeResponseBody{
+		TxID:       "tx-partial",
+		Status:     "CONCLUIDA",
+		Calendario: pixCalendario{Criacao: now.Add(-time.Minute).Format(time.RFC3339), Expiracao: 3600},
+		Valor:      pixValor{Original: "10.50"},
+		Pix:        []pixReceipt{{Valor: "5.00"}},
+	}
+	p := ts.provider(t, oneTenant("t1", "c", "s"), fixedClock(now))
+
+	res, err := p.GetImmediateCharge(context.Background(), "t1", "tx-partial")
+	if err != nil {
+		t.Fatalf("GetImmediateCharge: %v", err)
+	}
+	if res.Status != "CONCLUIDA" {
+		t.Fatalf("status: want CONCLUIDA, got %q", res.Status)
+	}
+	if res.ExpectedAmountCents != 1050 || res.ReceivedAmountCents != 500 {
+		t.Fatalf("amounts: want expected=1050 received=500, got expected=%d received=%d",
+			res.ExpectedAmountCents, res.ReceivedAmountCents)
+	}
+	if res.AmountReconciled() {
+		t.Fatalf("a partial payment must NOT reconcile: %+v", res)
+	}
+}
+
+// TestGetImmediateChargeSumsMultipleReceipts proves the received amount is the
+// sum of every pix[] receipt, so a charge settled across several transactions
+// reconciles to its original total.
+func TestGetImmediateChargeSumsMultipleReceipts(t *testing.T) {
+	t.Parallel()
+	ts := newPixTestServer(t)
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	ts.cobs["tx-split"] = pixChargeResponseBody{
+		TxID:       "tx-split",
+		Status:     "CONCLUIDA",
+		Calendario: pixCalendario{Criacao: now.Add(-time.Minute).Format(time.RFC3339), Expiracao: 3600},
+		Valor:      pixValor{Original: "10.50"},
+		Pix:        []pixReceipt{{Valor: "4.00"}, {Valor: "6.50"}},
+	}
+	p := ts.provider(t, oneTenant("t1", "c", "s"), fixedClock(now))
+
+	res, err := p.GetImmediateCharge(context.Background(), "t1", "tx-split")
+	if err != nil {
+		t.Fatalf("GetImmediateCharge: %v", err)
+	}
+	if res.ReceivedAmountCents != 1050 {
+		t.Fatalf("received amount: want 1050 (4.00+6.50), got %d", res.ReceivedAmountCents)
+	}
+	if !res.AmountReconciled() {
+		t.Fatalf("receipts summing to the original must reconcile: %+v", res)
+	}
+}
+
+// TestGetImmediateChargeUnpaidHasNoReceipts proves an ATIVA charge reports the
+// expected amount but zero received, and therefore does not reconcile.
+func TestGetImmediateChargeUnpaidHasNoReceipts(t *testing.T) {
+	t.Parallel()
+	ts := newPixTestServer(t)
+	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	ts.cobs["tx-active"] = pixChargeResponseBody{
+		TxID:       "tx-active",
+		Status:     "ATIVA",
+		Calendario: pixCalendario{Criacao: now.Add(-time.Minute).Format(time.RFC3339), Expiracao: 3600},
+		Valor:      pixValor{Original: "10.50"},
+	}
+	p := ts.provider(t, oneTenant("t1", "c", "s"), fixedClock(now))
+
+	res, err := p.GetImmediateCharge(context.Background(), "t1", "tx-active")
+	if err != nil {
+		t.Fatalf("GetImmediateCharge: %v", err)
+	}
+	if res.ExpectedAmountCents != 1050 || res.ReceivedAmountCents != 0 {
+		t.Fatalf("amounts: want expected=1050 received=0, got expected=%d received=%d",
+			res.ExpectedAmountCents, res.ReceivedAmountCents)
+	}
+	if res.AmountReconciled() {
+		t.Fatalf("an unpaid charge must NOT reconcile: %+v", res)
+	}
+}
+
+// TestGetImmediateChargeMalformedAmount proves a present-but-corrupt money field
+// is never read as zero: it maps to ErrUnavailable (malformed upstream body)
+// rather than silently producing a reconcilable result.
+func TestGetImmediateChargeMalformedAmount(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"malformed original", `{"txid":"tx","status":"CONCLUIDA","valor":{"original":"abc"}}`},
+		{"malformed receipt", `{"txid":"tx","status":"CONCLUIDA","valor":{"original":"10.50"},"pix":[{"valor":"10,50"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := newPixTestServer(t)
+			ts.getHandler = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tc.body))
+			}
+			p := ts.provider(t, oneTenant("t1", "c", "s"), nil)
+			if _, err := p.GetImmediateCharge(context.Background(), "t1", "tx"); !errors.Is(err, shared.ErrUnavailable) {
+				t.Fatalf("malformed amount should map to ErrUnavailable, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseAmountCents(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in      string
+		want    int64
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"0.00", 0, false},
+		{"0.05", 5, false},
+		{"0.99", 99, false},
+		{"1.00", 100, false},
+		{"10.50", 1050, false},
+		{"10.5", 1050, false},
+		{"10.05", 1005, false},
+		{"10", 1000, false},
+		{"1234.56", 123456, false},
+		{"-2.50", -250, false},
+		{" 10.50 ", 1050, false},
+		{"abc", 0, true},
+		{"10.503", 0, true},
+		{"1.2.3", 0, true},
+		{".50", 0, true},
+		{"10.5a", 0, true},
+	}
+	for _, tc := range cases {
+		got, err := parseAmountCents(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("parseAmountCents(%q): want error, got %d", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("parseAmountCents(%q): unexpected error %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("parseAmountCents(%q): want %d, got %d", tc.in, tc.want, got)
+		}
+	}
+}
+
+// TestFormatParseAmountRoundTrip proves parseAmountCents is the inverse of
+// formatAmount across representative magnitudes and signs.
+func TestFormatParseAmountRoundTrip(t *testing.T) {
+	t.Parallel()
+	for _, cents := range []int64{0, 5, 99, 100, 1050, 123456, -250} {
+		got, err := parseAmountCents(formatAmount(cents))
+		if err != nil {
+			t.Fatalf("round-trip %d: %v", cents, err)
+		}
+		if got != cents {
+			t.Fatalf("round-trip: %d -> %q -> %d", cents, formatAmount(cents), got)
+		}
+	}
+}
