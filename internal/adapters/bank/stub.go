@@ -58,7 +58,10 @@ func (s *StubProvider) CreateCharge(ctx context.Context, tenantID string, req po
 		}
 	}
 	txID := "tx_" + req.PaymentID
-	res := ports.ChargeResult{TxID: txID, Status: "pending"}
+	// Record the expected amount so reconciliation (GetCharge) can prove the money
+	// adds up, not only the status (threat W3). Received stays zero until the charge
+	// settles (MarkSettled / MarkSettledWithReceived).
+	res := ports.ChargeResult{TxID: txID, Status: "pending", ExpectedAmountCents: req.AmountCents}
 	s.charges[key(tenantID, txID)] = res
 	if req.IdempotencyKey != "" {
 		s.byIdem[key(tenantID, req.IdempotencyKey)] = res
@@ -87,12 +90,29 @@ func (s *StubProvider) ChargeCount() int {
 	return len(s.charges)
 }
 
-// MarkSettled flips a charge to paid (test/dev hook simulating the bank settling).
+// MarkSettled flips a charge to paid and reconciles the full expected amount
+// (test/dev hook simulating the bank settling a correctly-paid charge): the
+// received amount equals the expected amount, so AmountReconciled holds.
 func (s *StubProvider) MarkSettled(tenantID, txID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if res, ok := s.charges[key(tenantID, txID)]; ok {
 		res.Status = "paid"
+		res.ReceivedAmountCents = res.ExpectedAmountCents
+		s.charges[key(tenantID, txID)] = res
+	}
+}
+
+// MarkSettledWithReceived flips a charge to paid with a specific received amount
+// (test/dev hook simulating a divergent settlement: partial payment, an
+// adjustable charge paid to a different value, or overpayment). When received !=
+// expected, AmountReconciled is false and settlement must be refused.
+func (s *StubProvider) MarkSettledWithReceived(tenantID, txID string, receivedCents int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if res, ok := s.charges[key(tenantID, txID)]; ok {
+		res.Status = "paid"
+		res.ReceivedAmountCents = receivedCents
 		s.charges[key(tenantID, txID)] = res
 	}
 }

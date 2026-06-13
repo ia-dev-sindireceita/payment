@@ -155,9 +155,49 @@ type chargeRequestBody struct {
 }
 
 // chargeResponseBody is the subset of C6's charge representation we consume.
+//
+// Beyond txid/status it carries the money needed to reconcile a settlement: the
+// original amount (valor.original) and the received receipts (pix[]), mirroring
+// the PIX charge wire shape (pixValor / pixReceipt are reused). Reconciling only
+// the status proves the charge is marked paid; it does NOT prove the payer paid
+// the right amount, so the generic webhook settlement path also asserts the money
+// adds up before liquidating (reconcile-before-settle, threat W3, SIN-64777).
 type chargeResponseBody struct {
-	TxID   string `json:"txid"`
-	Status string `json:"status"`
+	TxID   string   `json:"txid"`
+	Status string   `json:"status"`
+	Valor  pixValor `json:"valor"`
+	// Pix is the list of received transactions, present once the charge has been
+	// paid. Reconciliation sums each receipt's valor to learn how much was actually
+	// received versus valor.original.
+	Pix []pixReceipt `json:"pix"`
+}
+
+// toChargeResult maps the PSP wire shape into the generic charge port result,
+// reconciling the money: valor.original is the expected amount and the sum of the
+// pix[] receipts is what was received. It mirrors toPixResult and is fail-secure
+// for settlement — an absent amount (empty string) reconciles to zero cents (and
+// AmountReconciled then refuses to settle), while a present-but-malformed amount
+// is a corrupt money field that maps to ErrUnavailable rather than being silently
+// read as zero.
+func toChargeResult(b chargeResponseBody, op string) (ports.ChargeResult, error) {
+	expected, err := parseAmountCents(b.Valor.Original)
+	if err != nil {
+		return ports.ChargeResult{}, &Error{Op: op, sentinel: shared.ErrUnavailable}
+	}
+	var received int64
+	for _, r := range b.Pix {
+		amount, err := parseAmountCents(r.Valor)
+		if err != nil {
+			return ports.ChargeResult{}, &Error{Op: op, sentinel: shared.ErrUnavailable}
+		}
+		received += amount
+	}
+	return ports.ChargeResult{
+		TxID:                b.TxID,
+		Status:              b.Status,
+		ExpectedAmountCents: expected,
+		ReceivedAmountCents: received,
+	}, nil
 }
 
 // CreateCharge creates a charge at C6. It forwards the PaymentID as the
@@ -198,7 +238,7 @@ func (p *Provider) CreateCharge(ctx context.Context, tenantID string, req ports.
 	if err := p.do(httpReq, "create_charge", &out); err != nil {
 		return ports.ChargeResult{}, err
 	}
-	return ports.ChargeResult{TxID: out.TxID, Status: out.Status}, nil
+	return toChargeResult(out, "create_charge")
 }
 
 // GetCharge reconciles the authoritative state of a charge from C6 (never trust a
@@ -221,7 +261,7 @@ func (p *Provider) GetCharge(ctx context.Context, tenantID, txID string) (ports.
 	if err := p.do(httpReq, "get_charge", &out); err != nil {
 		return ports.ChargeResult{}, err
 	}
-	return ports.ChargeResult{TxID: out.TxID, Status: out.Status}, nil
+	return toChargeResult(out, "get_charge")
 }
 
 // authedJSONRequest builds an HTTP request for tenant carrying a fresh per-tenant
