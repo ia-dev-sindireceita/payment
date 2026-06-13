@@ -20,27 +20,47 @@ type StubProvider struct {
 
 	mu      sync.Mutex
 	charges map[string]ports.ChargeResult // keyed by tenantID+"\x00"+txID
+	byIdem  map[string]ports.ChargeResult // keyed by tenantID+"\x00"+idempotencyKey
 }
 
 // NewStubProvider builds a StubProvider. creds is used to demonstrate per-tenant
 // credential isolation at charge time (the secret is never logged).
 func NewStubProvider(creds ports.CredentialStore) *StubProvider {
-	return &StubProvider{creds: creds, charges: make(map[string]ports.ChargeResult)}
+	return &StubProvider{
+		creds:   creds,
+		charges: make(map[string]ports.ChargeResult),
+		byIdem:  make(map[string]ports.ChargeResult),
+	}
 }
 
 func key(tenantID, txID string) string { return tenantID + "\x00" + txID }
 
 // CreateCharge resolves the tenant's credential (proving isolation) and returns
 // a pending charge with a deterministic txid derived from the payment id.
+//
+// It models PSP-side idempotency (F3b): when the request carries an idempotency
+// key, a repeat call with the same (tenant, key) returns the original charge
+// without creating a new one — even if the PaymentID differs. This is the
+// defense-in-depth the real C6 adapter must inherit by forwarding the key to the
+// bank, so a retry that races the local reservation cannot double-charge. The key
+// is tenant-scoped, so one tenant's key can never collide with another's.
 func (s *StubProvider) CreateCharge(ctx context.Context, tenantID string, req ports.ChargeRequest) (ports.ChargeResult, error) {
 	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
 		return ports.ChargeResult{}, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if req.IdempotencyKey != "" {
+		if prev, ok := s.byIdem[key(tenantID, req.IdempotencyKey)]; ok {
+			return prev, nil // PSP dedupe: same key => same charge, no new effect
+		}
+	}
 	txID := "tx_" + req.PaymentID
 	res := ports.ChargeResult{TxID: txID, Status: "pending"}
-	s.mu.Lock()
 	s.charges[key(tenantID, txID)] = res
-	s.mu.Unlock()
+	if req.IdempotencyKey != "" {
+		s.byIdem[key(tenantID, req.IdempotencyKey)] = res
+	}
 	return res, nil
 }
 

@@ -175,6 +175,16 @@ type ChargeRequest struct {
 	PaymentID   string
 	AmountCents int64
 	Currency    string
+	// IdempotencyKey is the tenant's idempotency key for this charge. The real C6
+	// adapter MUST forward it to the PSP (e.g. as the provider's Idempotency-Key)
+	// so the bank itself deduplicates retried/concurrent CreateCharge calls. This
+	// is defense-in-depth for double-charge (F3b): it complements the local
+	// reservation done before the bank call (F3a, SIN-64719) so a crash window
+	// between charging the bank and persisting the key cannot bill twice — the PSP
+	// collapses the duplicate even when the caller cannot. Empty means the caller
+	// did not supply one; adapters MUST then fall back to a deterministic key
+	// (e.g. PaymentID) and never silently drop idempotency.
+	IdempotencyKey string
 }
 
 // ChargeResult is the bank's response to a charge creation.
