@@ -169,6 +169,25 @@ type CredentialWriter interface {
 	SetBankCredential(ctx context.Context, tenantID, clientID, secret string) error
 }
 
+// CredentialInvalidator is the optional hook the admin plane invokes right after
+// a tenant's bank credential is (re)written, so an adapter that caches state
+// keyed on that credential — notably the C6 OAuth2 client_credentials token
+// cache — can evict the tenant's entry immediately instead of serving a bearer
+// minted under the old secret until it expires (token-revocation lag; ADR-0003 /
+// SIN-64764). It is intentionally separate from CredentialWriter: the writer
+// persists the secret, the invalidator only drops volatile caches, and a write
+// path that has no cache to evict (e.g. the in-memory bank stub) simply omits it.
+//
+// InvalidateToken MUST be safe to call for an unknown tenant (no-op). It is
+// best-effort and local, and so carries neither context nor error: dropping an
+// in-memory entry cannot fail and MUST never fail the credential write that
+// already succeeded. Eviction is per-process; in a multi-replica deployment each
+// replica evicts the cache on the write it serves and other replicas still
+// converge within the token TTL (see ADR-0003).
+type CredentialInvalidator interface {
+	InvalidateToken(tenantID string)
+}
+
 // ChargeRequest is the input to create a charge at the bank.
 type ChargeRequest struct {
 	TenantID    string

@@ -52,6 +52,20 @@ func NewPixSettlementProvider(generic ports.BankProvider, pix ports.PixProvider)
 	return &PixSettlementProvider{BankProvider: generic, pix: pix}
 }
 
+// InvalidateToken forwards a credential-cache eviction to the wrapped provider
+// when it supports one (the C6 adapter caches per-tenant OAuth2 tokens and does),
+// closing the token-revocation lag (ADR-0003) even though this settlement
+// decorator sits in front of the real provider. It is a no-op when the wrapped
+// provider exposes no such cache. The decorator always satisfies
+// ports.CredentialInvalidator; the wiring only wraps the real C6 provider (the
+// stub is returned unwrapped), so a type assertion on the assembled provider
+// still distinguishes "has a cache to evict" from the cacheless stub.
+func (p *PixSettlementProvider) InvalidateToken(tenantID string) {
+	if inv, ok := p.BankProvider.(ports.CredentialInvalidator); ok {
+		inv.InvalidateToken(tenantID)
+	}
+}
+
 // GetCharge reconciles the authoritative charge state via the PIX immediate-charge
 // read and maps it onto the generic ChargeResult the settlement path consumes.
 //
