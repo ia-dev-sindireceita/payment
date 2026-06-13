@@ -10,6 +10,7 @@ Conjunto de documentos de segurança da plataforma de pagamentos multi-tenant
 | [`threat-model.md`](./threat-model.md) | Trust boundaries, DFD, STRIDE por componente (PIX, PIX Automático, BolePix, Checkout, webhooks C6, multi-tenancy, billing), riscos priorizados. |
 | [`secure-baseline.md`](./secure-baseline.md) | Requisitos de segurança obrigatórios: segredos, auth/mTLS/OAuth C6, isolamento de tenant, idempotência/anti-replay de webhook, validação de entrada, cripto, logging, PIX/BCB + LGPD. |
 | [`pr-review-policy.md`](./pr-review-policy.md) | Critérios objetivos de "potencial de fragilidade" + checklist de revisão de segurança (gate de merge). |
+| [`adr-0001-console-browser-auth-transport.md`](./adr-0001-console-browser-auth-transport.md) | ADR (proposto) — transporte de auth do console HTML no browser: bearer injetado por proxy vs. futuro session cookie, e impacto no modelo CSRF. |
 
 ## Postura
 
