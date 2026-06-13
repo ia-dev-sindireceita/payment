@@ -445,3 +445,46 @@ func TestGetChargeMalformedReceiptFailsSecure(t *testing.T) {
 		t.Fatalf("want ErrUnavailable for malformed receipt, got %v", err)
 	}
 }
+
+// TestCreateChargeDoesNotFollowRedirect is the regression guard for F1 of the
+// SIN-64750 security review: the adapter's HTTP client must NOT silently chase a
+// 3xx from the PSP (a form of SSRF, and the stdlib default of following up to 10
+// hops). Instead the 302 is handed back to do() and mapped to ErrUnavailable, as
+// sentinelForStatus' "incl. 3xx we did not follow" comment intends. We assert both
+// halves: the error is ErrUnavailable AND the redirect target is never reached.
+func TestCreateChargeDoesNotFollowRedirect(t *testing.T) {
+	t.Parallel()
+	ts := newTestServer(t)
+	ts.createHandler = func(w http.ResponseWriter, _ *http.Request) {
+		// Were this followed, the client would land on the /charges/ GET handler,
+		// which returns a valid 200 body — turning the call into a false success.
+		w.Header().Set("Location", "/charges/should-not-be-followed")
+		w.WriteHeader(http.StatusFound) // 302
+	}
+
+	// Exercise the PRODUCTION default client (the one that sets CheckRedirect), but
+	// graft the test server's TLS trust onto it so it can reach httptest over TLS.
+	// Injecting ts.Client() (as provider() does) would bypass the very CheckRedirect
+	// under test.
+	c := defaultHTTPClient(15 * time.Second)
+	c.Transport.(*http.Transport).TLSClientConfig = ts.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+
+	p, err := New(Config{BaseURL: ts.URL, TokenURL: ts.URL + "/oauth/token", HTTPClient: c}, oneTenant("t1", "c", "s"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = p.CreateCharge(context.Background(), "t1", ports.ChargeRequest{TenantID: "t1", PaymentID: "p", AmountCents: 1, Currency: "BRL"})
+	if !errors.Is(err, shared.ErrUnavailable) {
+		t.Fatalf("a 3xx must map to ErrUnavailable, got %v", err)
+	}
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.createHits != 1 {
+		t.Fatalf("create endpoint should be hit exactly once, got %d", ts.createHits)
+	}
+	if ts.getHits != 0 {
+		t.Fatalf("redirect was followed: the target endpoint was reached (getHits=%d)", ts.getHits)
+	}
+}

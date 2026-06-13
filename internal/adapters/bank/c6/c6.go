@@ -125,9 +125,18 @@ func trimTrailingSlash(s string) string {
 // defaultHTTPClient builds an HTTP client that enforces TLS >= 1.2 and a total
 // per-request timeout. A bounded transport keeps idle connections in check so the
 // adapter does not leak goroutines/sockets.
+//
+// Redirects are disabled: a payment-API client must never silently chase a 3xx
+// (a form of SSRF, and the stdlib default of following up to 10 hops). Returning
+// http.ErrUseLastResponse hands the 3xx response back to do() unfollowed, where
+// sentinelForStatus maps it to ErrUnavailable — exactly as that comment intends
+// ("incl. 3xx we did not follow"). Secure-by-default; F1 of SIN-64750 review.
 func defaultHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
 			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 			MaxIdleConns:        100,
