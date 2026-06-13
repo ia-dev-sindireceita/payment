@@ -110,6 +110,30 @@ func (s *Store) FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, 
 	return tenant.Rehydrate(gotID, name, active != 0, parseTime(createdAt)), nil
 }
 
+// ListTenants returns every tenant, newest-first (created_at desc, id desc as a
+// deterministic tie-break). Used by the admin console listing.
+func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, active, created_at FROM tenants ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("query tenants: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*tenant.Tenant
+	for rows.Next() {
+		var id, name, createdAt string
+		var active int
+		if err := rows.Scan(&id, &name, &active, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan tenant: %w", err)
+		}
+		out = append(out, tenant.Rehydrate(id, name, active != 0, parseTime(createdAt)))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tenants: %w", err)
+	}
+	return out, nil
+}
+
 // --- Payments (tenant-scoped) ---
 
 // SavePayment inserts or updates a payment.
@@ -194,6 +218,34 @@ func (s *Store) UpsertEndpointPrice(ctx context.Context, p billing.EndpointPrici
 	return nil
 }
 
+// ListEndpointPrices returns a tenant's pricing rules ordered by endpoint.
+func (s *Store) ListEndpointPrices(ctx context.Context, tenantID string) ([]billing.EndpointPricing, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tenant_id, endpoint, price_cents FROM endpoint_pricing WHERE tenant_id = ? ORDER BY endpoint ASC`,
+		tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("query prices: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []billing.EndpointPricing
+	for rows.Next() {
+		var gotTenant, endpoint string
+		var price int64
+		if err := rows.Scan(&gotTenant, &endpoint, &price); err != nil {
+			return nil, fmt.Errorf("scan price: %w", err)
+		}
+		p, err := billing.NewEndpointPricing(gotTenant, endpoint, price)
+		if err != nil {
+			return nil, fmt.Errorf("rehydrate price: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate prices: %w", err)
+	}
+	return out, nil
+}
+
 // --- Ledger ---
 
 // AppendLedgerEntry appends a billable event (append-only).
@@ -205,6 +257,35 @@ func (s *Store) AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) er
 		return fmt.Errorf("append ledger: %w", err)
 	}
 	return nil
+}
+
+// ListLedgerEntries returns one tenant's ledger entries, newest-first (at desc,
+// id desc tie-break). Tenant-scoped (threat P1).
+func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billing.LedgerEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, tenant_id, endpoint, price_cents, reference, at FROM billing_ledger
+		 WHERE tenant_id = ? ORDER BY at DESC, id DESC`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("query ledger: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []billing.LedgerEntry
+	for rows.Next() {
+		var id, gotTenant, endpoint, reference, at string
+		var price int64
+		if err := rows.Scan(&id, &gotTenant, &endpoint, &price, &reference, &at); err != nil {
+			return nil, fmt.Errorf("scan ledger: %w", err)
+		}
+		e, err := billing.NewLedgerEntry(id, gotTenant, endpoint, reference, price, parseTime(at))
+		if err != nil {
+			return nil, fmt.Errorf("rehydrate ledger: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate ledger: %w", err)
+	}
+	return out, nil
 }
 
 // --- Processed events (idempotency) ---

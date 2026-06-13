@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
 	"github.com/ia-dev-sindireceita/payment/internal/app"
 )
 
@@ -16,6 +17,8 @@ import (
 type Server struct {
 	charges     *app.ChargeService
 	admin       *app.AdminService
+	console     *app.ConsoleService
+	ui          *adminweb.Renderer
 	webhooks    *app.WebhookService
 	tenantAuth  TenantAuthenticator
 	adminAuth   AdminAuthenticator
@@ -23,10 +26,14 @@ type Server struct {
 	csrf        CSRFGuard
 }
 
-// Config wires a Server's dependencies.
+// Config wires a Server's dependencies. Console and UI back the HTML admin
+// console (SIN-64727); they may be nil for deployments/tests that serve only the
+// JSON planes — the console routes are then registered but never exercised.
 type Config struct {
 	Charges     *app.ChargeService
 	Admin       *app.AdminService
+	Console     *app.ConsoleService
+	UI          *adminweb.Renderer
 	Webhooks    *app.WebhookService
 	TenantAuth  TenantAuthenticator
 	AdminAuth   AdminAuthenticator
@@ -42,6 +49,8 @@ func NewServer(c Config) *Server {
 	return &Server{
 		charges:     c.Charges,
 		admin:       c.Admin,
+		console:     c.Console,
+		ui:          c.UI,
 		webhooks:    c.Webhooks,
 		tenantAuth:  c.TenantAuth,
 		adminAuth:   c.AdminAuth,
@@ -99,6 +108,40 @@ func (s *Server) Router() http.Handler {
 			r.Post("/tenants", s.handleCreateTenant)
 			r.Post("/tenants/{tenantID}/pricing", s.handleSetPrice)
 			r.Put("/tenants/{tenantID}/bank-credential", s.handleSetBankCredential)
+		})
+	})
+
+	// Admin HTML console (SIN-64727) — server-rendered HTMX over the admin plane,
+	// built on the merged security spine. Static assets are public (no secrets);
+	// every dynamic route is behind admin auth + CSRF (double-submit). Reads admit
+	// RoleOperator+RoleAdmin; mutations require the full RoleAdmin (least privilege).
+	r.Route("/console", func(r chi.Router) {
+		r.Get("/static/*", s.consoleServeStatic)
+		r.Group(func(r chi.Router) {
+			r.Use(securityHeaders)
+			r.Use(adminAuthMiddleware(s.adminAuth))
+			r.Use(CSRFProtect)
+
+			r.Group(func(r chi.Router) {
+				r.Use(requireRole(RoleAdmin, RoleOperator))
+				r.Get("/", s.consoleRedirect)
+				r.Get("/tenants", s.consoleListTenants)
+				r.Get("/tenants/rows", s.consoleTenantRows)
+				r.Get("/tenants/new", s.consoleNewTenantForm)
+				r.Get("/tenants/{id}", s.consoleTenantDetail)
+				r.Get("/tenants/{id}/credentials", s.consoleCredentialsForm)
+				r.Get("/tenants/{id}/pricing", s.consolePricing)
+				r.Get("/tenants/{id}/consumption", s.consoleConsumption)
+			})
+
+			r.Group(func(r chi.Router) {
+				r.Use(requireRole(RoleAdmin))
+				r.Post("/tenants", s.consoleCreateTenant)
+				r.Post("/tenants/{id}/suspend", s.consoleSuspendTenant)
+				r.Post("/tenants/{id}/activate", s.consoleActivateTenant)
+				r.Post("/tenants/{id}/credentials", s.consoleSetCredential)
+				r.Post("/tenants/{id}/pricing", s.consoleSetPrice)
+			})
 		})
 	})
 

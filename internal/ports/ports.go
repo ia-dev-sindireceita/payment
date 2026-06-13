@@ -37,19 +37,27 @@ type PaymentRepository interface {
 }
 
 // TenantRepository persists Tenant aggregates (admin plane).
+//
+// Read-side listing for the admin console (ListTenants) is declared by the
+// narrow app.TenantStore port rather than widened here, so this canonical port
+// stays minimal and existing test doubles need not implement console-only reads.
 type TenantRepository interface {
 	SaveTenant(ctx context.Context, t *tenant.Tenant) error
 	FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, error)
 }
 
-// PricingRepository resolves and stores per-endpoint pricing.
+// PricingRepository resolves and stores per-endpoint pricing. The admin-console
+// listing (ListEndpointPrices) is declared by app.PricingStore, keeping this
+// port narrow (the concrete stores implement both).
 type PricingRepository interface {
 	// GetEndpointPrice returns the price for a tenant × endpoint, or ErrNotFound.
 	GetEndpointPrice(ctx context.Context, tenantID, endpoint string) (billing.EndpointPricing, error)
 	UpsertEndpointPrice(ctx context.Context, p billing.EndpointPricing) error
 }
 
-// LedgerRepository appends billable events atomically. Append-only.
+// LedgerRepository appends billable events atomically. Append-only. The
+// console's read side (ListLedgerEntries) is declared by app.LedgerReader so
+// this write port stays focused on the append path.
 type LedgerRepository interface {
 	AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) error
 }
