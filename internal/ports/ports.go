@@ -241,3 +241,110 @@ type PixProvider interface {
 	// source of truth for settlement (never trust a raw webhook — threat W3).
 	GetImmediateCharge(ctx context.Context, tenantID, txID string) (PixChargeResult, error)
 }
+
+// The product-specific bank ports below (PIX Automático consent, BolePix boleto,
+// unified checkout) are deliberately kept SEPARATE from BankProvider rather than
+// widening it. Interface Segregation: a use-case that only creates boletos should
+// not be forced to depend on consent or checkout methods, and existing
+// BankProvider consumers/test-doubles are unaffected. The C6 adapter implements
+// all of them; a stub backs them for tests. Each carries tenantID explicitly so
+// the per-tenant credential/token isolation the C6 adapter enforces is never
+// bypassed (the tenant is derived from the authenticated caller, never client
+// input — threat H1/P1).
+
+// ConsentRequest is the input to register a recurring-debit (PIX Automático)
+// consent at the bank. Amount and window mirror the domain consent; the adapter
+// only transports them. IdempotencyKey, when present, is forwarded so the PSP
+// collapses retried/concurrent registrations into one consent.
+type ConsentRequest struct {
+	TenantID       string
+	ConsentID      string
+	DebtorTaxID    string
+	MaxAmountCents int64
+	Currency       string
+	Frequency      string
+	StartAt        time.Time
+	EndAt          time.Time // zero => open-ended
+	IdempotencyKey string
+}
+
+// ConsentResult is the bank's response to a consent operation.
+type ConsentResult struct {
+	ConsentID string
+	Status    string
+}
+
+// ConsentProvider is the output port for PIX Automático recurring-debit consents:
+// register, reconcile and cancel. Cancellation must be supported because a payer
+// can revoke authorization at any time.
+type ConsentProvider interface {
+	CreateConsent(ctx context.Context, tenantID string, req ConsentRequest) (ConsentResult, error)
+	// GetConsent reconciles the authoritative consent state from the bank (never
+	// trust a raw webhook — threat W3).
+	GetConsent(ctx context.Context, tenantID, consentID string) (ConsentResult, error)
+	// CancelConsent revokes a consent so no further debits can be originated.
+	CancelConsent(ctx context.Context, tenantID, consentID string) (ConsentResult, error)
+}
+
+// BoletoRequest is the input to register a BolePix boleto at the bank. The fine
+// and interest RATES are transported so the bank registers them, but the amount
+// owed at any instant is computed by the boleto domain, never here (Hexagonal).
+type BoletoRequest struct {
+	TenantID           string
+	BoletoID           string
+	AmountCents        int64
+	Currency           string
+	DueDate            time.Time
+	FineBps            int64
+	MonthlyInterestBps int64
+	PayerTaxID         string
+	IdempotencyKey     string
+}
+
+// BoletoResult is the bank's response to a boleto registration. It carries the
+// scannable artifacts (the PIX EMV "copia e cola" payload and the boleto's
+// barcode/linha digitável) the caller renders for the payer.
+type BoletoResult struct {
+	BoletoID    string
+	TxID        string
+	Status      string
+	QRCode      string // PIX EMV copy-and-paste payload (BolePix)
+	Barcode     string // boleto linha digitável / barcode
+	AmountCents int64  // principal the bank registered
+}
+
+// BoletoProvider is the output port for BolePix boleto registration.
+type BoletoProvider interface {
+	CreateBoleto(ctx context.Context, tenantID string, req BoletoRequest) (BoletoResult, error)
+}
+
+// CheckoutItem is one line of a checkout request (transport mirror of the
+// checkout domain Item).
+type CheckoutItem struct {
+	Description string
+	AmountCents int64
+}
+
+// CheckoutRequest is the input to open a unified C6 hosted checkout session.
+type CheckoutRequest struct {
+	TenantID       string
+	SessionID      string
+	Currency       string
+	Items          []CheckoutItem
+	ExpiresAt      time.Time
+	IdempotencyKey string
+}
+
+// CheckoutResult is the bank's response to opening a checkout session. RedirectURL
+// is the hosted page the caller sends the payer to.
+type CheckoutResult struct {
+	SessionID   string
+	Status      string
+	RedirectURL string
+	AmountCents int64
+}
+
+// CheckoutProvider is the output port for the unified C6 checkout session.
+type CheckoutProvider interface {
+	CreateCheckoutSession(ctx context.Context, tenantID string, req CheckoutRequest) (CheckoutResult, error)
+}
