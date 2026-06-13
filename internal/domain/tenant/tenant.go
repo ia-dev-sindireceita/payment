@@ -53,3 +53,8 @@ func (t *Tenant) CreatedAt() time.Time { return t.createdAt }
 
 // Deactivate suspends the tenant (no further transactions allowed).
 func (t *Tenant) Deactivate() { t.active = false }
+
+// Activate re-enables a suspended tenant so it may transact again. It is the
+// inverse of Deactivate and is idempotent (activating an active tenant is a
+// no-op), making the admin-plane activate/suspend toggle safe to retry.
+func (t *Tenant) Activate() { t.active = true }

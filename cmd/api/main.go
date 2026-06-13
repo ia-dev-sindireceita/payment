@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/bank"
 	httpadapter "github.com/ia-dev-sindireceita/payment/internal/adapters/http"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/messaging/inmemory"
@@ -79,9 +80,26 @@ func run() error {
 		}
 	}
 	auth := httpadapter.NewStaticTokenAuthWithRoles(cfg.TenantTokens, adminRoles, cfg.WebhookSecret)
+
+	// Admin HTML console (SIN-64727): parse templates up-front so a bad template
+	// fails startup, not the first request.
+	ui, err := adminweb.New()
+	if err != nil {
+		return err
+	}
+	console := app.NewConsoleService(app.ConsoleDeps{
+		Tenants:    store,
+		Pricing:    store,
+		Ledger:     store,
+		CredWriter: creds,
+		Clock:      system.Clock{},
+		IDs:        system.IDProvider{},
+	})
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:       app.NewChargeService(deps),
 		Admin:         app.NewAdminService(deps),
+		Console:       console,
+		UI:            ui,
 		Webhooks:      app.NewWebhookService(deps),
 		TenantAuth:    auth,
 		AdminAuth:     auth,

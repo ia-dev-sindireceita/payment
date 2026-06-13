@@ -7,6 +7,7 @@ package inmemory
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
@@ -63,6 +64,25 @@ func (s *Store) FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, 
 		return nil, shared.ErrNotFound
 	}
 	return t, nil
+}
+
+// ListTenants returns every tenant, newest-first (createdAt desc, id desc as a
+// deterministic tie-break). Mirrors the SQLite adapter's ordering.
+func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*tenant.Tenant, 0, len(s.tenants))
+	for _, t := range s.tenants {
+		out = append(out, t)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ci, cj := out[i].CreatedAt(), out[j].CreatedAt()
+		if ci.Equal(cj) {
+			return out[i].ID() > out[j].ID()
+		}
+		return ci.After(cj)
+	})
+	return out, nil
 }
 
 // SavePayment stores a payment scoped by tenant.
@@ -127,12 +147,46 @@ func (s *Store) UpsertEndpointPrice(ctx context.Context, p billing.EndpointPrici
 	return nil
 }
 
+// ListEndpointPrices returns a tenant's pricing rules ordered by endpoint.
+func (s *Store) ListEndpointPrices(ctx context.Context, tenantID string) ([]billing.EndpointPricing, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]billing.EndpointPricing, 0)
+	for _, p := range s.pricing {
+		if p.TenantID() == tenantID {
+			out = append(out, p)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Endpoint() < out[j].Endpoint() })
+	return out, nil
+}
+
 // AppendLedgerEntry appends a billable event.
 func (s *Store) AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ledger = append(s.ledger, e)
 	return nil
+}
+
+// ListLedgerEntries returns a tenant's ledger entries, newest-first.
+func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billing.LedgerEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]billing.LedgerEntry, 0)
+	for _, e := range s.ledger {
+		if e.TenantID() == tenantID {
+			out = append(out, e)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ai, aj := out[i].At(), out[j].At()
+		if ai.Equal(aj) {
+			return out[i].ID() > out[j].ID()
+		}
+		return ai.After(aj)
+	})
+	return out, nil
 }
 
 // LedgerLen returns the number of ledger entries (test/inspection helper).
