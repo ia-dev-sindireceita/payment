@@ -77,6 +77,11 @@ func (s *Server) Router() http.Handler {
 	// writes), so it is limited at least as strictly as the tenant plane.
 	tenantLimiter := newRateLimiter(20, 10, nil)
 	adminLimiter := newRateLimiter(20, 10, nil)
+	// The HTML console drives the same privileged admin operations as the JSON
+	// admin plane (tenant creation, bank-credential writes, price sets), so it gets
+	// its own limiter with the same budget (SIN-64741 L1). A separate bucket keeps a
+	// console burst from throttling the JSON admin API and vice versa.
+	consoleLimiter := newRateLimiter(20, 10, nil)
 	webhookLimiter := newRateLimiter(50, 25, nil)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -120,6 +125,11 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(securityHeaders)
 			r.Use(adminAuthMiddleware(s.adminAuth))
+			// Defense-in-depth: throttle per authenticated admin identity (IP fallback),
+			// mirroring the JSON admin plane. Sits after auth so unauthenticated requests
+			// are rejected cheaply, and before CSRF so a token-flood is bounded regardless
+			// of whether the double-submit token is present (SIN-64741 L1).
+			r.Use(consoleLimiter.middleware(adminTokenKey))
 			r.Use(CSRFProtect)
 
 			r.Group(func(r chi.Router) {

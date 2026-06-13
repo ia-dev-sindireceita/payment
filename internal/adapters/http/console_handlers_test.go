@@ -46,8 +46,9 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 		t.Fatalf("renderer: %v", err)
 	}
 	auth := httpadapter.NewStaticTokenAuthWithRoles(nil, map[string]httpadapter.Role{
-		adminToken:    httpadapter.RoleAdmin,
-		operatorToken: httpadapter.RoleOperator,
+		adminToken:       httpadapter.RoleAdmin,
+		secondAdminToken: httpadapter.RoleAdmin,
+		operatorToken:    httpadapter.RoleOperator,
 	}, webhookSec)
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Console: console, UI: ui, AdminAuth: auth, TenantAuth: auth, WebhookAuth: auth,
@@ -291,5 +292,66 @@ func TestConsoleConsumptionScreen(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "POST /v1/charges") || !strings.Contains(body, "R$ 2,50") {
 		t.Fatalf("consumption body unexpected: %s", body)
+	}
+}
+
+// TestConsoleRateLimit asserts the HTML console plane is rate-limited at parity
+// with the JSON admin plane (SIN-64741 L1): a rapid burst on a mutating console
+// route trips a 429 after roughly the bucket capacity, and the first request is
+// admitted. The CSRF token is supplied so the limiter — not CSRF — is what stops
+// the flood; the limiter sits before CSRF so even token-less floods are bounded,
+// but exercising the success path proves the 429 comes from the limiter itself.
+func TestConsoleRateLimit(t *testing.T) {
+	t.Parallel()
+	f := newConsoleFixture(t)
+	csrf := csrfToken(t, f.handler, adminToken)
+
+	// Matches the console limiter capacity wired in server.go (newRateLimiter(20,10)).
+	const capacity = 20
+	limitedAt := -1
+	for i := 0; i < 60; i++ {
+		rec := consolePost(t, f.handler, "/console/tenants", adminToken,
+			url.Values{"name": {"Burst SA"}}, csrf)
+		if i == 0 && rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("first request must not be rate-limited, got 429")
+		}
+		if rec.Code == http.StatusTooManyRequests {
+			limitedAt = i
+			break
+		}
+	}
+	if limitedAt < 1 || limitedAt > 3*capacity {
+		t.Fatalf("429 tripped at request %d, want it after the first and within burst", limitedAt)
+	}
+}
+
+// TestConsoleRateLimitPerToken proves the console limiter keys by admin identity,
+// not just IP: two admin tokens sharing one client IP get independent buckets, so
+// exhausting one must not throttle the other.
+func TestConsoleRateLimitPerToken(t *testing.T) {
+	t.Parallel()
+	f := newConsoleFixture(t)
+	csrfA := csrfToken(t, f.handler, adminToken)
+	csrfB := csrfToken(t, f.handler, secondAdminToken)
+
+	// Exhaust token A's bucket on a mutating console route.
+	var aLimited bool
+	for i := 0; i < 60; i++ {
+		rec := consolePost(t, f.handler, "/console/tenants", adminToken,
+			url.Values{"name": {"A SA"}}, csrfA)
+		if rec.Code == http.StatusTooManyRequests {
+			aLimited = true
+			break
+		}
+	}
+	if !aLimited {
+		t.Fatal("token A was never rate-limited")
+	}
+
+	// Same process/IP, different admin token → fresh bucket, must not be limited.
+	rec := consolePost(t, f.handler, "/console/tenants", secondAdminToken,
+		url.Values{"name": {"B SA"}}, csrfB)
+	if rec.Code == http.StatusTooManyRequests {
+		t.Fatal("token B limited by token A's bucket — console limiter is keyed per-IP, not per-token")
 	}
 }

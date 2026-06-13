@@ -21,7 +21,10 @@ import (
 const (
 	tenantToken = "ttok"
 	adminToken  = "atok"
-	webhookSec  = "whsec"
+	// secondAdminToken is a distinct admin identity sharing the test client IP, used
+	// to prove per-token (not per-IP) rate-limit bucketing on the console plane.
+	secondAdminToken = "atok2admin"
+	webhookSec       = "whsec"
 )
 
 type fixture struct {
