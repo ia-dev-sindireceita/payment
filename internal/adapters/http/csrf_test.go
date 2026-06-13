@@ -17,12 +17,19 @@ var echoCSRFHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Reque
 })
 
 func csrfCookieValue(rec *httptest.ResponseRecorder) string {
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == "csrf_token" {
-			return c.Value
-		}
+	if c := csrfCookie(rec); c != nil {
+		return c.Value
 	}
 	return ""
+}
+
+func csrfCookie(rec *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "csrf_token" {
+			return c
+		}
+	}
+	return nil
 }
 
 func TestCSRFSafeMethodMintsToken(t *testing.T) {
@@ -108,6 +115,60 @@ func TestCSRFAcceptsMatchingFormField(t *testing.T) {
 	h.ServeHTTP(rec, post)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200 with matching form field, got %d", rec.Code)
+	}
+}
+
+// TestCSRFCookieSecureFlag asserts the Secure attribute follows the configured
+// policy and NOT per-request TLS (SIN-64731 L2). The request is plaintext
+// (r.TLS == nil), exactly the production case behind a TLS-terminating proxy, so
+// sniffing r.TLS would wrongly drop Secure; config must drive it instead.
+func TestCSRFCookieSecureFlag(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		secure bool
+	}{
+		{"secure cookies enabled", true},
+		{"secure cookies disabled (local dev)", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := httpadapter.NewCSRFGuard(tc.secure).Protect(echoCSRFHandler)
+
+			req := httptest.NewRequest(http.MethodGet, "http://admin.local/admin/form", nil)
+			if req.TLS != nil {
+				t.Fatal("precondition: request must be non-TLS to model the proxy case")
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			c := csrfCookie(rec)
+			if c == nil {
+				t.Fatal("expected a csrf_token cookie to be set")
+			}
+			if c.Secure != tc.secure {
+				t.Fatalf("cookie Secure=%v, want %v regardless of r.TLS", c.Secure, tc.secure)
+			}
+			if !c.HttpOnly {
+				t.Fatal("csrf cookie must remain HttpOnly")
+			}
+		})
+	}
+}
+
+// TestCSRFProtectSecureByDefault pins that the package-level CSRFProtect (callers
+// that do not thread config) mints Secure cookies — secure-by-default.
+func TestCSRFProtectSecureByDefault(t *testing.T) {
+	t.Parallel()
+	h := httpadapter.CSRFProtect(echoCSRFHandler)
+	req := httptest.NewRequest(http.MethodGet, "/admin/form", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	c := csrfCookie(rec)
+	if c == nil || !c.Secure {
+		t.Fatalf("package-level CSRFProtect must default to Secure cookies; got %+v", c)
 	}
 }
 

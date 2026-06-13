@@ -20,6 +20,7 @@ type Server struct {
 	tenantAuth  TenantAuthenticator
 	adminAuth   AdminAuthenticator
 	webhookAuth WebhookAuthenticator
+	csrf        CSRFGuard
 }
 
 // Config wires a Server's dependencies.
@@ -30,6 +31,10 @@ type Config struct {
 	TenantAuth  TenantAuthenticator
 	AdminAuth   AdminAuthenticator
 	WebhookAuth WebhookAuthenticator
+	// SecureCookies sets the Secure attribute on cookies this adapter issues
+	// (CSRF token; the admin-UI session cookie via Server.CSRF). Driven by config
+	// because TLS is terminated at a proxy — see config.Config.SecureCookies.
+	SecureCookies bool
 }
 
 // NewServer builds a Server from its config.
@@ -41,8 +46,13 @@ func NewServer(c Config) *Server {
 		tenantAuth:  c.TenantAuth,
 		adminAuth:   c.AdminAuth,
 		webhookAuth: c.WebhookAuth,
+		csrf:        NewCSRFGuard(c.SecureCookies),
 	}
 }
+
+// CSRF returns the server's CSRF guard so the admin-UI child can wrap its live
+// HTML routes with Protect under the configured Secure-cookie policy.
+func (s *Server) CSRF() CSRFGuard { return s.csrf }
 
 // Router builds the HTTP handler. All routes are authenticated (deny-by-default);
 // the public health check is the only unauthenticated route.
@@ -53,8 +63,11 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(15 * time.Second))
 
-	// Rate limiters: generous defaults; tune per deployment.
+	// Rate limiters: generous defaults; tune per deployment. The admin plane is
+	// the most privileged surface (tenant creation, per-tenant bank-credential
+	// writes), so it is limited at least as strictly as the tenant plane.
 	tenantLimiter := newRateLimiter(20, 10, nil)
+	adminLimiter := newRateLimiter(20, 10, nil)
 	webhookLimiter := newRateLimiter(50, 25, nil)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -77,6 +90,10 @@ func (s *Server) Router() http.Handler {
 	// requireRole(RoleAdmin, RoleOperator).
 	r.Route("/admin", func(r chi.Router) {
 		r.Use(adminAuthMiddleware(s.adminAuth))
+		// Defense-in-depth: throttle per authenticated admin identity (falling back
+		// to client IP). Sits after auth so invalid tokens are rejected cheaply and
+		// each admin identity gets its own bucket, mirroring the tenant plane.
+		r.Use(adminLimiter.middleware(adminTokenKey))
 		r.Group(func(r chi.Router) {
 			r.Use(requireRole(RoleAdmin))
 			r.Post("/tenants", s.handleCreateTenant)
