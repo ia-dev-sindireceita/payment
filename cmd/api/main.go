@@ -69,20 +69,25 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Credential-cache invalidator (ADR-0003): the C6 provider implements it and
+	// the settlement wrapper forwards it; the stub does not implement it, so this
+	// assertion yields nil and the admin services fall back to a no-op evictor.
+	credInvalidator, _ := bankProvider.(ports.CredentialInvalidator)
 
 	deps := app.Deps{
-		Payments:    store,
-		Tenants:     store,
-		Pricing:     store,
-		Ledger:      store,
-		Processed:   store,
-		Bus:         inmemory.NewBus(),
-		Bank:        bankProvider,
-		Credentials: creds,
-		CredWriter:  creds,
-		Audit:       audit,
-		Clock:       system.Clock{},
-		IDs:         system.IDProvider{},
+		Payments:        store,
+		Tenants:         store,
+		Pricing:         store,
+		Ledger:          store,
+		Processed:       store,
+		Bus:             inmemory.NewBus(),
+		Bank:            bankProvider,
+		Credentials:     creds,
+		CredWriter:      creds,
+		CredInvalidator: credInvalidator,
+		Audit:           audit,
+		Clock:           system.Clock{},
+		IDs:             system.IDProvider{},
 		// Transactional boundary for the multi-write use-cases (charge creation,
 		// webhook settlement) — required for financial integrity (SIN-64719).
 		UoW: store,
@@ -122,12 +127,13 @@ func run() error {
 		return err
 	}
 	console := app.NewConsoleService(app.ConsoleDeps{
-		Tenants:    store,
-		Pricing:    store,
-		Ledger:     store,
-		CredWriter: creds,
-		Clock:      system.Clock{},
-		IDs:        system.IDProvider{},
+		Tenants:         store,
+		Pricing:         store,
+		Ledger:          store,
+		CredWriter:      creds,
+		CredInvalidator: credInvalidator,
+		Clock:           system.Clock{},
+		IDs:             system.IDProvider{},
 	})
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:       app.NewChargeService(deps),
@@ -177,6 +183,12 @@ func run() error {
 // SIN-64791). The C6 provider satisfies both BankProvider and PixProvider, so it
 // is wrapped in PixSettlementProvider: charge creation stays on the generic port
 // while the settlement reconcile read resolves through the verified PIX shape.
+//
+// The C6 provider owns the per-tenant OAuth2 token cache and implements
+// ports.CredentialInvalidator; the PixSettlementProvider wrapper forwards that
+// capability, so run() recovers the invalidator with a single type assertion on
+// the returned provider (the stub holds no cache and does not implement it, which
+// degrades to a no-op in the admin services — ADR-0003).
 func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.BankProvider, error) {
 	if cfg.C6.BaseURL == "" {
 		log.Print("api: PAYMENT_C6_BASE_URL not set — using in-memory bank stub")

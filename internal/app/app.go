@@ -26,6 +26,11 @@ type Deps struct {
 	// Kept separate from Credentials (the reader) so each service depends only on
 	// the capability it needs.
 	CredWriter ports.CredentialWriter
+	// CredInvalidator evicts cached state keyed on a tenant's credential (the C6
+	// OAuth2 token cache) right after a credential write, closing the
+	// token-revocation lag (ADR-0003). Optional: when nil the admin services use a
+	// no-op (e.g. the in-memory bank stub has no token cache to evict).
+	CredInvalidator ports.CredentialInvalidator
 	// UoW is the transactional boundary used by multi-write use-cases. Production
 	// wiring MUST supply one (the SQLite adapter implements it) so charge creation
 	// and settlement are atomic. When nil, services fall back to an autocommit

@@ -192,3 +192,41 @@ func TestPixSettlementCreateChargeDelegatesToGeneric(t *testing.T) {
 		t.Fatalf("unexpected create result: %+v", res)
 	}
 }
+
+// invalidatingBank is a generic provider that also caches credentials and so
+// implements ports.CredentialInvalidator (like the real C6 adapter).
+type invalidatingBank struct {
+	fakeBank
+	evicted []string
+}
+
+func (b *invalidatingBank) InvalidateToken(tenantID string) {
+	b.evicted = append(b.evicted, tenantID)
+}
+
+// TestPixSettlementForwardsInvalidateToken: the decorator forwards credential
+// eviction to a wrapped provider that supports it (ADR-0003).
+func TestPixSettlementForwardsInvalidateToken(t *testing.T) {
+	t.Parallel()
+	generic := &invalidatingBank{}
+	p := NewPixSettlementProvider(generic, &fakePix{})
+
+	// The assembled provider must be recognisable as a CredentialInvalidator.
+	inv, ok := any(p).(ports.CredentialInvalidator)
+	if !ok {
+		t.Fatal("PixSettlementProvider must satisfy ports.CredentialInvalidator")
+	}
+	inv.InvalidateToken("t1")
+	if len(generic.evicted) != 1 || generic.evicted[0] != "t1" {
+		t.Fatalf("eviction not forwarded to wrapped provider: %v", generic.evicted)
+	}
+}
+
+// TestPixSettlementInvalidateTokenNoopWhenUnsupported: forwarding is a safe no-op
+// when the wrapped provider holds no credential cache.
+func TestPixSettlementInvalidateTokenNoopWhenUnsupported(t *testing.T) {
+	t.Parallel()
+	p := NewPixSettlementProvider(&fakeBank{}, &fakePix{})
+	// Must not panic; the wrapped fakeBank is not a CredentialInvalidator.
+	p.InvalidateToken("t1")
+}
