@@ -80,7 +80,8 @@ Detalhes e modelo de ameaças em [`docs/security`](docs/security/README.md).
 
 ## Como rodar e testar
 
-Requer Go 1.23+.
+Requer Go 1.26+ (versão estável atual; o gate `govulncheck` exige uma stdlib sem
+vulnerabilidades conhecidas chamadas pelo código).
 
 ```bash
 # Build de tudo
