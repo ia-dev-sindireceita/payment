@@ -202,3 +202,42 @@ type BankProvider interface {
 	// webhook — threat W3).
 	GetCharge(ctx context.Context, tenantID, txID string) (ChargeResult, error)
 }
+
+// PixChargeResult is the bank's representation of an immediate PIX charge
+// (cobrança imediata): its reconciled lifecycle status plus the QR-code material
+// and the instant the QR expires.
+//
+//   - Status is the PSP's charge status verbatim (e.g. "ATIVA", "CONCLUIDA",
+//     "REMOVIDA_PELO_PSP"). Settlement decisions read this from GetImmediateCharge,
+//     never from a raw webhook (reconcile-before-settle, threat W3).
+//   - QRCodePayload is the BACEN "PIX copia e cola" (EMV) string the payer pastes
+//     into their bank app.
+//   - QRCodeLocation is the URL from which the QR-code image can be rendered.
+//   - ExpiresAt is the instant the QR/charge expires; the zero value means the PSP
+//     did not return an expiry. Callers treat now > ExpiresAt as an expired QR.
+//
+// It is intentionally distinct from ChargeResult: a PIX charge carries QR
+// lifecycle data a plain charge does not, and keeping it separate avoids widening
+// the generic charge result with PIX-only fields.
+type PixChargeResult struct {
+	TxID           string
+	Status         string
+	QRCodePayload  string
+	QRCodeLocation string
+	ExpiresAt      time.Time
+}
+
+// PixProvider is the output port for immediate PIX charges at the bank/PSP,
+// satisfied by the C6 adapter. It is kept separate from BankProvider (ISP) so a
+// use-case that only needs generic charges does not depend on PIX QR semantics.
+type PixProvider interface {
+	// CreateImmediateCharge idempotently creates an immediate PIX charge and
+	// returns its QR code and expiry. req.IdempotencyKey (falling back to the
+	// PaymentID) anchors idempotency: a re-submit with the same key resolves to the
+	// same charge and never creates a duplicate. expiresIn is the QR lifetime; a
+	// non-positive value lets the adapter apply its default.
+	CreateImmediateCharge(ctx context.Context, tenantID string, req ChargeRequest, expiresIn time.Duration) (PixChargeResult, error)
+	// GetImmediateCharge reconciles the authoritative state of a PIX charge — the
+	// source of truth for settlement (never trust a raw webhook — threat W3).
+	GetImmediateCharge(ctx context.Context, tenantID, txID string) (PixChargeResult, error)
+}
