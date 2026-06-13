@@ -51,11 +51,14 @@ type Config struct {
 	Now func() time.Time
 }
 
-// Provider implements ports.BankProvider against C6.
+// Provider implements ports.BankProvider (and ports.PixProvider) against C6.
 type Provider struct {
 	baseURL string
 	httpc   *http.Client
 	tokens  *tokenManager
+	// now is the clock used for PIX QR-expiry computation when the PSP omits the
+	// charge creation timestamp. Defaults to time.Now (overridable for tests).
+	now func() time.Time
 }
 
 // compile-time assertion that Provider satisfies the port.
@@ -92,6 +95,7 @@ func New(cfg Config, creds ports.CredentialStore) (*Provider, error) {
 		baseURL: trimTrailingSlash(cfg.BaseURL),
 		httpc:   httpc,
 		tokens:  newTokenManager(creds, cfg.TokenURL, cfg.Scope, httpc, now),
+		now:     now,
 	}, nil
 }
 
