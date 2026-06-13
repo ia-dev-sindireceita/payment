@@ -8,10 +8,17 @@ import (
 	"net/http"
 )
 
-// CSRF protection for browser-served, cookie-authenticated admin pages (the
-// HTMX admin UI in the child issue). The JSON tenant/admin API authenticates
-// with a Bearer token (not an ambient cookie) and is therefore not CSRF-exposed;
-// this middleware is for the HTML plane only.
+// CSRF protection for the browser-served HTMX admin console (/console).
+//
+// Auth transport (ADR-0001, docs/security): the console today authenticates only
+// via the Authorization: Bearer header — injected at the reverse proxy from an
+// edge-authenticated session — with no first-party session cookie. Because the
+// bearer header is not an ambient credential, a cross-origin attacker cannot
+// forge it, so this double-submit guard is currently belt-and-suspenders
+// (defense-in-depth) rather than load-bearing. It is kept wired so that if the
+// service later adopts a session cookie (ADR-0001 Option B), the model is already
+// in place and becomes load-bearing without a redesign. The JSON tenant/admin API
+// likewise authenticates by Bearer token and is not CSRF-exposed.
 //
 // Strategy: double-submit token. On a safe request the middleware mints a random
 // token, sets it in a cookie and exposes the same value via CSRFToken(ctx) so a
