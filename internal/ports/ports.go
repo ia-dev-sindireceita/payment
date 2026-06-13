@@ -6,8 +6,11 @@ package ports
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"time"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
@@ -88,6 +91,16 @@ type UnitOfWork interface {
 	WithinTx(ctx context.Context, fn func(r Repository) error) error
 }
 
+// AuditLog is the append-only output port for the privileged admin-plane audit
+// trail. Implementations MUST treat entries as immutable (append-only) and MUST
+// NOT persist or log any secret value — an audit.Entry carries only who/what/
+// tenant/when by construction. When backed by a persisted store, the append
+// should share the triggering operation's transaction so the action and its
+// audit record commit atomically (threat: forensic gaps).
+type AuditLog interface {
+	Append(ctx context.Context, e audit.Entry) error
+}
+
 // ProcessedEventStore records which external events (webhooks) have already been
 // handled, providing webhook idempotency / anti-replay (threat W2).
 type ProcessedEventStore interface {
@@ -124,6 +137,22 @@ type BankCredential struct {
 	ClientID string
 	// Secret is populated only transiently when resolved from the store.
 	Secret string
+}
+
+// String implements fmt.Stringer so a credential can never leak its secret
+// through %v/%s/%+v formatting in logs or errors (defense-in-depth, threat C1).
+func (c BankCredential) String() string {
+	return fmt.Sprintf("BankCredential{TenantID:%s ClientID:%s Secret:[REDACTED]}", c.TenantID, c.ClientID)
+}
+
+// LogValue implements slog.LogValuer so structured logging emits the credential
+// without its secret, even when logged as an attribute value (threat C1/C4).
+func (c BankCredential) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("tenant_id", c.TenantID),
+		slog.String("client_id", c.ClientID),
+		slog.String("secret", "[REDACTED]"),
+	)
 }
 
 // CredentialStore isolates bank credentials per tenant behind a secret store.
