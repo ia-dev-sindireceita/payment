@@ -27,6 +27,12 @@ type Error struct {
 	// message/body, so it is safe to surface.
 	Code string
 
+	// detail is an optional, non-sensitive clarification for adapter-originated
+	// failures that are not a plain HTTP status mapping — e.g. a 2xx response the
+	// adapter refused to trust. It is a fixed, code-authored string and never
+	// carries the raw upstream body, URL or any credential material.
+	detail string
+
 	sentinel error
 }
 
@@ -34,6 +40,8 @@ type Error struct {
 // upstream body.
 func (e *Error) Error() string {
 	switch {
+	case e.detail != "":
+		return fmt.Sprintf("c6 %s: %s: %v", e.Op, e.detail, e.sentinel)
 	case e.StatusCode == 0:
 		return fmt.Sprintf("c6 %s: upstream transport failure: %v", e.Op, e.sentinel)
 	case e.Code != "":

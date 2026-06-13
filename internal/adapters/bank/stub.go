@@ -18,18 +18,20 @@ import (
 type StubProvider struct {
 	creds ports.CredentialStore
 
-	mu      sync.Mutex
-	charges map[string]ports.ChargeResult // keyed by tenantID+"\x00"+txID
-	byIdem  map[string]ports.ChargeResult // keyed by tenantID+"\x00"+idempotencyKey
+	mu       sync.Mutex
+	charges  map[string]ports.ChargeResult  // keyed by tenantID+"\x00"+txID
+	byIdem   map[string]ports.ChargeResult  // keyed by tenantID+"\x00"+idempotencyKey
+	consents map[string]ports.ConsentResult // keyed by tenantID+"\x00"+consentID (C6-C)
 }
 
 // NewStubProvider builds a StubProvider. creds is used to demonstrate per-tenant
 // credential isolation at charge time (the secret is never logged).
 func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 	return &StubProvider{
-		creds:   creds,
-		charges: make(map[string]ports.ChargeResult),
-		byIdem:  make(map[string]ports.ChargeResult),
+		creds:    creds,
+		charges:  make(map[string]ports.ChargeResult),
+		byIdem:   make(map[string]ports.ChargeResult),
+		consents: make(map[string]ports.ConsentResult),
 	}
 }
 
