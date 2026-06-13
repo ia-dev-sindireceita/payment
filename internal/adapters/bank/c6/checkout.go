@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
@@ -68,10 +69,32 @@ func (p *Provider) CreateCheckoutSession(ctx context.Context, tenantID string, r
 	if err := p.do(httpReq, "create_checkout", &out); err != nil {
 		return ports.CheckoutResult{}, err
 	}
+	// Defense-in-depth (open-redirect): the caller redirects the payer to this
+	// URL. TLS protects the response in transit, but a tampered or compromised
+	// PSP could return a well-formed non-https / relative / opaque target and send
+	// the payer to phishing. Refuse anything that is not an absolute https URL
+	// rather than forward it. (A host allowlist of the C6 checkout domain would be
+	// stronger; it is a documented residual pending per-environment config.)
+	if err := validateRedirectURL(out.RedirectURL); err != nil {
+		return ports.CheckoutResult{}, err
+	}
 	return ports.CheckoutResult{
 		SessionID:   out.SessionID,
 		Status:      out.Status,
 		RedirectURL: out.RedirectURL,
 		AmountCents: out.AmountCents,
 	}, nil
+}
+
+// validateRedirectURL rejects a checkout redirect target that is not an absolute
+// https URL (empty/relative/opaque/non-https). It returns an *Error wrapping
+// shared.ErrUnavailable — the upstream returned a 2xx the adapter cannot safely
+// use — and never embeds the raw value, so a malicious URL cannot leak through an
+// error or log.
+func validateRedirectURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return &Error{Op: "create_checkout", detail: "untrusted redirect url", sentinel: shared.ErrUnavailable}
+	}
+	return nil
 }

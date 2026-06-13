@@ -418,6 +418,58 @@ func TestCheckoutMissingCredential(t *testing.T) {
 	}
 }
 
+// TestCreateCheckoutSessionRejectsUntrustedRedirectURL is the F2 regression: the
+// adapter must refuse to forward the payer to a redirect_url that is not an
+// absolute https URL, even on an otherwise-2xx response (tampered/compromised
+// PSP). The result must be empty and the error must map to ErrUnavailable without
+// leaking the malicious value.
+func TestCreateCheckoutSessionRejectsUntrustedRedirectURL(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		redirect string
+	}{
+		{"empty", ""},
+		{"http not https", "http://pay.c6/sess_1"},
+		{"scheme relative", "//evil.example/sess_1"},
+		{"path relative", "/sess_1"},
+		{"javascript scheme", "javascript:alert(1)"},
+		{"https without host", "https:///sess_1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ps := newProductServer(t)
+			ps.checkout = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				body, _ := json.Marshal(checkoutResponseBody{
+					SessionID: "sess_1", Status: "OPEN", RedirectURL: tc.redirect, AmountCents: 1500,
+				})
+				_, _ = w.Write(body)
+			}
+			p := ps.provider(t, oneTenant("t1", "c", "s"))
+
+			res, err := p.CreateCheckoutSession(context.Background(), "t1", ports.CheckoutRequest{
+				TenantID: "t1", SessionID: "sess_1", Currency: "BRL",
+				Items:     []ports.CheckoutItem{{Description: "a", AmountCents: 1500}},
+				ExpiresAt: time.Unix(1_800_000_000, 0),
+			})
+			if !errors.Is(err, shared.ErrUnavailable) {
+				t.Fatalf("untrusted redirect must map to ErrUnavailable, got %v", err)
+			}
+			if res != (ports.CheckoutResult{}) {
+				t.Fatalf("result must be empty on untrusted redirect, got %+v", res)
+			}
+			if tc.redirect != "" && strings.Contains(err.Error(), tc.redirect) {
+				t.Fatalf("error leaked the untrusted redirect url: %q", err.Error())
+			}
+			if !strings.Contains(err.Error(), "untrusted redirect url") {
+				t.Fatalf("error should name the guard, got %q", err.Error())
+			}
+		})
+	}
+}
+
 // TestProductSecretNeverLeaks asserts the client secret never reaches an error on
 // a product call when the token endpoint rejects the credentials.
 func TestProductSecretNeverLeaks(t *testing.T) {

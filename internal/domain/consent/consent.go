@@ -145,6 +145,21 @@ func (c Consent) Covers(amountCents int64) bool {
 	return amountCents > 0 && amountCents <= c.maxAmount.Cents()
 }
 
+// CanDebit reports whether a single recurring debit of amountCents may be
+// originated against this consent at instant at. It is the single, consolidated
+// secure-by-default guard that a debit-origination caller MUST use: a debit is
+// authorized only when ALL of the following hold — the consent is Active, at
+// falls inside the validity window, and the amount is within the per-cycle
+// ceiling.
+//
+// Folding Status/WithinWindow/Covers into one method removes the
+// insecure-by-default trap where a caller could move money by checking only a
+// subset (e.g. debiting a Pending/Cancelled consent, or one outside its window).
+// Prefer CanDebit over composing the three predicates by hand at debit time.
+func (c Consent) CanDebit(at time.Time, amountCents int64) bool {
+	return c.status == Active && c.WithinWindow(at) && c.Covers(amountCents)
+}
+
 // Activate transitions a Pending consent to Active. Activating from any other
 // state is an illegal transition.
 func (c *Consent) Activate() error {

@@ -144,6 +144,71 @@ func TestCovers(t *testing.T) {
 	}
 }
 
+// TestCanDebit is the F1 regression: the consolidated secure-by-default debit
+// guard must authorize a debit ONLY when the consent is Active AND the instant
+// is inside the window AND the amount is within the ceiling — and must deny when
+// any single condition fails (Pending/Cancelled, before/after window, zero/over
+// the ceiling), so no caller can move recurring money by checking a subset.
+func TestCanDebit(t *testing.T) {
+	t.Parallel()
+	max := mustMoney(t, 50000, "BRL")
+	start := ts(t, "2026-06-01T00:00:00Z")
+	end := ts(t, "2026-12-01T00:00:00Z")
+	inWindow := ts(t, "2026-07-01T00:00:00Z")
+
+	active := func() Consent {
+		c, _ := New("c1", "t1", "12345678901", max, Monthly, start, end)
+		if err := c.Activate(); err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		return c
+	}
+
+	// Happy path: active, in window, within ceiling.
+	if !active().CanDebit(inWindow, 50000) {
+		t.Fatal("active consent inside window and ceiling must permit debit")
+	}
+
+	// Status guard: Pending and Cancelled must deny even when window/amount are fine.
+	pending, _ := New("c1", "t1", "12345678901", max, Monthly, start, end)
+	if pending.CanDebit(inWindow, 1) {
+		t.Fatal("pending consent must deny debit")
+	}
+	cancelled := active()
+	if err := cancelled.Cancel(); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if cancelled.CanDebit(inWindow, 1) {
+		t.Fatal("cancelled consent must deny debit")
+	}
+
+	// Window guard: before start and after end must deny.
+	if active().CanDebit(ts(t, "2026-05-31T23:59:59Z"), 1) {
+		t.Fatal("debit before window start must be denied")
+	}
+	if active().CanDebit(ts(t, "2026-12-01T00:00:01Z"), 1) {
+		t.Fatal("debit after window end must be denied")
+	}
+
+	// Amount guard: zero/negative and over the per-cycle ceiling must deny.
+	if active().CanDebit(inWindow, 0) {
+		t.Fatal("zero amount must be denied")
+	}
+	if active().CanDebit(inWindow, -1) {
+		t.Fatal("negative amount must be denied")
+	}
+	if active().CanDebit(inWindow, 50001) {
+		t.Fatal("amount over the per-cycle ceiling must be denied")
+	}
+	// Boundary: exactly at the ceiling and exactly at the window edges is allowed.
+	if !active().CanDebit(start, 50000) {
+		t.Fatal("debit at window start and at the ceiling must be permitted")
+	}
+	if !active().CanDebit(end, 1) {
+		t.Fatal("debit at window end must be permitted")
+	}
+}
+
 func TestLifecycleTransitions(t *testing.T) {
 	t.Parallel()
 	mk := func() Consent {
