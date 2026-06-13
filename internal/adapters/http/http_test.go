@@ -32,6 +32,14 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureAuth(t, []string{adminToken})
+}
+
+// newFixtureAuth builds a fixture whose admin authenticator accepts the given
+// admin tokens (all RoleAdmin). Used by the rate-limit tests to exercise
+// per-token keying with more than one admin identity.
+func newFixtureAuth(t *testing.T, adminTokens []string) *fixture {
+	t.Helper()
 	store := persistence.NewStore()
 	creds := secret.NewStore(nil)
 	stub := bank.NewStubProvider(creds)
@@ -57,7 +65,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("seed price: %v", err)
 	}
 
-	auth := httpadapter.NewStaticTokenAuth(map[string]string{tenantToken: tn.ID()}, []string{adminToken}, webhookSec)
+	auth := httpadapter.NewStaticTokenAuth(map[string]string{tenantToken: tn.ID()}, adminTokens, webhookSec)
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:     app.NewChargeService(deps),
 		Admin:       admin,
@@ -242,5 +250,80 @@ func TestRateLimit(t *testing.T) {
 	}
 	if !limited {
 		t.Fatal("expected a 429 within 60 rapid requests")
+	}
+}
+
+// TestAdminRateLimit asserts the admin plane is rate-limited (SIN-64731 L1): a
+// rapid burst on any admin route trips a 429 after roughly the bucket capacity,
+// and the very first request is admitted (the limiter does not block legitimate
+// traffic outright). Table-driven across every admin route, each on its own
+// fixture so the buckets are independent.
+func TestAdminRateLimit(t *testing.T) {
+	t.Parallel()
+	// Matches the admin limiter capacity wired in server.go (newRateLimiter(20,10)).
+	// Generous upper bound tolerates negligible refill over a microsecond-scale burst.
+	const capacity = 20
+	routes := []struct {
+		name   string
+		method string
+		path   string
+		body   any
+	}{
+		{"create tenant", http.MethodPost, "/admin/tenants", map[string]any{"name": " "}},
+		{"set pricing", http.MethodPost, "/admin/tenants/x/pricing", map[string]any{"endpoint": "pix.create", "price_cents": 1}},
+		{"set bank credential", http.MethodPut, "/admin/tenants/x/bank-credential", map[string]any{"client_id": "c", "secret": "s"}},
+	}
+	for _, rt := range routes {
+		rt := rt
+		t.Run(rt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			limitedAt := -1
+			for i := 0; i < 60; i++ {
+				rec := do(t, f.handler, rt.method, rt.path, adminToken, nil, rt.body)
+				if i == 0 && rec.Code == http.StatusTooManyRequests {
+					t.Fatalf("first request must not be rate-limited, got 429")
+				}
+				if rec.Code == http.StatusTooManyRequests {
+					limitedAt = i
+					break
+				}
+			}
+			if limitedAt < 0 {
+				t.Fatalf("expected a 429 within 60 rapid admin requests")
+			}
+			if limitedAt < 1 || limitedAt > 3*capacity {
+				t.Fatalf("429 tripped at request %d, want it after the first and within burst", limitedAt)
+			}
+		})
+	}
+}
+
+// TestAdminRateLimitPerToken proves the admin limiter keys by token identity, not
+// just IP: two admin tokens sharing one client IP get independent buckets, so
+// exhausting one must not throttle the other.
+func TestAdminRateLimitPerToken(t *testing.T) {
+	t.Parallel()
+	const adminB = "atok2"
+	f := newFixtureAuth(t, []string{adminToken, adminB})
+
+	// Exhaust token A's bucket.
+	var aLimited bool
+	for i := 0; i < 60; i++ {
+		rec := do(t, f.handler, http.MethodPost, "/admin/tenants", adminToken, nil, map[string]any{"name": " "})
+		if rec.Code == http.StatusTooManyRequests {
+			aLimited = true
+			break
+		}
+	}
+	if !aLimited {
+		t.Fatal("token A was never rate-limited")
+	}
+
+	// Same process/IP, different token → fresh bucket, must not be limited. A 429
+	// here would mean the limiter keys by IP, defeating the per-token requirement.
+	rec := do(t, f.handler, http.MethodPost, "/admin/tenants", adminB, nil, map[string]any{"name": " "})
+	if rec.Code == http.StatusTooManyRequests {
+		t.Fatal("token B limited by token A's bucket — admin limiter is keyed per-IP, not per-token")
 	}
 }

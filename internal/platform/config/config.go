@@ -6,6 +6,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
@@ -21,6 +22,14 @@ type Config struct {
 	WebhookSecret  string
 	BankCreds      map[string]ports.BankCredential // tenantID -> credential
 	RabbitURL      string
+	// SecureCookies controls the Secure attribute on cookies the HTTP adapter
+	// sets (CSRF token, and the admin-UI session cookie). It is a deployment fact,
+	// NOT a per-request decision: the service runs plaintext ListenAndServe behind
+	// a TLS-terminating proxy, so r.TLS is always nil and X-Forwarded-Proto is
+	// client-spoofable — neither can be trusted to gate Secure. Config is
+	// unspoofable. Defaults to true (secure-by-default); set PAYMENT_SECURE_COOKIES
+	// to a falsey value only for plaintext local development.
+	SecureCookies bool
 }
 
 // FromEnv builds a Config from environment variables, applying safe defaults.
@@ -34,6 +43,7 @@ func FromEnv() Config {
 		WebhookSecret:  os.Getenv("PAYMENT_WEBHOOK_SECRET"),
 		BankCreds:      parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS")),
 		RabbitURL:      os.Getenv("PAYMENT_RABBIT_URL"),
+		SecureCookies:  getenvBool("PAYMENT_SECURE_COOKIES", true),
 	}
 }
 
@@ -42,6 +52,21 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// getenvBool resolves a boolean env var, falling back to def when the variable is
+// unset or unparseable. Failing back to def (true, for the Secure-cookie flag)
+// keeps a typo'd value from silently disabling a security control.
+func getenvBool(key string, def bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }
 
 // parseKV parses "k1:v1,k2:v2" into a map. Malformed pairs are skipped.

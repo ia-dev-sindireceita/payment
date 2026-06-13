@@ -1,6 +1,8 @@
 package http
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"sync"
 	"time"
@@ -76,6 +78,19 @@ func (rl *rateLimiter) middleware(keyFn func(*http.Request) string) func(http.Ha
 func tenantOrIPKey(r *http.Request) string {
 	if tid := tenantFromContext(r.Context()); tid != "" {
 		return "t:" + tid
+	}
+	return "ip:" + clientIP(r)
+}
+
+// adminTokenKey keys the admin-plane limiter by the presented admin token's
+// identity, falling back to the client IP when no bearer token is present. The
+// token is hashed (never used raw) so the limiter never holds the secret as a map
+// key, while each distinct admin identity still gets its own bucket — so one
+// admin's burst cannot throttle another sharing the same proxy IP.
+func adminTokenKey(r *http.Request) string {
+	if tok := bearerToken(r); tok != "" {
+		sum := sha256.Sum256([]byte(tok))
+		return "admin:" + base64.RawURLEncoding.EncodeToString(sum[:])
 	}
 	return "ip:" + clientIP(r)
 }

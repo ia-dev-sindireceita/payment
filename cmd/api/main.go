@@ -80,12 +80,13 @@ func run() error {
 	}
 	auth := httpadapter.NewStaticTokenAuthWithRoles(cfg.TenantTokens, adminRoles, cfg.WebhookSecret)
 	srv := httpadapter.NewServer(httpadapter.Config{
-		Charges:     app.NewChargeService(deps),
-		Admin:       app.NewAdminService(deps),
-		Webhooks:    app.NewWebhookService(deps),
-		TenantAuth:  auth,
-		AdminAuth:   auth,
-		WebhookAuth: auth,
+		Charges:       app.NewChargeService(deps),
+		Admin:         app.NewAdminService(deps),
+		Webhooks:      app.NewWebhookService(deps),
+		TenantAuth:    auth,
+		AdminAuth:     auth,
+		WebhookAuth:   auth,
+		SecureCookies: cfg.SecureCookies,
 	})
 
 	httpServer := &stdhttp.Server{

@@ -23,6 +23,30 @@ func TestFromEnvDefaults(t *testing.T) {
 	}
 }
 
+func TestFromEnvSecureCookies(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{"explicit true", "true", true},
+		{"explicit false", "false", false},
+		{"numeric false", "0", false},
+		{"numeric true", "1", true},
+		{"unparseable falls back to secure default", "maybe", true},
+		{"empty falls back to secure default", "", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PAYMENT_SECURE_COOKIES", tc.val)
+			if got := config.FromEnv().SecureCookies; got != tc.want {
+				t.Fatalf("SecureCookies(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFromEnvParsing(t *testing.T) {
 	t.Setenv("PAYMENT_HTTP_ADDR", ":9090")
 	t.Setenv("PAYMENT_DB_PATH", "/tmp/x.db")
