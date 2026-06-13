@@ -98,5 +98,7 @@ sessão), mantendo a explicação de por que o double-submit permanece.
 - Nenhuma mudança de código de runtime decorre desta decisão (A) além do
   comentário; a Opção B, se escolhida, vira issue própria.
 - **Ratificado:** CTO confirmou a Opção A em 2026-06-13; ADR marcado `Aceito`.
-- **Follow-up de infra:** documentar no runbook de ingress a premissa de deploy
-  (app só acessível via proxy confiável; token nunca vaza para browser/URL/log).
+- **Follow-up de infra (concluído):** a premissa de deploy está documentada como
+  pré-requisito de go-live em [`../ops/ingress-runbook.md`](../ops/ingress-runbook.md)
+  (app só acessível via proxy confiável; token nunca vaza para browser/URL/log;
+  sessão do operador autenticada no edge antes da injeção do bearer) — [SIN-64744](/SIN/issues/SIN-64744).
