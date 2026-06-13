@@ -1,7 +1,7 @@
 // Package config parses process configuration from the environment. Secrets
-// (tokens, webhook secret, bank credentials) come from the environment / secret
-// manager — never from code or URLs (threat C1). A real deployment swaps this
-// for a vault-backed loader; the shape stays the same.
+// (tokens, per-tenant webhook refs, bank credentials) come from the environment /
+// secret manager — never from code or URLs (threat C1). A real deployment swaps
+// this for a vault-backed loader; the shape stays the same.
 package config
 
 import (
@@ -20,9 +20,15 @@ type Config struct {
 	TenantTokens   map[string]string // token -> tenantID
 	AdminTokens    []string          // full-access admin tokens (RoleAdmin)
 	OperatorTokens []string          // read-only admin tokens (RoleOperator)
-	WebhookSecret  string
-	BankCreds      map[string]ports.BankCredential // tenantID -> credential
-	RabbitURL      string
+	// WebhookRefs maps an opaque per-tenant callback reference (tenantRef) to the
+	// tenant it was minted for. The C6 webhook is unsigned, so the unguessable ref
+	// embedded in the callback URL (/webhooks/c6/{tenantRef}) IS the per-tenant
+	// credential (ADR-0002/F4). Each value must be a 43-char base64url token (mint
+	// with httpadapter.GenerateTenantRef); malformed entries are dropped
+	// (failure-closed). This is a secret — never log the ref or the full URL.
+	WebhookRefs map[string]string               // tenantRef -> tenantID
+	BankCreds   map[string]ports.BankCredential // tenantID -> credential
+	RabbitURL   string
 	// SecureCookies controls the Secure attribute on cookies the HTTP adapter
 	// sets (CSRF token, and the admin-UI session cookie). It is a deployment fact,
 	// NOT a per-request decision: the service runs plaintext ListenAndServe behind
@@ -55,7 +61,7 @@ func FromEnv() Config {
 		TenantTokens:   parseKV(os.Getenv("PAYMENT_TENANT_TOKENS")),
 		AdminTokens:    splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
 		OperatorTokens: splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
-		WebhookSecret:  os.Getenv("PAYMENT_WEBHOOK_SECRET"),
+		WebhookRefs:    parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
 		BankCreds:      parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS")),
 		RabbitURL:      os.Getenv("PAYMENT_RABBIT_URL"),
 		SecureCookies:  getenvBool("PAYMENT_SECURE_COOKIES", true),
