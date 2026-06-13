@@ -48,3 +48,23 @@ func (s *Store) Set(tenantID string, c ports.BankCredential) {
 	c.TenantID = tenantID
 	s.creds[tenantID] = c
 }
+
+// SetBankCredential implements ports.CredentialWriter: it persists a tenant's
+// bank credential. The secret is held only in the store and never returned,
+// logged or echoed (threat C1/C4). Empty inputs are rejected as a validation
+// error without including the secret value in the message.
+func (s *Store) SetBankCredential(_ context.Context, tenantID, clientID, secret string) error {
+	if tenantID == "" {
+		return shared.NewValidationError("tenant_id", "is required")
+	}
+	if clientID == "" {
+		return shared.NewValidationError("client_id", "is required")
+	}
+	if secret == "" {
+		return shared.NewValidationError("secret", "is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.creds[tenantID] = ports.BankCredential{TenantID: tenantID, ClientID: clientID, Secret: secret}
+	return nil
+}

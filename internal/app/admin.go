@@ -9,18 +9,20 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
 
-// AdminService implements the admin plane: tenant lifecycle and per-endpoint
-// pricing. These operations are privileged (RBAC enforced at the boundary).
+// AdminService implements the admin plane: tenant lifecycle, per-endpoint
+// pricing and per-tenant bank credential management. These operations are
+// privileged (RBAC enforced at the boundary).
 type AdminService struct {
-	tenants ports.TenantRepository
-	pricing ports.PricingRepository
-	clock   ports.Clock
-	ids     ports.IDProvider
+	tenants    ports.TenantRepository
+	pricing    ports.PricingRepository
+	credWriter ports.CredentialWriter
+	clock      ports.Clock
+	ids        ports.IDProvider
 }
 
 // NewAdminService wires an AdminService from the provided ports.
 func NewAdminService(d Deps) *AdminService {
-	return &AdminService{tenants: d.Tenants, pricing: d.Pricing, clock: d.Clock, ids: d.IDs}
+	return &AdminService{tenants: d.Tenants, pricing: d.Pricing, credWriter: d.CredWriter, clock: d.Clock, ids: d.IDs}
 }
 
 // CreateTenant provisions a new tenant and returns it.
@@ -49,4 +51,22 @@ func (s *AdminService) SetEndpointPrice(ctx context.Context, tenantID, endpoint 
 		return billing.EndpointPricing{}, fmt.Errorf("upsert price: %w", err)
 	}
 	return p, nil
+}
+
+// SetBankCredential stores a tenant's bank (PSP) credential via the secret-store
+// write port. The target tenant must exist (defense-in-depth alongside the
+// boundary RBAC + tenant-scope checks). The secret is passed straight through to
+// the writer: it never enters domain state, and on failure the returned error
+// wraps only sentinel/validation context — never the secret value (threat
+// C1/C4). The caller (admin handler) supplies tenantID explicitly; admin crosses
+// tenants by design but every credential write names exactly one tenant.
+func (s *AdminService) SetBankCredential(ctx context.Context, tenantID, clientID, secret string) error {
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return fmt.Errorf("resolve tenant: %w", err)
+	}
+	if err := s.credWriter.SetBankCredential(ctx, tenantID, clientID, secret); err != nil {
+		// Wrap with a non-sensitive context only; never include the secret.
+		return fmt.Errorf("set bank credential: %w", err)
+	}
+	return nil
 }
