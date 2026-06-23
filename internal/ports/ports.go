@@ -657,13 +657,26 @@ type CheckoutRequest struct {
 	IdempotencyKey        string
 }
 
-// CheckoutResult is the bank's response to opening a checkout session. RedirectURL
-// is the hosted page the caller sends the payer to.
+// CheckoutResult is the bank's response to a checkout-session operation (open,
+// reconcile, cancel). RedirectURL is the hosted page the caller sends the payer to
+// (only meaningful while a session is open).
+//
+// For settlement (the checkout webhook, roteiro 12) the money is reconciled, not only
+// the status (threat W3, mirroring ChargeResult): AmountCents is the session's
+// authorized total (the expected amount) and ReceivedAmountCents is what the PSP
+// reports as actually captured. AmountReconciled asserts the two add up before a
+// payment is liquidated, so a partial/over capture or a manipulated notification can
+// never settle for the wrong amount.
 type CheckoutResult struct {
 	SessionID   string
 	Status      string
 	RedirectURL string
+	// AmountCents is the session's authorized total in cents (the expected amount).
 	AmountCents int64
+	// ReceivedAmountCents is the amount the PSP reports as captured for the session in
+	// cents (zero while the session is open/unpaid). AmountReconciled compares it to
+	// AmountCents before settlement.
+	ReceivedAmountCents int64
 	// CardType / RequireAuthentication echo the permitted payment method back so the
 	// caller's response is self-describing (the C6 create response does not echo
 	// them; the adapter sets them from the request).
@@ -671,7 +684,34 @@ type CheckoutResult struct {
 	RequireAuthentication bool
 }
 
-// CheckoutProvider is the output port for the unified C6 checkout session.
+// AmountReconciled reports whether the amount captured on the session exactly matches
+// its authorized total. It mirrors ChargeResult.AmountReconciled: a non-positive
+// expected total is never reconciled, so an absent/garbled amount fails closed
+// (settlement refused) rather than liquidating for zero.
+func (r CheckoutResult) AmountReconciled() bool {
+	return r.AmountCents > 0 && r.ReceivedAmountCents == r.AmountCents
+}
+
+// CheckoutProvider is the output port for the unified C6 checkout session: open a
+// session (roteiro 9), reconcile its authoritative state (roteiro 10) and cancel it
+// (roteiro 11). Each method carries tenantID explicitly so per-tenant credential
+// isolation is never bypassed.
 type CheckoutProvider interface {
 	CreateCheckoutSession(ctx context.Context, tenantID string, req CheckoutRequest) (CheckoutResult, error)
+	// GetCheckoutSession reconciles the authoritative state of a checkout session
+	// (roteiro 10). The read is tenant-scoped (per-tenant token); an unknown id within
+	// the tenant is shared.ErrNotFound, so one tenant can never observe another's
+	// session. It is the source of truth for settlement (never trust a raw webhook).
+	GetCheckoutSession(ctx context.Context, tenantID, sessionID string) (CheckoutResult, error)
+	// CancelCheckoutSession cancels a checkout session (roteiro 11). It is idempotent:
+	// cancelling an already-cancelled session succeeds and returns the cancelled state.
+	// An unknown id within the tenant is shared.ErrNotFound (no cross-tenant oracle).
+	CancelCheckoutSession(ctx context.Context, tenantID, sessionID string) (CheckoutResult, error)
+}
+
+// CheckoutReconciler is the narrow read-only view of CheckoutProvider the webhook
+// settlement path depends on (ISP): it only needs to reconcile a session's
+// authoritative state before settling, not to open or cancel one.
+type CheckoutReconciler interface {
+	GetCheckoutSession(ctx context.Context, tenantID, sessionID string) (CheckoutResult, error)
 }

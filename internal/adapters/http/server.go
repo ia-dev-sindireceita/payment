@@ -139,9 +139,12 @@ func (s *Server) Router() http.Handler {
 		r.Get("/pix/cobv/{txid}", s.handleGetPixCobV)
 		r.Put("/pix/cobv/{txid}", s.handleUpdatePixCobV)
 		r.Get("/pix/{txid}", s.handleGetPix)
-		// Unified hosted checkout — open a session (roteiro 9.a–9.c). Create only in
-		// F1; consultar/cancelar/webhook (grupos 10–12) are deferred to F3.
+		// Unified hosted checkout — open a session (roteiro 9.a–9.c), reconcile it
+		// (grupo 10, GET) and cancel it (grupo 11, DELETE). The status webhook (grupo
+		// 12) reuses the shared /webhooks/c6/{tenantRef} handler below.
 		r.Post("/checkout", s.handleCreateCheckout)
+		r.Get("/checkout/{id}", s.handleGetCheckout)
+		r.Delete("/checkout/{id}", s.handleCancelCheckout)
 		// BolePix boletos — full lifecycle: register with fine/interest/discount
 		// variants (grupos 1–3), read by id (6.a), baixa/cancelamento (DELETE, grupo
 		// 4) and alteração de vencimento/validade/valor (PUT, grupo 5).

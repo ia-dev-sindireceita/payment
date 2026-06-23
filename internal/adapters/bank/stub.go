@@ -23,15 +23,16 @@ type StubProvider struct {
 	now func() time.Time
 
 	mu         sync.Mutex
-	charges    map[string]ports.ChargeResult  // keyed by tenantID+"\x00"+txID
-	byIdem     map[string]ports.ChargeResult  // keyed by tenantID+"\x00"+idempotencyKey
-	consents   map[string]ports.ConsentResult // keyed by tenantID+"\x00"+consentID (C6-C)
-	pixCharges map[string]stubPixCharge       // keyed by tenantID+"\x00"+txID (PIX cobrança imediata)
-	pixByIdem  map[string]string              // keyed by tenantID+"\x00"+idempotencyKey -> txID
-	cobv       map[string]stubPixCharge       // keyed by tenantID+"\x00"+txID (PIX cobrança com vencimento)
-	cobvByIdem map[string]string              // keyed by tenantID+"\x00"+idempotencyKey -> txID
-	webhooks   map[string]string              // keyed by tenantID+"\x00"+chave -> webhook URL
-	boletos    map[string]ports.BoletoResult  // keyed by tenantID+"\x00"+boletoID (BolePix)
+	charges    map[string]ports.ChargeResult   // keyed by tenantID+"\x00"+txID
+	byIdem     map[string]ports.ChargeResult   // keyed by tenantID+"\x00"+idempotencyKey
+	consents   map[string]ports.ConsentResult  // keyed by tenantID+"\x00"+consentID (C6-C)
+	pixCharges map[string]stubPixCharge        // keyed by tenantID+"\x00"+txID (PIX cobrança imediata)
+	pixByIdem  map[string]string               // keyed by tenantID+"\x00"+idempotencyKey -> txID
+	cobv       map[string]stubPixCharge        // keyed by tenantID+"\x00"+txID (PIX cobrança com vencimento)
+	cobvByIdem map[string]string               // keyed by tenantID+"\x00"+idempotencyKey -> txID
+	webhooks   map[string]string               // keyed by tenantID+"\x00"+chave -> webhook URL
+	boletos    map[string]ports.BoletoResult   // keyed by tenantID+"\x00"+boletoID (BolePix)
+	checkouts  map[string]ports.CheckoutResult // keyed by tenantID+"\x00"+sessionID (unified checkout)
 	// cobvCharges holds PIX cobrança-com-vencimento (cobv) charges keyed by
 	// tenantID+"\x00"+txID; cobvDueByIdem maps the idempotency anchor to its txID so a
 	// re-submit resolves to the same charge (roteiro 7.5–7.7).
@@ -61,6 +62,7 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		cobvByIdem:    make(map[string]string),
 		webhooks:      make(map[string]string),
 		boletos:       make(map[string]ports.BoletoResult),
+		checkouts:     make(map[string]ports.CheckoutResult),
 		cobvCharges:   make(map[string]ports.PixDueChargeResult),
 		cobvDueByIdem: make(map[string]string),
 	}

@@ -166,7 +166,11 @@ func (s *StubProvider) UpdateBoleto(ctx context.Context, tenantID, boletoID stri
 }
 
 // CreateCheckoutSession opens a checkout session deterministically, summing the
-// item amounts and returning a placeholder hosted redirect URL.
+// item amounts and returning a placeholder hosted redirect URL. The session is
+// retained (keyed by tenant+id) so GetCheckoutSession can reconcile it (roteiro 10)
+// and CancelCheckoutSession can cancel it (roteiro 11). Opening is idempotent on
+// (tenant, session id): a repeat call returns the existing record rather than
+// re-opening, modelling the PSP collapsing a retried open.
 func (s *StubProvider) CreateCheckoutSession(ctx context.Context, tenantID string, req ports.CheckoutRequest) (ports.CheckoutResult, error) {
 	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
 		return ports.CheckoutResult{}, err
@@ -175,12 +179,88 @@ func (s *StubProvider) CreateCheckoutSession(ctx context.Context, tenantID strin
 	for _, it := range req.Items {
 		sum += it.AmountCents
 	}
-	return ports.CheckoutResult{
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(tenantID, req.SessionID)
+	if prev, ok := s.checkouts[k]; ok {
+		return prev, nil // PSP dedupe: same (tenant, id) => same session, no new effect
+	}
+	res := ports.CheckoutResult{
 		SessionID:             req.SessionID,
 		Status:                "OPEN",
 		RedirectURL:           "https://checkout.c6.example/" + req.SessionID,
 		AmountCents:           sum,
 		CardType:              req.CardType,
 		RequireAuthentication: req.RequireAuthentication,
-	}, nil
+	}
+	s.checkouts[k] = res
+	return res, nil
+}
+
+// GetCheckoutSession returns the authoritative state of a checkout session for the
+// tenant (roteiro 10). An unknown id within the tenant is shared.ErrNotFound; the read
+// is keyed by (tenant, id) so one tenant can never observe another's session.
+func (s *StubProvider) GetCheckoutSession(ctx context.Context, tenantID, sessionID string) (ports.CheckoutResult, error) {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+		return ports.CheckoutResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, ok := s.checkouts[key(tenantID, sessionID)]
+	if !ok {
+		return ports.CheckoutResult{}, shared.ErrNotFound
+	}
+	return res, nil
+}
+
+// CancelCheckoutSession cancels a checkout session (roteiro 11). It is idempotent: a
+// second cancel of an already-cancelled session succeeds and returns the cancelled
+// state. The redirect URL is cleared on cancel (a cancelled session is not payable).
+// An unknown (tenant, id) is shared.ErrNotFound, so one tenant can never cancel
+// another's session.
+func (s *StubProvider) CancelCheckoutSession(ctx context.Context, tenantID, sessionID string) (ports.CheckoutResult, error) {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+		return ports.CheckoutResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(tenantID, sessionID)
+	res, ok := s.checkouts[k]
+	if !ok {
+		return ports.CheckoutResult{}, shared.ErrNotFound
+	}
+	res.Status = "CANCELLED"
+	res.RedirectURL = ""
+	s.checkouts[k] = res
+	return res, nil
+}
+
+// MarkCheckoutPaid flips a checkout session to paid and reconciles the full authorized
+// total (test/dev hook simulating the PSP capturing a correctly-paid session): the
+// received amount equals the expected total so AmountReconciled holds. A no-op for an
+// unknown session.
+func (s *StubProvider) MarkCheckoutPaid(tenantID, sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(tenantID, sessionID)
+	if res, ok := s.checkouts[k]; ok {
+		res.Status = "paid"
+		res.ReceivedAmountCents = res.AmountCents
+		s.checkouts[k] = res
+	}
+}
+
+// MarkCheckoutPaidWithReceived flips a checkout session to paid with a specific
+// received amount (test/dev hook simulating a divergent capture: partial payment or
+// overpayment). When received != expected, AmountReconciled is false and settlement
+// must be refused. A no-op for an unknown session.
+func (s *StubProvider) MarkCheckoutPaidWithReceived(tenantID, sessionID string, receivedCents int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(tenantID, sessionID)
+	if res, ok := s.checkouts[k]; ok {
+		res.Status = "paid"
+		res.ReceivedAmountCents = receivedCents
+		s.checkouts[k] = res
+	}
 }
