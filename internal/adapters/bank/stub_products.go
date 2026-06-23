@@ -71,19 +71,51 @@ func (s *StubProvider) CancelConsent(ctx context.Context, tenantID, consentID st
 }
 
 // CreateBoleto registers a boleto deterministically, deriving a txid from the
-// boleto id and returning placeholder scannable artifacts.
+// boleto id and returning placeholder scannable artifacts. The registered state
+// (including the fine/interest/discount parameters) is retained so GetBoleto can
+// reconcile it (roteiro 6.a). Registration is idempotent on (tenant, boleto id): a
+// repeat call returns the existing record rather than registering a new boleto.
 func (s *StubProvider) CreateBoleto(ctx context.Context, tenantID string, req ports.BoletoRequest) (ports.BoletoResult, error) {
 	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
 		return ports.BoletoResult{}, err
 	}
-	return ports.BoletoResult{
-		BoletoID:    req.BoletoID,
-		TxID:        "tx_" + req.BoletoID,
-		Status:      "REGISTERED",
-		QRCode:      "pix-emv-" + req.BoletoID,
-		Barcode:     "barcode-" + req.BoletoID,
-		AmountCents: req.AmountCents,
-	}, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(tenantID, req.BoletoID)
+	if prev, ok := s.boletos[k]; ok {
+		return prev, nil // PSP dedupe: same (tenant, id) => same boleto, no new effect
+	}
+	res := ports.BoletoResult{
+		BoletoID:           req.BoletoID,
+		TxID:               "tx_" + req.BoletoID,
+		Status:             "REGISTERED",
+		QRCode:             "pix-emv-" + req.BoletoID,
+		Barcode:            "barcode-" + req.BoletoID,
+		AmountCents:        req.AmountCents,
+		DueDate:            req.DueDate,
+		FineBps:            req.FineBps,
+		FineFixedCents:     req.FineFixedCents,
+		MonthlyInterestBps: req.MonthlyInterestBps,
+		Discounts:          req.Discounts,
+	}
+	s.boletos[k] = res
+	return res, nil
+}
+
+// GetBoleto returns the authoritative state of a registered boleto for the tenant
+// (roteiro 6.a). An unknown id within the tenant is shared.ErrNotFound; the read is
+// keyed by (tenant, id) so one tenant can never observe another's boleto.
+func (s *StubProvider) GetBoleto(ctx context.Context, tenantID, boletoID string) (ports.BoletoResult, error) {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+		return ports.BoletoResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, ok := s.boletos[key(tenantID, boletoID)]
+	if !ok {
+		return ports.BoletoResult{}, shared.ErrNotFound
+	}
+	return res, nil
 }
 
 // CreateCheckoutSession opens a checkout session deterministically, summing the
