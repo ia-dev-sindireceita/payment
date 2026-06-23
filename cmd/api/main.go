@@ -83,6 +83,9 @@ func run() error {
 	// PIX-webhook (7.8) ports — both segregated from the immediate Pix port (ISP).
 	pixScheduledProvider, _ := pixProvider.(ports.PixScheduledProvider)
 	pixWebhookRegistrar, _ := pixProvider.(ports.PixWebhookRegistrar)
+	// The raw provider also satisfies the segregated cobv port (PIX com vencimento,
+	// roteiro 7.5–7.7).
+	cobvProvider, _ := pixProvider.(ports.PixDueChargeProvider)
 
 	deps := app.Deps{
 		Payments:        store,
@@ -95,6 +98,7 @@ func run() error {
 		Pix:             pixProvider,
 		PixScheduled:    pixScheduledProvider,
 		PixWebhook:      pixWebhookRegistrar,
+		PixDueCharge:    cobvProvider,
 		Checkout:        checkoutProvider,
 		Boleto:          boletoProvider,
 		Credentials:     creds,
@@ -153,6 +157,7 @@ func run() error {
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:       app.NewChargeService(deps),
 		Pix:           app.NewPixService(deps),
+		PixCobV:       app.NewPixDueChargeService(deps),
 		Checkout:      app.NewCheckoutService(deps),
 		Boleto:        app.NewBoletoService(deps),
 		Admin:         app.NewAdminService(deps),

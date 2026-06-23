@@ -17,6 +17,7 @@ import (
 type Server struct {
 	charges     *app.ChargeService
 	pix         *app.PixService
+	pixCobV     *app.PixDueChargeService
 	checkout    *app.CheckoutService
 	boleto      *app.BoletoService
 	admin       *app.AdminService
@@ -38,6 +39,10 @@ type Config struct {
 	// deployments/tests that do not serve the PIX surface — the routes are then
 	// registered but never exercised.
 	Pix *app.PixService
+	// PixCobV backs the PIX cobrança-com-vencimento tenant routes (/v1/pix/cobv). It
+	// may be nil for deployments/tests that do not serve the cobv surface — the routes
+	// are then registered but never exercised.
+	PixCobV *app.PixDueChargeService
 	// Checkout backs the unified hosted-checkout tenant route (POST /v1/checkout). It
 	// may be nil for deployments/tests that do not serve checkout — the route is then
 	// registered but never exercised.
@@ -64,6 +69,7 @@ func NewServer(c Config) *Server {
 	return &Server{
 		charges:     c.Charges,
 		pix:         c.Pix,
+		pixCobV:     c.PixCobV,
 		checkout:    c.Checkout,
 		boleto:      c.Boleto,
 		admin:       c.Admin,
@@ -125,7 +131,13 @@ func (s *Server) Router() http.Handler {
 		r.Get("/pix/scheduled", s.handleListScheduledPix)
 		r.Get("/pix/scheduled/{txid}", s.handleGetScheduledPix)
 		r.Post("/pix/webhook", s.handleRegisterPixWebhook)
-		r.Get("/pix/{txid}", s.handleGetPix)
+		// PIX cobrança com vencimento (cobv, roteiro 7.5–7.7). Registered before the
+		// immediate-charge {txid} read so chi routes the literal "cobv" segment apart
+		// from a txid. Create generates the txid server-side (like immediate pix);
+		// get/update address it.
+		r.Post("/pix/cobv", s.handleCreatePixCobV)
+		r.Get("/pix/cobv/{txid}", s.handleGetPixCobV)
+		r.Put("/pix/cobv/{txid}", s.handleUpdatePixCobV)		r.Get("/pix/{txid}", s.handleGetPix)
 		// Unified hosted checkout — open a session (roteiro 9.a–9.c). Create only in
 		// F1; consultar/cancelar/webhook (grupos 10–12) are deferred to F3.
 		r.Post("/checkout", s.handleCreateCheckout)
