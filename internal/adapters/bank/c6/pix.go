@@ -87,12 +87,19 @@ type pixChargeRequestBody struct {
 }
 
 // buildDevedor maps the request's optional devedor fields into the PSP block, or
-// returns nil when no payer was supplied. The document is placed in cpf or cnpj by
-// length (14 ⇒ CNPJ, otherwise CPF): the use-case has already validated the id is
-// an 11- or 14-digit string before it reaches here, so no further check is needed.
+// returns nil when no payer was supplied (immediate charges may omit the payer).
 func buildDevedor(req ports.ChargeRequest) *pixDevedor {
-	taxID := strings.TrimSpace(req.DebtorTaxID)
-	name := strings.TrimSpace(req.DebtorName)
+	return buildDevedorFields(req.DebtorTaxID, req.DebtorName)
+}
+
+// buildDevedorFields maps a (taxID, name) pair into the PSP devedor block, or
+// returns nil when both are empty. The document is placed in cpf or cnpj by length
+// (14 ⇒ CNPJ, otherwise CPF): the use-case has already validated the id is an 11- or
+// 14-digit string before it reaches here, so no further check is needed. It is shared
+// by the immediate (optional devedor) and scheduled (required devedor) charge paths.
+func buildDevedorFields(taxID, name string) *pixDevedor {
+	taxID = strings.TrimSpace(taxID)
+	name = strings.TrimSpace(name)
 	if taxID == "" && name == "" {
 		return nil
 	}
