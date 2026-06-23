@@ -73,6 +73,10 @@ func run() error {
 	// the settlement wrapper forwards it; the stub does not implement it, so this
 	// assertion yields nil and the admin services fall back to a no-op evictor.
 	credInvalidator, _ := bankProvider.(ports.CredentialInvalidator)
+	// The raw provider (c6p in production, the stub in stub mode) also satisfies the
+	// segregated checkout port; the settlement wrapper does not, so derive it from
+	// pixProvider (the raw provider) rather than bankProvider.
+	checkoutProvider, _ := pixProvider.(ports.CheckoutProvider)
 
 	deps := app.Deps{
 		Payments:        store,
@@ -83,6 +87,7 @@ func run() error {
 		Bus:             inmemory.NewBus(),
 		Bank:            bankProvider,
 		Pix:             pixProvider,
+		Checkout:        checkoutProvider,
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
@@ -139,6 +144,7 @@ func run() error {
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:       app.NewChargeService(deps),
 		Pix:           app.NewPixService(deps),
+		Checkout:      app.NewCheckoutService(deps),
 		Admin:         app.NewAdminService(deps),
 		Console:       console,
 		UI:            ui,

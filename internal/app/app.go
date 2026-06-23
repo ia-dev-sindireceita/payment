@@ -25,7 +25,12 @@ type Deps struct {
 	// from Bank (ISP): PixService depends only on it. In production it is the C6
 	// provider itself (the raw PixProvider, NOT the settlement wrapper); in stub mode
 	// it is the in-memory StubProvider. When nil, PixService is simply not wired.
-	Pix         ports.PixProvider
+	Pix ports.PixProvider
+	// Checkout is the unified C6 hosted-checkout port (roteiro 9). Segregated from
+	// Bank/Pix (ISP): CheckoutService depends only on it. In production it is the C6
+	// provider; in stub mode the in-memory StubProvider. When nil, CheckoutService is
+	// simply not wired.
+	Checkout    ports.CheckoutProvider
 	Credentials ports.CredentialStore
 	// CredWriter is the admin-plane write path for per-tenant bank credentials.
 	// Kept separate from Credentials (the reader) so each service depends only on
