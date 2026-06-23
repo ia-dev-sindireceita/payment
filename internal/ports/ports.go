@@ -492,7 +492,8 @@ type PixDueChargeProvider interface {
 	// the full new parameter set. An unknown txid within the tenant is
 	// shared.ErrNotFound; the operation is tenant-scoped so one tenant can never amend
 	// another's charge.
-	UpdateDueCharge(ctx context.Context, tenantID, txID string, req PixDueChargeRequest) (PixDueChargeResult, error)}
+	UpdateDueCharge(ctx context.Context, tenantID, txID string, req PixDueChargeRequest) (PixDueChargeResult, error)
+}
 
 // PixListFilter is the date-window + pagination filter for listing immediate PIX
 // charges. Start and End are the BACEN inicio/fim bounds (required); Page and
