@@ -204,6 +204,15 @@ type ChargeRequest struct {
 	// did not supply one; adapters MUST then fall back to a deterministic key
 	// (e.g. PaymentID) and never silently drop idempotency.
 	IdempotencyKey string
+	// DebtorTaxID and DebtorName identify the payer (devedor) on an immediate PIX
+	// charge (homologação roteiro 7.2). Both are OPTIONAL — a PIX charge may omit
+	// the devedor entirely — and apply ONLY to the PIX immediate-charge port; the
+	// generic BankProvider charge path ignores them. DebtorTaxID, when present, is an
+	// all-digit CPF (11) or CNPJ (14); the use-case validates the format at its
+	// boundary before it reaches the adapter, so the adapter only maps it into the
+	// PSP's devedor block. DebtorName is the payer's name and is never logged.
+	DebtorTaxID string
+	DebtorName  string
 }
 
 // ChargeResult is the bank's response to a generic charge (the non-PIX charge
@@ -324,6 +333,32 @@ type PixProvider interface {
 	// GetImmediateCharge reconciles the authoritative state of a PIX charge — the
 	// source of truth for settlement (never trust a raw webhook — threat W3).
 	GetImmediateCharge(ctx context.Context, tenantID, txID string) (PixChargeResult, error)
+	// ListImmediateCharges returns the immediate PIX charges created within the
+	// filter's date window (BACEN GET /cob by interval, homologação roteiro 7.4),
+	// paginated. It is a pure read and never mutates a charge. The tenant is explicit
+	// so per-tenant credential isolation is never bypassed (threat H1/P1).
+	ListImmediateCharges(ctx context.Context, tenantID string, filter PixListFilter) (PixChargeList, error)
+}
+
+// PixListFilter is the date-window + pagination filter for listing immediate PIX
+// charges. Start and End are the BACEN inicio/fim bounds (required); Page and
+// PageSize map to paginacao.paginaAtual / paginacao.itensPorPagina (optional — a
+// zero value lets the adapter/PSP apply its default).
+type PixListFilter struct {
+	Start    time.Time
+	End      time.Time
+	Page     int
+	PageSize int
+}
+
+// PixChargeList is a page of immediate PIX charges plus the pagination echo from
+// the PSP so a caller can iterate the full window.
+type PixChargeList struct {
+	Charges    []PixChargeResult
+	Page       int
+	PageSize   int
+	TotalItems int
+	TotalPages int
 }
 
 // The product-specific bank ports below (PIX Automático consent, BolePix boleto,

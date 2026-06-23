@@ -34,6 +34,12 @@ func (f *fakePix) GetImmediateCharge(_ context.Context, tenantID, txID string) (
 	return f.res, nil
 }
 
+// ListImmediateCharges satisfies ports.PixProvider. The settlement bridge never
+// lists (it only overrides the reconcile read), so this is an unused stub.
+func (f *fakePix) ListImmediateCharges(_ context.Context, _ string, _ ports.PixListFilter) (ports.PixChargeList, error) {
+	return ports.PixChargeList{}, f.err
+}
+
 // fakeBank is a controllable ports.BankProvider used as the embedded generic
 // surface. GetCharge must NEVER be called through the bridge (the bridge overrides
 // it); a call here flips genericGetCalled so the test can assert it stayed off the
