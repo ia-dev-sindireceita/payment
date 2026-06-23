@@ -35,6 +35,7 @@ type productServer struct {
 	consentGet    http.HandlerFunc
 	consentCancel http.HandlerFunc
 	boletoCreate  http.HandlerFunc
+	boletoGet     http.HandlerFunc
 	checkout      http.HandlerFunc
 }
 
@@ -94,6 +95,15 @@ func newProductServer(t *testing.T) *productServer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"boleto_id":"bol_1","txid":"tx_1","status":"REGISTERED","qr_code":"pix-emv","barcode":"123","amount_cents":1000}`))
+	})
+	mux.HandleFunc("GET /boletos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if ps.boletoGet != nil {
+			ps.boletoGet(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"boleto_id":"bol_1","txid":"tx_1","status":"REGISTERED","qr_code":"pix-emv","barcode":"123","amount_cents":1000,"fine_bps":200,"monthly_interest_bps":100,"discounts":[{"days_before_due":0,"bps":500}]}`))
 	})
 	mux.HandleFunc("POST /checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
