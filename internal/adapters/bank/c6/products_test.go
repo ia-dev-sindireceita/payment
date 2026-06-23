@@ -36,6 +36,8 @@ type productServer struct {
 	consentCancel http.HandlerFunc
 	boletoCreate  http.HandlerFunc
 	boletoGet     http.HandlerFunc
+	boletoCancel  http.HandlerFunc
+	boletoUpdate  http.HandlerFunc
 	checkout      http.HandlerFunc
 }
 
@@ -104,6 +106,24 @@ func newProductServer(t *testing.T) *productServer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"boleto_id":"bol_1","txid":"tx_1","status":"REGISTERED","qr_code":"pix-emv","barcode":"123","amount_cents":1000,"fine_bps":200,"monthly_interest_bps":100,"discounts":[{"days_before_due":0,"bps":500}]}`))
+	})
+	mux.HandleFunc("DELETE /boletos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if ps.boletoCancel != nil {
+			ps.boletoCancel(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"boleto_id":"bol_1","txid":"tx_1","status":"CANCELLED","qr_code":"pix-emv","barcode":"123","amount_cents":1000}`))
+	})
+	mux.HandleFunc("PUT /boletos/{id}", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if ps.boletoUpdate != nil {
+			ps.boletoUpdate(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"boleto_id":"bol_1","txid":"tx_1","status":"REGISTERED","qr_code":"pix-emv","barcode":"123","amount_cents":2000,"fine_bps":150,"monthly_interest_bps":80}`))
 	})
 	mux.HandleFunc("POST /checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
 		record(r)

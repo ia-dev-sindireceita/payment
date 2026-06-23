@@ -121,11 +121,13 @@ func (s *Server) Router() http.Handler {
 		// Unified hosted checkout — open a session (roteiro 9.a–9.c). Create only in
 		// F1; consultar/cancelar/webhook (grupos 10–12) are deferred to F3.
 		r.Post("/checkout", s.handleCreateCheckout)
-		// BolePix boletos — register with fine/interest/discount variants (roteiro
-		// grupos 1–3) and read back by id (grupo 6). Baixa (DELETE, grupo 4) and
-		// alteração (PUT, grupo 5) are deferred to PR-B of F2.
+		// BolePix boletos — full lifecycle: register with fine/interest/discount
+		// variants (grupos 1–3), read by id (6.a), baixa/cancelamento (DELETE, grupo
+		// 4) and alteração de vencimento/validade/valor (PUT, grupo 5).
 		r.Post("/boletos", s.handleCreateBoleto)
 		r.Get("/boletos/{id}", s.handleGetBoleto)
+		r.Delete("/boletos/{id}", s.handleDeleteBoleto)
+		r.Put("/boletos/{id}", s.handleUpdateBoleto)
 	})
 
 	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route

@@ -61,6 +61,74 @@ func TestStubGetBoletoIsolation(t *testing.T) {
 	}
 }
 
+// roteiro grupo 4: baixa marca CANCELLED (idempotente); unknown/cross-tenant → 404.
+func TestStubCancelBoleto(t *testing.T) {
+	t.Parallel()
+	s := newStub(t)
+	ctx := context.Background()
+	if _, err := s.CreateBoleto(ctx, "t1", ports.BoletoRequest{TenantID: "t1", BoletoID: "bol_1", AmountCents: 100, Currency: "BRL"}); err != nil {
+		t.Fatalf("CreateBoleto: %v", err)
+	}
+
+	res, err := s.CancelBoleto(ctx, "t1", "bol_1")
+	if err != nil || res.Status != "CANCELLED" {
+		t.Fatalf("cancel: status=%q err=%v", res.Status, err)
+	}
+	// GET now reflects cancellation; a second cancel is idempotent.
+	got, _ := s.GetBoleto(ctx, "t1", "bol_1")
+	if got.Status != "CANCELLED" {
+		t.Fatalf("get after cancel: %q", got.Status)
+	}
+	if _, err := s.CancelBoleto(ctx, "t1", "bol_1"); err != nil {
+		t.Fatalf("second cancel must be idempotent: %v", err)
+	}
+	// unknown id and cross-tenant cancel → not found (no oracle).
+	if _, err := s.CancelBoleto(ctx, "t1", "nope"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("unknown cancel: want ErrNotFound, got %v", err)
+	}
+	if _, err := s.CancelBoleto(ctx, "other", "bol_1"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("cross-tenant cancel: want ErrNotFound, got %v", err)
+	}
+}
+
+// roteiro grupo 5: alteração amends mutable params; unknown/cross-tenant → 404.
+func TestStubUpdateBoleto(t *testing.T) {
+	t.Parallel()
+	s := newStub(t)
+	ctx := context.Background()
+	due := time.Unix(1_800_000_000, 0).UTC()
+	if _, err := s.CreateBoleto(ctx, "t1", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "bol_1", AmountCents: 100000, Currency: "BRL",
+		DueDate: due, FineBps: 200, MonthlyInterestBps: 100,
+	}); err != nil {
+		t.Fatalf("CreateBoleto: %v", err)
+	}
+
+	newDue := due.Add(48 * time.Hour)
+	validUntil := newDue.Add(120 * time.Hour)
+	res, err := s.UpdateBoleto(ctx, "t1", "bol_1", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "bol_1", AmountCents: 90000, Currency: "BRL",
+		DueDate: newDue, ValidUntil: validUntil, FineBps: 150, MonthlyInterestBps: 50,
+	})
+	if err != nil {
+		t.Fatalf("UpdateBoleto: %v", err)
+	}
+	if res.AmountCents != 90000 || res.FineBps != 150 || !res.DueDate.Equal(newDue) || !res.ValidUntil.Equal(validUntil) {
+		t.Fatalf("amended fields not applied: %+v", res)
+	}
+	// Identity preserved; GET reflects the amendment.
+	got, _ := s.GetBoleto(ctx, "t1", "bol_1")
+	if got.TxID != "tx_bol_1" || got.AmountCents != 90000 {
+		t.Fatalf("get after update: %+v", got)
+	}
+	if _, err := s.UpdateBoleto(ctx, "t1", "nope", ports.BoletoRequest{TenantID: "t1", BoletoID: "nope"}); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("unknown update: want ErrNotFound, got %v", err)
+	}
+	if _, err := s.UpdateBoleto(ctx, "other", "bol_1", ports.BoletoRequest{TenantID: "other", BoletoID: "bol_1"}); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("cross-tenant update: want ErrNotFound, got %v", err)
+	}
+}
+
 // Registration is idempotent on (tenant, id): a repeat returns the same record.
 func TestStubCreateBoletoIdempotent(t *testing.T) {
 	t.Parallel()

@@ -93,6 +93,7 @@ func (s *StubProvider) CreateBoleto(ctx context.Context, tenantID string, req po
 		Barcode:            "barcode-" + req.BoletoID,
 		AmountCents:        req.AmountCents,
 		DueDate:            req.DueDate,
+		ValidUntil:         req.ValidUntil,
 		FineBps:            req.FineBps,
 		FineFixedCents:     req.FineFixedCents,
 		MonthlyInterestBps: req.MonthlyInterestBps,
@@ -115,6 +116,52 @@ func (s *StubProvider) GetBoleto(ctx context.Context, tenantID, boletoID string)
 	if !ok {
 		return ports.BoletoResult{}, shared.ErrNotFound
 	}
+	return res, nil
+}
+
+// CancelBoleto performs the baixa/cancelamento of a registered boleto (roteiro grupo
+// 4). It is idempotent: a second cancel of an already-cancelled boleto succeeds and
+// returns the cancelled state. An unknown (tenant, id) is shared.ErrNotFound, so one
+// tenant can never cancel another's boleto.
+func (s *StubProvider) CancelBoleto(ctx context.Context, tenantID, boletoID string) (ports.BoletoResult, error) {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+		return ports.BoletoResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(tenantID, boletoID)
+	res, ok := s.boletos[k]
+	if !ok {
+		return ports.BoletoResult{}, shared.ErrNotFound
+	}
+	res.Status = "CANCELLED"
+	s.boletos[k] = res
+	return res, nil
+}
+
+// UpdateBoleto amends a registered boleto's mutable parameters (roteiro grupo 5),
+// preserving its identity and scannable artifacts. An unknown (tenant, id) is
+// shared.ErrNotFound, so one tenant can never amend another's boleto.
+func (s *StubProvider) UpdateBoleto(ctx context.Context, tenantID, boletoID string, req ports.BoletoRequest) (ports.BoletoResult, error) {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+		return ports.BoletoResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(tenantID, boletoID)
+	res, ok := s.boletos[k]
+	if !ok {
+		return ports.BoletoResult{}, shared.ErrNotFound
+	}
+	// Amend only the mutable parameters; identity (id/txid) and artifacts stay put.
+	res.AmountCents = req.AmountCents
+	res.DueDate = req.DueDate
+	res.ValidUntil = req.ValidUntil
+	res.FineBps = req.FineBps
+	res.FineFixedCents = req.FineFixedCents
+	res.MonthlyInterestBps = req.MonthlyInterestBps
+	res.Discounts = req.Discounts
+	s.boletos[k] = res
 	return res, nil
 }
 

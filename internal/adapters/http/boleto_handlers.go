@@ -36,6 +36,29 @@ type createBoletoRequest struct {
 	PayerTaxID         string              `json:"payer_tax_id"`
 }
 
+// updateBoletoRequest is the boundary body for PUT /v1/boletos/{id} (alteração, grupo
+// 5): due date (5.a), validity (5.b), amount/fine/interest (5.c). due_date/valid_until
+// are RFC3339. Unknown fields are rejected by decodeJSON (anti mass-assignment).
+type updateBoletoRequest struct {
+	AmountCents        int64               `json:"amount_cents"`
+	Currency           string              `json:"currency"`
+	DueDate            string              `json:"due_date"`
+	ValidUntil         string              `json:"valid_until"`
+	FineBps            int64               `json:"fine_bps"`
+	FineFixedCents     int64               `json:"fine_fixed_cents"`
+	MonthlyInterestBps int64               `json:"monthly_interest_bps"`
+	Discounts          []boletoDiscountReq `json:"discounts"`
+}
+
+// toDiscountInputs maps the boundary discount tiers to the use-case inputs.
+func toDiscountInputs(in []boletoDiscountReq) []app.DiscountTierInput {
+	out := make([]app.DiscountTierInput, len(in))
+	for i, d := range in {
+		out[i] = app.DiscountTierInput{DaysBeforeDue: d.DaysBeforeDue, Bps: d.Bps, FixedCents: d.FixedCents}
+	}
+	return out
+}
+
 // boletoDiscountView mirrors a registered discount tier in the response.
 type boletoDiscountView struct {
 	DaysBeforeDue int   `json:"days_before_due"`
@@ -54,6 +77,7 @@ type boletoView struct {
 	Barcode            string               `json:"barcode"`
 	AmountCents        int64                `json:"amount_cents"`
 	DueDate            string               `json:"due_date,omitempty"`
+	ValidUntil         string               `json:"valid_until,omitempty"`
 	FineBps            int64                `json:"fine_bps"`
 	FineFixedCents     int64                `json:"fine_fixed_cents,omitempty"`
 	MonthlyInterestBps int64                `json:"monthly_interest_bps"`
@@ -76,6 +100,9 @@ func toBoletoView(r ports.BoletoResult, amountCents int64) boletoView {
 	}
 	if !r.DueDate.IsZero() {
 		v.DueDate = r.DueDate.UTC().Format(time.RFC3339)
+	}
+	if !r.ValidUntil.IsZero() {
+		v.ValidUntil = r.ValidUntil.UTC().Format(time.RFC3339)
 	}
 	if len(r.Discounts) > 0 {
 		v.Discounts = make([]boletoDiscountView, len(r.Discounts))
@@ -114,10 +141,7 @@ func (s *Server) handleCreateBoleto(w http.ResponseWriter, r *http.Request) {
 		MonthlyInterestBps: req.MonthlyInterestBps,
 		PayerTaxID:         req.PayerTaxID,
 		IdempotencyKey:     idemKey,
-	}
-	in.Discounts = make([]app.DiscountTierInput, len(req.Discounts))
-	for i, d := range req.Discounts {
-		in.Discounts[i] = app.DiscountTierInput{DaysBeforeDue: d.DaysBeforeDue, Bps: d.Bps, FixedCents: d.FixedCents}
+		Discounts:          toDiscountInputs(req.Discounts),
 	}
 
 	p, res, err := s.boleto.RegisterBoleto(r.Context(), in)
@@ -132,6 +156,67 @@ func (s *Server) handleGetBoleto(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromContext(r.Context())
 	id := chi.URLParam(r, "id")
 	res, err := s.boleto.GetBoleto(r.Context(), tenantID, id)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toBoletoView(res, res.AmountCents))
+}
+
+// handleDeleteBoleto performs the baixa/cancelamento of a boleto (roteiro grupo 4)
+// and returns 204 No Content on success.
+func (s *Server) handleDeleteBoleto(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenantFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+	if err := s.boleto.CancelBoleto(r.Context(), tenantID, id); err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleUpdateBoleto amends a boleto's parameters (roteiro grupo 5) and returns the
+// updated representation. The Idempotency-Key header is mandatory (write).
+func (s *Server) handleUpdateBoleto(w http.ResponseWriter, r *http.Request) {
+	tenantID := tenantFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+	idemKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idemKey == "" {
+		writeError(w, http.StatusBadRequest, "missing Idempotency-Key header")
+		return
+	}
+	var req updateBoletoRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+
+	due, ok := parseRFC3339(req.DueDate)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid or missing due_date (RFC3339)")
+		return
+	}
+
+	in := app.UpdateBoletoInput{
+		TenantID:           tenantID,
+		AmountCents:        req.AmountCents,
+		Currency:           req.Currency,
+		DueDate:            due,
+		FineBps:            req.FineBps,
+		FineFixedCents:     req.FineFixedCents,
+		MonthlyInterestBps: req.MonthlyInterestBps,
+		IdempotencyKey:     idemKey,
+		Discounts:          toDiscountInputs(req.Discounts),
+	}
+	if raw := strings.TrimSpace(req.ValidUntil); raw != "" {
+		vu, ok := parseRFC3339(raw)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid valid_until (RFC3339)")
+			return
+		}
+		in.ValidUntil = vu
+	}
+
+	res, err := s.boleto.UpdateBoleto(r.Context(), tenantID, id, in)
 	if err != nil {
 		writeDomainError(w, err)
 		return

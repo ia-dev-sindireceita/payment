@@ -287,6 +287,151 @@ func TestGetBoletoValidationAndNotFound(t *testing.T) {
 	}
 }
 
+func baseUpdateInput(tenantID, idemKey string) app.UpdateBoletoInput {
+	return app.UpdateBoletoInput{
+		TenantID:           tenantID,
+		AmountCents:        90000,
+		Currency:           "BRL",
+		DueDate:            boletoDueDate,
+		FineBps:            150,
+		MonthlyInterestBps: 50,
+		IdempotencyKey:     idemKey,
+	}
+}
+
+// registerOne registers a boleto and returns its id (helper for cancel/update tests).
+func registerOne(t *testing.T, svc *app.BoletoService, tenantID, idemKey string) string {
+	t.Helper()
+	_, res, err := svc.RegisterBoleto(context.Background(), baseBoletoInput(tenantID, idemKey))
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	return res.BoletoID
+}
+
+// roteiro grupo 4: baixa a-vencer (4.a) e vencido (4.b) — ambos retornam sucesso.
+func TestCancelBoleto(t *testing.T) {
+	t.Parallel()
+	svc, _, tenantID := newBoletoHarness(t)
+	id := registerOne(t, svc, tenantID, "k-cancel")
+
+	if err := svc.CancelBoleto(context.Background(), tenantID, id); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	got, err := svc.GetBoleto(context.Background(), tenantID, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != "CANCELLED" {
+		t.Fatalf("status after cancel = %q, want CANCELLED", got.Status)
+	}
+	// Idempotent second cancel.
+	if err := svc.CancelBoleto(context.Background(), tenantID, id); err != nil {
+		t.Fatalf("second cancel: %v", err)
+	}
+}
+
+func TestCancelBoletoErrors(t *testing.T) {
+	t.Parallel()
+	svc, _, tenantID := newBoletoHarness(t)
+	if err := svc.CancelBoleto(context.Background(), tenantID, "  "); !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("blank id: want validation, got %v", err)
+	}
+	if err := svc.CancelBoleto(context.Background(), tenantID, "missing"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("unknown id: want not found, got %v", err)
+	}
+}
+
+// roteiro grupo 5: alteração de vencimento (5.a), validade (5.b), valor/multa/juros (5.c).
+func TestUpdateBoletoVariants(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mut    func(*app.UpdateBoletoInput)
+		verify func(*testing.T, ports.BoletoResult)
+	}{
+		{"5a_due_date", func(in *app.UpdateBoletoInput) { in.DueDate = boletoDueDate.Add(72 * time.Hour) },
+			func(t *testing.T, r ports.BoletoResult) {
+				if !r.DueDate.Equal(boletoDueDate.Add(72 * time.Hour)) {
+					t.Fatalf("due not amended: %v", r.DueDate)
+				}
+			}},
+		{"5b_validity", func(in *app.UpdateBoletoInput) { in.ValidUntil = boletoDueDate.Add(240 * time.Hour) },
+			func(t *testing.T, r ports.BoletoResult) {
+				if !r.ValidUntil.Equal(boletoDueDate.Add(240 * time.Hour)) {
+					t.Fatalf("validity not amended: %v", r.ValidUntil)
+				}
+			}},
+		{"5c_amount_fine_interest", func(in *app.UpdateBoletoInput) {
+			in.AmountCents = 70000
+			in.FineFixedCents = 1000
+			in.FineBps = 0
+			in.MonthlyInterestBps = 80
+		}, func(t *testing.T, r ports.BoletoResult) {
+			if r.AmountCents != 70000 || r.FineFixedCents != 1000 || r.MonthlyInterestBps != 80 {
+				t.Fatalf("amount/fine/interest not amended: %+v", r)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc, h, tenantID := newBoletoHarness(t)
+			id := registerOne(t, svc, tenantID, "k-"+tc.name)
+			in := baseUpdateInput(tenantID, "u-"+tc.name)
+			tc.mut(&in)
+			res, err := svc.UpdateBoleto(context.Background(), tenantID, id, in)
+			if err != nil {
+				t.Fatalf("update: %v", err)
+			}
+			if res.BoletoID != id {
+				t.Fatalf("identity changed: %s != %s", res.BoletoID, id)
+			}
+			tc.verify(t, res)
+			// Amendment does not bill again (register billed once).
+			if h.store.LedgerLen() != 1 {
+				t.Fatalf("update must not bill again, ledger=%d", h.store.LedgerLen())
+			}
+		})
+	}
+}
+
+func TestUpdateBoletoErrors(t *testing.T) {
+	t.Parallel()
+	svc, _, tenantID := newBoletoHarness(t)
+	id := registerOne(t, svc, tenantID, "k-upderr")
+
+	mut := func(f func(*app.UpdateBoletoInput)) app.UpdateBoletoInput {
+		in := baseUpdateInput(tenantID, "u1")
+		f(&in)
+		return in
+	}
+	cases := []struct {
+		name    string
+		id      string
+		in      app.UpdateBoletoInput
+		wantErr error
+	}{
+		{"blank_id", "  ", baseUpdateInput(tenantID, "u1"), shared.ErrValidation},
+		{"missing_idem", id, mut(func(in *app.UpdateBoletoInput) { in.IdempotencyKey = "" }), shared.ErrValidation},
+		{"bad_currency", id, mut(func(in *app.UpdateBoletoInput) { in.Currency = "XX" }), shared.ErrValidation},
+		{"fine_over_cap", id, mut(func(in *app.UpdateBoletoInput) { in.FineBps = 201 }), shared.ErrValidation},
+		{"validity_before_due", id, mut(func(in *app.UpdateBoletoInput) { in.ValidUntil = boletoDueDate.Add(-48 * time.Hour) }), shared.ErrValidation},
+		{"unknown_id", "missing", baseUpdateInput(tenantID, "u1"), shared.ErrNotFound},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := svc.UpdateBoleto(context.Background(), tenantID, tc.id, tc.in)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("%s: want %v, got %v", tc.name, tc.wantErr, err)
+			}
+		})
+	}
+}
+
 // Concurrent registers with the same idempotency key must register/bill exactly once.
 func TestRegisterBoletoConcurrentSameKey(t *testing.T) {
 	t.Parallel()
