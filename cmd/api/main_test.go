@@ -19,12 +19,15 @@ func (noopCreds) GetBankCredential(context.Context, string) (ports.BankCredentia
 // wiring when PAYMENT_C6_BASE_URL is unset (the launch-default; C6 must not be
 // settlement-live until the routing decision lands — SIN-64780).
 func TestNewBankProviderSelectsStubWhenUnset(t *testing.T) {
-	b, err := newBankProvider(config.Config{}, noopCreds{})
+	b, pix, err := newBankProvider(config.Config{}, noopCreds{})
 	if err != nil {
 		t.Fatalf("newBankProvider: %v", err)
 	}
 	if _, ok := b.(*bank.StubProvider); !ok {
 		t.Fatalf("want *bank.StubProvider when C6 base URL is unset, got %T", b)
+	}
+	if _, ok := pix.(*bank.StubProvider); !ok {
+		t.Fatalf("want *bank.StubProvider as the PIX provider when unset, got %T", pix)
 	}
 }
 
@@ -37,12 +40,19 @@ func TestNewBankProviderWrapsC6InPixSettlement(t *testing.T) {
 	cfg.C6.BaseURL = "https://api.c6bank.example"
 	cfg.C6.TokenURL = "https://api.c6bank.example/oauth/token"
 
-	b, err := newBankProvider(cfg, noopCreds{})
+	b, pix, err := newBankProvider(cfg, noopCreds{})
 	if err != nil {
 		t.Fatalf("newBankProvider: %v", err)
 	}
 	if _, ok := b.(*bank.PixSettlementProvider); !ok {
 		t.Fatalf("want *bank.PixSettlementProvider for a configured C6, got %T", b)
+	}
+	// The raw PIX provider is the C6 provider itself (NOT the settlement wrapper):
+	// PixService speaks the BACEN PIX shape directly. The settlement wrapper does not
+	// even satisfy ports.PixProvider, so a non-nil PIX provider here is necessarily
+	// the underlying C6 provider.
+	if pix == nil {
+		t.Fatal("want a non-nil PIX provider for a configured C6")
 	}
 }
 
@@ -53,7 +63,7 @@ func TestNewBankProviderRejectsInsecureC6(t *testing.T) {
 	cfg.C6.BaseURL = "http://api.c6bank.example"
 	cfg.C6.TokenURL = "https://api.c6bank.example/oauth/token"
 
-	if _, err := newBankProvider(cfg, noopCreds{}); err == nil {
+	if _, _, err := newBankProvider(cfg, noopCreds{}); err == nil {
 		t.Fatal("expected an error for a non-HTTPS C6 base URL")
 	}
 }

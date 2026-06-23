@@ -65,7 +65,7 @@ func run() error {
 	// otherwise fall back to the in-memory stub (local dev / tests). The C6
 	// adapter rejects non-HTTPS endpoints, so a misconfigured URL fails startup
 	// rather than silently downgrading the transport.
-	bankProvider, err := newBankProvider(cfg, creds)
+	bankProvider, pixProvider, err := newBankProvider(cfg, creds)
 	if err != nil {
 		return err
 	}
@@ -82,6 +82,7 @@ func run() error {
 		Processed:       store,
 		Bus:             inmemory.NewBus(),
 		Bank:            bankProvider,
+		Pix:             pixProvider,
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
@@ -137,6 +138,7 @@ func run() error {
 	})
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:       app.NewChargeService(deps),
+		Pix:           app.NewPixService(deps),
 		Admin:         app.NewAdminService(deps),
 		Console:       console,
 		UI:            ui,
@@ -189,10 +191,17 @@ func run() error {
 // capability, so run() recovers the invalidator with a single type assertion on
 // the returned provider (the stub holds no cache and does not implement it, which
 // degrades to a no-op in the admin services — ADR-0003).
-func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.BankProvider, error) {
+// It returns the generic BankProvider (charge creation + settlement reconcile via
+// the PIX-verified read) AND the raw PixProvider for the immediate-PIX-charge
+// use-case (PixService). In stub mode both are the same in-memory StubProvider; for
+// C6 the BankProvider is the settlement wrapper while the PixProvider is the raw C6
+// provider (PixService must speak the BACEN PIX shape directly, not through the
+// generic settlement translation).
+func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.BankProvider, ports.PixProvider, error) {
 	if cfg.C6.BaseURL == "" {
 		log.Print("api: PAYMENT_C6_BASE_URL not set — using in-memory bank stub")
-		return bank.NewStubProvider(creds), nil
+		stub := bank.NewStubProvider(creds)
+		return stub, stub, nil
 	}
 	c6p, err := c6.New(c6.Config{
 		BaseURL:  cfg.C6.BaseURL,
@@ -201,7 +210,7 @@ func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.Bank
 		Timeout:  cfg.C6.Timeout,
 	}, creds)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return bank.NewPixSettlementProvider(c6p, c6p), nil
+	return bank.NewPixSettlementProvider(c6p, c6p), c6p, nil
 }

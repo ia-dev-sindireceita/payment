@@ -14,13 +14,18 @@ const (
 // Deps bundles the output ports the application services depend on. Each service
 // takes only the narrow set it needs; Deps is a convenience for wiring in cmd.
 type Deps struct {
-	Payments    ports.PaymentRepository
-	Tenants     ports.TenantRepository
-	Pricing     ports.PricingRepository
-	Ledger      ports.LedgerRepository
-	Processed   ports.ProcessedEventStore
-	Bus         ports.MessageBus
-	Bank        ports.BankProvider
+	Payments  ports.PaymentRepository
+	Tenants   ports.TenantRepository
+	Pricing   ports.PricingRepository
+	Ledger    ports.LedgerRepository
+	Processed ports.ProcessedEventStore
+	Bus       ports.MessageBus
+	Bank      ports.BankProvider
+	// Pix is the immediate-PIX-charge port (cobrança imediata). It is segregated
+	// from Bank (ISP): PixService depends only on it. In production it is the C6
+	// provider itself (the raw PixProvider, NOT the settlement wrapper); in stub mode
+	// it is the in-memory StubProvider. When nil, PixService is simply not wired.
+	Pix         ports.PixProvider
 	Credentials ports.CredentialStore
 	// CredWriter is the admin-plane write path for per-tenant bank credentials.
 	// Kept separate from Credentials (the reader) so each service depends only on
