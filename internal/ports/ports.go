@@ -446,12 +446,18 @@ type CheckoutItem struct {
 
 // CheckoutRequest is the input to open a unified C6 hosted checkout session.
 type CheckoutRequest struct {
-	TenantID       string
-	SessionID      string
-	Currency       string
-	Items          []CheckoutItem
-	ExpiresAt      time.Time
-	IdempotencyKey string
+	TenantID  string
+	SessionID string
+	Currency  string
+	Items     []CheckoutItem
+	ExpiresAt time.Time
+	// CardType is the permitted card payment method ("credit"|"debit"); the hosted
+	// page routes the payer accordingly (roteiro 9.a–9.c).
+	CardType string
+	// RequireAuthentication asks the hosted page to authenticate the payer (step-up
+	// / 3-DS) before capture (roteiro 9.c).
+	RequireAuthentication bool
+	IdempotencyKey        string
 }
 
 // CheckoutResult is the bank's response to opening a checkout session. RedirectURL
@@ -461,6 +467,11 @@ type CheckoutResult struct {
 	Status      string
 	RedirectURL string
 	AmountCents int64
+	// CardType / RequireAuthentication echo the permitted payment method back so the
+	// caller's response is self-describing (the C6 create response does not echo
+	// them; the adapter sets them from the request).
+	CardType              string
+	RequireAuthentication bool
 }
 
 // CheckoutProvider is the output port for the unified C6 checkout session.

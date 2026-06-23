@@ -17,6 +17,7 @@ import (
 type Server struct {
 	charges     *app.ChargeService
 	pix         *app.PixService
+	checkout    *app.CheckoutService
 	admin       *app.AdminService
 	console     *app.ConsoleService
 	ui          *adminweb.Renderer
@@ -35,7 +36,11 @@ type Config struct {
 	// Pix backs the immediate-PIX-charge tenant routes (/v1/pix). It may be nil for
 	// deployments/tests that do not serve the PIX surface — the routes are then
 	// registered but never exercised.
-	Pix         *app.PixService
+	Pix *app.PixService
+	// Checkout backs the unified hosted-checkout tenant route (POST /v1/checkout). It
+	// may be nil for deployments/tests that do not serve checkout — the route is then
+	// registered but never exercised.
+	Checkout    *app.CheckoutService
 	Admin       *app.AdminService
 	Console     *app.ConsoleService
 	UI          *adminweb.Renderer
@@ -54,6 +59,7 @@ func NewServer(c Config) *Server {
 	return &Server{
 		charges:     c.Charges,
 		pix:         c.Pix,
+		checkout:    c.Checkout,
 		admin:       c.Admin,
 		console:     c.Console,
 		ui:          c.UI,
@@ -106,6 +112,9 @@ func (s *Server) Router() http.Handler {
 		r.Post("/pix", s.handleCreatePix)
 		r.Get("/pix", s.handleListPix)
 		r.Get("/pix/{txid}", s.handleGetPix)
+		// Unified hosted checkout — open a session (roteiro 9.a–9.c). Create only in
+		// F1; consultar/cancelar/webhook (grupos 10–12) are deferred to F3.
+		r.Post("/checkout", s.handleCreateCheckout)
 	})
 
 	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route
