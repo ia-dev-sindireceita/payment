@@ -77,6 +77,8 @@ func run() error {
 	// segregated checkout port; the settlement wrapper does not, so derive it from
 	// pixProvider (the raw provider) rather than bankProvider.
 	checkoutProvider, _ := pixProvider.(ports.CheckoutProvider)
+	// The raw provider also satisfies the segregated boleto port (BolePix grupos 1–6).
+	boletoProvider, _ := pixProvider.(ports.BoletoProvider)
 
 	deps := app.Deps{
 		Payments:        store,
@@ -88,6 +90,7 @@ func run() error {
 		Bank:            bankProvider,
 		Pix:             pixProvider,
 		Checkout:        checkoutProvider,
+		Boleto:          boletoProvider,
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
@@ -145,6 +148,7 @@ func run() error {
 		Charges:       app.NewChargeService(deps),
 		Pix:           app.NewPixService(deps),
 		Checkout:      app.NewCheckoutService(deps),
+		Boleto:        app.NewBoletoService(deps),
 		Admin:         app.NewAdminService(deps),
 		Console:       console,
 		UI:            ui,

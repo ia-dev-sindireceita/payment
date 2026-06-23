@@ -30,7 +30,12 @@ type Deps struct {
 	// Bank/Pix (ISP): CheckoutService depends only on it. In production it is the C6
 	// provider; in stub mode the in-memory StubProvider. When nil, CheckoutService is
 	// simply not wired.
-	Checkout    ports.CheckoutProvider
+	Checkout ports.CheckoutProvider
+	// Boleto is the BolePix boleto port (roteiro grupos 1–6). Segregated from
+	// Bank/Pix/Checkout (ISP): BoletoService depends only on it. In production it is
+	// the C6 provider; in stub mode the in-memory StubProvider. When nil, BoletoService
+	// is simply not wired.
+	Boleto      ports.BoletoProvider
 	Credentials ports.CredentialStore
 	// CredWriter is the admin-plane write path for per-tenant bank credentials.
 	// Kept separate from Credentials (the reader) so each service depends only on

@@ -18,6 +18,7 @@ type Server struct {
 	charges     *app.ChargeService
 	pix         *app.PixService
 	checkout    *app.CheckoutService
+	boleto      *app.BoletoService
 	admin       *app.AdminService
 	console     *app.ConsoleService
 	ui          *adminweb.Renderer
@@ -40,7 +41,11 @@ type Config struct {
 	// Checkout backs the unified hosted-checkout tenant route (POST /v1/checkout). It
 	// may be nil for deployments/tests that do not serve checkout — the route is then
 	// registered but never exercised.
-	Checkout    *app.CheckoutService
+	Checkout *app.CheckoutService
+	// Boleto backs the BolePix boleto tenant routes (/v1/boletos). It may be nil for
+	// deployments/tests that do not serve the boleto surface — the routes are then
+	// registered but never exercised.
+	Boleto      *app.BoletoService
 	Admin       *app.AdminService
 	Console     *app.ConsoleService
 	UI          *adminweb.Renderer
@@ -60,6 +65,7 @@ func NewServer(c Config) *Server {
 		charges:     c.Charges,
 		pix:         c.Pix,
 		checkout:    c.Checkout,
+		boleto:      c.Boleto,
 		admin:       c.Admin,
 		console:     c.Console,
 		ui:          c.UI,
@@ -115,6 +121,11 @@ func (s *Server) Router() http.Handler {
 		// Unified hosted checkout — open a session (roteiro 9.a–9.c). Create only in
 		// F1; consultar/cancelar/webhook (grupos 10–12) are deferred to F3.
 		r.Post("/checkout", s.handleCreateCheckout)
+		// BolePix boletos — register with fine/interest/discount variants (roteiro
+		// grupos 1–3) and read back by id (grupo 6). Baixa (DELETE, grupo 4) and
+		// alteração (PUT, grupo 5) are deferred to PR-B of F2.
+		r.Post("/boletos", s.handleCreateBoleto)
+		r.Get("/boletos/{id}", s.handleGetBoleto)
 	})
 
 	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route

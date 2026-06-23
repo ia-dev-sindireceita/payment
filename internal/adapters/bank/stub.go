@@ -28,6 +28,7 @@ type StubProvider struct {
 	consents   map[string]ports.ConsentResult // keyed by tenantID+"\x00"+consentID (C6-C)
 	pixCharges map[string]stubPixCharge       // keyed by tenantID+"\x00"+txID (PIX cobrança imediata)
 	pixByIdem  map[string]string              // keyed by tenantID+"\x00"+idempotencyKey -> txID
+	boletos    map[string]ports.BoletoResult  // keyed by tenantID+"\x00"+boletoID (BolePix)
 }
 
 // stubPixCharge is the in-memory record for an immediate PIX charge: the port
@@ -48,6 +49,7 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		consents:   make(map[string]ports.ConsentResult),
 		pixCharges: make(map[string]stubPixCharge),
 		pixByIdem:  make(map[string]string),
+		boletos:    make(map[string]ports.BoletoResult),
 	}
 }
 

@@ -405,36 +405,63 @@ type ConsentProvider interface {
 	CancelConsent(ctx context.Context, tenantID, consentID string) (ConsentResult, error)
 }
 
-// BoletoRequest is the input to register a BolePix boleto at the bank. The fine
-// and interest RATES are transported so the bank registers them, but the amount
-// owed at any instant is computed by the boleto domain, never here (Hexagonal).
+// BoletoDiscountTier is the transport mirror of a boleto early-payment discount step
+// (roteiro grupo 3). Exactly one of Bps/FixedCents is set; DaysBeforeDue is the
+// minimum number of whole days before the due date the payment must occur for the
+// tier to apply.
+type BoletoDiscountTier struct {
+	DaysBeforeDue int
+	Bps           int64
+	FixedCents    int64
+}
+
+// BoletoRequest is the input to register a BolePix boleto at the bank. The fine,
+// interest and discount RATES are transported so the bank registers them, but the
+// amount owed at any instant is computed by the boleto domain, never here
+// (Hexagonal).
 type BoletoRequest struct {
-	TenantID           string
-	BoletoID           string
-	AmountCents        int64
-	Currency           string
-	DueDate            time.Time
-	FineBps            int64
-	MonthlyInterestBps int64
-	PayerTaxID         string
-	IdempotencyKey     string
-}
-
-// BoletoResult is the bank's response to a boleto registration. It carries the
-// scannable artifacts (the PIX EMV "copia e cola" payload and the boleto's
-// barcode/linha digitável) the caller renders for the payer.
-type BoletoResult struct {
+	TenantID    string
 	BoletoID    string
-	TxID        string
-	Status      string
-	QRCode      string // PIX EMV copy-and-paste payload (BolePix)
-	Barcode     string // boleto linha digitável / barcode
-	AmountCents int64  // principal the bank registered
+	AmountCents int64
+	Currency    string
+	DueDate     time.Time
+	FineBps     int64
+	// FineFixedCents is the late-payment fine as a fixed amount (roteiro 2.c). It is
+	// mutually exclusive with FineBps; zero when the fine is a percentage or absent.
+	FineFixedCents     int64
+	MonthlyInterestBps int64
+	// Discounts is the early-payment discount schedule (roteiro grupo 3), ordered
+	// descending by DaysBeforeDue. Empty when the boleto carries no discount.
+	Discounts      []BoletoDiscountTier
+	PayerTaxID     string
+	IdempotencyKey string
 }
 
-// BoletoProvider is the output port for BolePix boleto registration.
+// BoletoResult is the bank's response to a boleto registration or read. It carries
+// the scannable artifacts (the PIX EMV "copia e cola" payload and the boleto's
+// barcode/linha digitável) the caller renders for the payer, plus the registered
+// parameters echoed back for reconciliation/homologação evidence (roteiro 6.a).
+type BoletoResult struct {
+	BoletoID           string
+	TxID               string
+	Status             string
+	QRCode             string    // PIX EMV copy-and-paste payload (BolePix)
+	Barcode            string    // boleto linha digitável / barcode
+	AmountCents        int64     // principal the bank registered
+	DueDate            time.Time // registered due date (vencimento); zero when unknown
+	FineBps            int64     // registered one-time fine rate
+	FineFixedCents     int64     // registered fixed fine (roteiro 2.c); zero when percentage
+	MonthlyInterestBps int64     // registered monthly mora interest rate
+	Discounts          []BoletoDiscountTier
+}
+
+// BoletoProvider is the output port for BolePix boleto registration and read.
 type BoletoProvider interface {
 	CreateBoleto(ctx context.Context, tenantID string, req BoletoRequest) (BoletoResult, error)
+	// GetBoleto reconciles the authoritative state of a registered boleto for the
+	// tenant (roteiro 6.a). An unknown id within the tenant is shared.ErrNotFound;
+	// the read is tenant-scoped so one tenant can never observe another's boleto.
+	GetBoleto(ctx context.Context, tenantID, boletoID string) (BoletoResult, error)
 }
 
 // CheckoutItem is one line of a checkout request (transport mirror of the
