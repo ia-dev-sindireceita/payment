@@ -29,27 +29,31 @@ const maxPixListRange = 366 * 24 * time.Hour
 // persisted atomically); Get and List are pure reconcile reads against the PSP. The
 // tenant is always the authenticated tenant, never client input (threat H1/P1).
 type PixService struct {
-	payments ports.PaymentRepository
-	tenants  ports.TenantRepository
-	pricing  ports.PricingRepository
-	pix      ports.PixProvider
-	bus      ports.MessageBus
-	clock    ports.Clock
-	ids      ports.IDProvider
-	uow      ports.UnitOfWork
+	payments  ports.PaymentRepository
+	tenants   ports.TenantRepository
+	pricing   ports.PricingRepository
+	pix       ports.PixProvider
+	scheduled ports.PixScheduledProvider
+	webhook   ports.PixWebhookRegistrar
+	bus       ports.MessageBus
+	clock     ports.Clock
+	ids       ports.IDProvider
+	uow       ports.UnitOfWork
 }
 
 // NewPixService wires a PixService from the provided ports.
 func NewPixService(d Deps) *PixService {
 	return &PixService{
-		payments: d.Payments,
-		tenants:  d.Tenants,
-		pricing:  d.Pricing,
-		pix:      d.Pix,
-		bus:      d.Bus,
-		clock:    d.Clock,
-		ids:      d.IDs,
-		uow:      resolveUoW(d),
+		payments:  d.Payments,
+		tenants:   d.Tenants,
+		pricing:   d.Pricing,
+		pix:       d.Pix,
+		scheduled: d.PixScheduled,
+		webhook:   d.PixWebhook,
+		bus:       d.Bus,
+		clock:     d.Clock,
+		ids:       d.IDs,
+		uow:       resolveUoW(d),
 	}
 }
 
@@ -221,17 +225,8 @@ type ListImmediateChargesInput struct {
 // window. The window is mandatory and bounded (end after start, range <=
 // maxPixListRange); pagination must be non-negative.
 func (s *PixService) ListImmediateCharges(ctx context.Context, in ListImmediateChargesInput) (ports.PixChargeList, error) {
-	if in.Start.IsZero() || in.End.IsZero() {
-		return ports.PixChargeList{}, shared.NewValidationError("start_end", "start and end are required")
-	}
-	if !in.End.After(in.Start) {
-		return ports.PixChargeList{}, shared.NewValidationError("end", "end must be after start")
-	}
-	if in.End.Sub(in.Start) > maxPixListRange {
-		return ports.PixChargeList{}, shared.NewValidationError("range", "date range too large")
-	}
-	if in.Page < 0 || in.PageSize < 0 {
-		return ports.PixChargeList{}, shared.NewValidationError("pagination", "page and page_size must not be negative")
+	if err := validatePixListWindow(in.Start, in.End, in.Page, in.PageSize); err != nil {
+		return ports.PixChargeList{}, err
 	}
 	return s.pix.ListImmediateCharges(ctx, in.TenantID, ports.PixListFilter{
 		Start:    in.Start,

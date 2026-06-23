@@ -117,6 +117,14 @@ func (s *Server) Router() http.Handler {
 		// (?start&end) is registered before the {txid} read so chi routes them apart.
 		r.Post("/pix", s.handleCreatePix)
 		r.Get("/pix", s.handleListPix)
+		// Scheduled PIX charges (cobrança com vencimento, roteiro 7.5–7.7) +
+		// webhook registration (7.8). The static "/pix/scheduled" and "/pix/webhook"
+		// segments are registered before "/pix/{txid}" so chi routes them apart (a
+		// static segment wins over a path param at the same position).
+		r.Post("/pix/scheduled", s.handleCreateScheduledPix)
+		r.Get("/pix/scheduled", s.handleListScheduledPix)
+		r.Get("/pix/scheduled/{txid}", s.handleGetScheduledPix)
+		r.Post("/pix/webhook", s.handleRegisterPixWebhook)
 		r.Get("/pix/{txid}", s.handleGetPix)
 		// Unified hosted checkout — open a session (roteiro 9.a–9.c). Create only in
 		// F1; consultar/cancelar/webhook (grupos 10–12) are deferred to F3.

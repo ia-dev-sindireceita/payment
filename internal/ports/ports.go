@@ -340,6 +340,69 @@ type PixProvider interface {
 	ListImmediateCharges(ctx context.Context, tenantID string, filter PixListFilter) (PixChargeList, error)
 }
 
+// PixScheduledProvider is the output port for PIX charges with a due date (cobrança
+// com vencimento, BACEN /cobv, homologação roteiro 7.5–7.7). It is kept SEPARATE from
+// PixProvider (ISP) — the immediate /cob surface and its consumers (e.g. the settlement
+// reconcile wrapper) do not depend on the dated-charge methods, and vice versa. The C6
+// adapter and the in-memory stub implement both; each method carries tenantID
+// explicitly so per-tenant credential isolation is never bypassed (threat H1/P1).
+type PixScheduledProvider interface {
+	// CreateScheduledCharge idempotently creates a PIX charge with a due date and
+	// returns its QR material. It is the dated-charge sibling of CreateImmediateCharge:
+	// a re-submit with the same idempotency anchor (req.IdempotencyKey, falling back to
+	// PaymentID) resolves to the same charge and never creates a duplicate.
+	CreateScheduledCharge(ctx context.Context, tenantID string, req ScheduledChargeRequest) (PixChargeResult, error)
+	// GetScheduledCharge reconciles the authoritative state of a scheduled PIX charge
+	// (BACEN GET /cobv/{txid}, roteiro 7.7) — the source of truth for settlement (never
+	// trust a raw webhook — threat W3). An unknown txid within the tenant is
+	// shared.ErrNotFound.
+	GetScheduledCharge(ctx context.Context, tenantID, txID string) (PixChargeResult, error)
+	// ListScheduledCharges returns the scheduled PIX charges created within the
+	// filter's date window (BACEN GET /cobv by interval, roteiro 7.6), paginated. It is
+	// a pure read and never mutates a charge.
+	ListScheduledCharges(ctx context.Context, tenantID string, filter PixListFilter) (PixChargeList, error)
+}
+
+// PixWebhookRegistrar is the output port for configuring the PIX-received notification
+// webhook (BACEN PUT /webhook/{chave}, homologação roteiro 7.8). It is its own narrow
+// port (ISP): registering a notification URL is a configuration write, unrelated to
+// creating or reading charges, so charge consumers do not depend on it.
+type PixWebhookRegistrar interface {
+	// RegisterPixWebhook configures, for the tenant's PIX key (chave), the URL the PSP
+	// notifies when a PIX is received. It is idempotent: the chave keys the
+	// configuration, so re-registering the same chave overwrites without creating a
+	// duplicate. webhookURL is a secret callback target — it MUST NEVER appear in a
+	// log, an error message or a request URL (it travels only in the request body). The
+	// tenant is explicit so per-tenant isolation holds.
+	RegisterPixWebhook(ctx context.Context, tenantID, chave, webhookURL string) error
+}
+
+// ScheduledChargeRequest is the input to create a PIX charge with a due date
+// (cobrança com vencimento, BACEN /cobv, homologação roteiro 7.5). It mirrors the
+// immediate ChargeRequest money/devedor/idempotency fields and adds the cobv
+// calendar:
+//
+//   - DueDate is the dataDeVencimento — a calendar date (the time-of-day is ignored;
+//     the adapter renders the date in the PSP's "YYYY-MM-DD" form).
+//   - ValidityAfterDueDays is the validadeAposVencimento — the number of whole days
+//     after the due date the charge may still be paid (0 means it can be paid only on
+//     the due date).
+//
+// Unlike an immediate charge, a cobv REQUIRES a named devedor (DebtorTaxID +
+// DebtorName); the use-case enforces that at its boundary before the request reaches
+// the adapter.
+type ScheduledChargeRequest struct {
+	TenantID             string
+	PaymentID            string
+	AmountCents          int64
+	Currency             string
+	IdempotencyKey       string
+	DebtorTaxID          string
+	DebtorName           string
+	DueDate              time.Time
+	ValidityAfterDueDays int
+}
+
 // PixListFilter is the date-window + pagination filter for listing immediate PIX
 // charges. Start and End are the BACEN inicio/fim bounds (required); Page and
 // PageSize map to paginacao.paginaAtual / paginacao.itensPorPagina (optional — a
