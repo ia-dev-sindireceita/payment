@@ -123,18 +123,12 @@ func (s *Server) Router() http.Handler {
 		// (?start&end) is registered before the {txid} read so chi routes them apart.
 		r.Post("/pix", s.handleCreatePix)
 		r.Get("/pix", s.handleListPix)
-		// Scheduled PIX charges (cobrança com vencimento, roteiro 7.5–7.7) +
-		// webhook registration (7.8). The static "/pix/scheduled" and "/pix/webhook"
-		// segments are registered before "/pix/{txid}" so chi routes them apart (a
-		// static segment wins over a path param at the same position).
-		r.Post("/pix/scheduled", s.handleCreateScheduledPix)
-		r.Get("/pix/scheduled", s.handleListScheduledPix)
-		r.Get("/pix/scheduled/{txid}", s.handleGetScheduledPix)
-		r.Post("/pix/webhook", s.handleRegisterPixWebhook)
-		// PIX cobrança com vencimento (cobv, roteiro 7.5–7.7). Registered before the
-		// immediate-charge {txid} read so chi routes the literal "cobv" segment apart
-		// from a txid. Create generates the txid server-side (like immediate pix);
-		// get/update address it.
+		// PIX cobrança com vencimento (cobv, roteiro 7.5–7.8): criar (7.5), consultar
+		// (7.6), alterar (7.7). The static "/pix/cobv" segment is registered before the
+		// immediate-charge "/pix/{txid}" read so chi routes the literal "cobv" segment
+		// apart from a txid. Create generates the txid server-side (like immediate pix);
+		// get/update address it. Settlement notification (7.8) is reconciled through the
+		// shared C6 webhook (/webhooks/c6/{tenantRef}, C6-D), not a per-charge endpoint.
 		r.Post("/pix/cobv", s.handleCreatePixCobV)
 		r.Get("/pix/cobv/{txid}", s.handleGetPixCobV)
 		r.Put("/pix/cobv/{txid}", s.handleUpdatePixCobV)

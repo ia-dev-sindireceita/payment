@@ -29,31 +29,27 @@ const maxPixListRange = 366 * 24 * time.Hour
 // persisted atomically); Get and List are pure reconcile reads against the PSP. The
 // tenant is always the authenticated tenant, never client input (threat H1/P1).
 type PixService struct {
-	payments  ports.PaymentRepository
-	tenants   ports.TenantRepository
-	pricing   ports.PricingRepository
-	pix       ports.PixProvider
-	scheduled ports.PixScheduledProvider
-	webhook   ports.PixWebhookRegistrar
-	bus       ports.MessageBus
-	clock     ports.Clock
-	ids       ports.IDProvider
-	uow       ports.UnitOfWork
+	payments ports.PaymentRepository
+	tenants  ports.TenantRepository
+	pricing  ports.PricingRepository
+	pix      ports.PixProvider
+	bus      ports.MessageBus
+	clock    ports.Clock
+	ids      ports.IDProvider
+	uow      ports.UnitOfWork
 }
 
 // NewPixService wires a PixService from the provided ports.
 func NewPixService(d Deps) *PixService {
 	return &PixService{
-		payments:  d.Payments,
-		tenants:   d.Tenants,
-		pricing:   d.Pricing,
-		pix:       d.Pix,
-		scheduled: d.PixScheduled,
-		webhook:   d.PixWebhook,
-		bus:       d.Bus,
-		clock:     d.Clock,
-		ids:       d.IDs,
-		uow:       resolveUoW(d),
+		payments: d.Payments,
+		tenants:  d.Tenants,
+		pricing:  d.Pricing,
+		pix:      d.Pix,
+		bus:      d.Bus,
+		clock:    d.Clock,
+		ids:      d.IDs,
+		uow:      resolveUoW(d),
 	}
 }
 
@@ -265,6 +261,25 @@ func validTaxID(s string) bool {
 		}
 	}
 	return true
+}
+
+// validatePixListWindow enforces the listing constraints for the immediate PIX list
+// endpoint (roteiro 7.4): a mandatory, ordered, bounded date window and non-negative
+// pagination.
+func validatePixListWindow(start, end time.Time, page, pageSize int) error {
+	if start.IsZero() || end.IsZero() {
+		return shared.NewValidationError("start_end", "start and end are required")
+	}
+	if !end.After(start) {
+		return shared.NewValidationError("end", "end must be after start")
+	}
+	if end.Sub(start) > maxPixListRange {
+		return shared.NewValidationError("range", "date range too large")
+	}
+	if page < 0 || pageSize < 0 {
+		return shared.NewValidationError("pagination", "page and page_size must not be negative")
+	}
+	return nil
 }
 
 // publishPaymentEvent best-effort publishes a payment lifecycle event. A publish

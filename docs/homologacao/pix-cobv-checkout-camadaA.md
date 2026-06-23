@@ -64,9 +64,31 @@ alimenta a Camada B (`.docx` para o C6).
 `http.TestCobvCrossTenantIsolationHTTP` e `bank.TestStubCobvIsolation` provam que um
 tenant nunca lê/altera a cobv de outro (credencial por-tenant, leitura tenant-scoped).
 
+## Decisões de escopo ([SIN-65746](/SIN/issues/SIN-65746))
+
+- **`cobv` é a vocabulário canônico do grupo 7 com vencimento**, não `scheduled`
+  (cob=imediata / cobv=com-vencimento, ubiquitous language BACEN/PIX e termo do
+  roteiro). A trilha paralela `/v1/pix/scheduled` + `POST /v1/pix/webhook` (registrar
+  URL), que havia entrado em `main` via [PR #31](https://github.com/ia-dev-sindireceita/payment/pull/31)
+  ([SIN-65729](/SIN/issues/SIN-65729)), foi **removida** nesta entrega — o repositório
+  expõe **uma única** superfície para PIX com vencimento: `/v1/pix/cobv`.
+- **`listar cobv` (GET por intervalo) está fora de escopo** e não foi portado. Os
+  subitens enumerados do grupo 7 com vencimento são **7.5 criar / 7.6 consultar (por
+  txid) / 7.7 alterar / 7.8 webhook** — listagem não é um subitem cobv (a listagem por
+  data do imediato é o subitem 7.4 da superfície `cob`, distinta). A trilha `scheduled`
+  removida incluía um `GET /v1/pix/scheduled` (listar); como não corresponde a um
+  subitem do roteiro cobv, foi descartado em vez de portado. **Se a homologação exigir
+  listar cobv**, portar `GET /v1/pix/cobv` espelhando o filtro do imediato
+  (`?start&end`, janela ≤ `maxPixListRange`, paginação) é um follow-up trivial.
+- **7.8 (webhook PIX recebido)** padroniza no modelo C6-D: a notificação de liquidação
+  é reconciliada pelo webhook compartilhado `/webhooks/c6/{tenantRef}` (reconcile via
+  `GetCharge`), não por um endpoint de registro de URL por-chave.
+
 ## Reversibilidade / rollout
 
 - Modo stub é o default de dev/teste; o C6 real só é exercido quando
   `PAYMENT_C6_BASE_URL` é configurado (Camada B / homologação). Sem migração de schema
   nesta entrega.
-- Rollback: reverter o PR; rotas `cobv` são aditivas e não alteram o imediato/boleto.
+- Rollback: reverter o PR. A remoção de `scheduled` é zero-blast-radius hoje (Camada B
+  bloqueada por creds, sem consumidor externo); as rotas `cobv` são aditivas e não
+  alteram o imediato/boleto.
