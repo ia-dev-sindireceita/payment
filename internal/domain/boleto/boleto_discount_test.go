@@ -3,6 +3,7 @@ package boleto
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 )
@@ -187,6 +188,39 @@ func TestFixedFineValidation(t *testing.T) {
 		b, _ := New("b1", "t1", principal, due, 0, 0)
 		if _, err := b.WithFixedFine(2000); err != nil {
 			t.Fatalf("ceiling fixed fine should be valid: %v", err)
+		}
+	})
+}
+
+// roteiro 5.b: validade (data limite de pagamento) — must not precede the due date.
+func TestWithValidUntil(t *testing.T) {
+	t.Parallel()
+	due := dueAt(t, "2026-06-10T00:00:00Z")
+	b, _ := New("b1", "t1", mustMoney(t, 100000, "BRL"), due, 0, 0)
+
+	t.Run("after due is accepted", func(t *testing.T) {
+		limit := dueAt(t, "2026-06-25T00:00:00Z")
+		got, err := b.WithValidUntil(limit)
+		if err != nil {
+			t.Fatalf("WithValidUntil: %v", err)
+		}
+		if !got.ValidUntil().Equal(limit) {
+			t.Fatalf("ValidUntil = %v, want %v", got.ValidUntil(), limit)
+		}
+	})
+	t.Run("equal to due is accepted", func(t *testing.T) {
+		if _, err := b.WithValidUntil(due); err != nil {
+			t.Fatalf("valid_until == due should be allowed: %v", err)
+		}
+	})
+	t.Run("before due is rejected", func(t *testing.T) {
+		if _, err := b.WithValidUntil(dueAt(t, "2026-06-01T00:00:00Z")); !errors.Is(err, shared.ErrValidation) {
+			t.Fatalf("want ErrValidation, got %v", err)
+		}
+	})
+	t.Run("zero is rejected", func(t *testing.T) {
+		if _, err := b.WithValidUntil(time.Time{}); !errors.Is(err, shared.ErrValidation) {
+			t.Fatalf("want ErrValidation, got %v", err)
 		}
 	})
 }

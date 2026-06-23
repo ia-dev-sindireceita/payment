@@ -90,3 +90,80 @@ func TestGetBoletoMissingCredential(t *testing.T) {
 		t.Fatalf("token must not be hit without a credential, hits=%d", ps.tokenCount())
 	}
 }
+
+// roteiro grupo 4: baixa/cancelamento via DELETE; bearer attached, status reconciled.
+func TestCancelBoletoSuccess(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	p := ps.provider(t, oneTenant("t1", "client-1", "secret-1"))
+
+	res, err := p.CancelBoleto(context.Background(), "t1", "bol_1")
+	if err != nil {
+		t.Fatalf("CancelBoleto: %v", err)
+	}
+	if res.Status != "CANCELLED" {
+		t.Fatalf("status = %q, want CANCELLED", res.Status)
+	}
+	if ps.lastAuthHeader != "Bearer tok-client-1" {
+		t.Fatalf("bearer not attached: %q", ps.lastAuthHeader)
+	}
+}
+
+func TestCancelBoletoNotFoundMapping(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	ps.boletoCancel = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"NOT_FOUND"}`))
+	}
+	p := ps.provider(t, oneTenant("t1", "c", "s"))
+	if _, err := p.CancelBoleto(context.Background(), "t1", "nope"); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("404 should map to ErrNotFound, got %v", err)
+	}
+}
+
+// roteiro grupo 5: alteração via PUT carries the new params; bearer + idempotency.
+func TestUpdateBoletoSuccess(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	p := ps.provider(t, oneTenant("t1", "client-1", "secret-1"))
+
+	res, err := p.UpdateBoleto(context.Background(), "t1", "bol_1", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "bol_1", AmountCents: 2000, Currency: "BRL",
+		FineBps: 150, MonthlyInterestBps: 80, IdempotencyKey: "upd-key",
+	})
+	if err != nil {
+		t.Fatalf("UpdateBoleto: %v", err)
+	}
+	if res.AmountCents != 2000 || res.FineBps != 150 {
+		t.Fatalf("amended params not reconciled: %+v", res)
+	}
+	var sent struct {
+		AmountCents int64 `json:"amount_cents"`
+		FineBps     int64 `json:"fine_bps"`
+	}
+	if err := json.Unmarshal(ps.body(), &sent); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if sent.AmountCents != 2000 || sent.FineBps != 150 {
+		t.Fatalf("update body not transported: %s", ps.body())
+	}
+	if ps.idemKey() != "upd-key" {
+		t.Fatalf("idempotency key not forwarded: %q", ps.idemKey())
+	}
+}
+
+func TestUpdateBoletoNotFoundMapping(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	ps.boletoUpdate = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"NOT_FOUND"}`))
+	}
+	p := ps.provider(t, oneTenant("t1", "c", "s"))
+	if _, err := p.UpdateBoleto(context.Background(), "t1", "nope", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "nope", AmountCents: 1, Currency: "BRL", IdempotencyKey: "k",
+	}); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("404 should map to ErrNotFound, got %v", err)
+	}
+}

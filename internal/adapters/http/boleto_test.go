@@ -204,3 +204,130 @@ func TestBoletoHTTPErrors(t *testing.T) {
 		}
 	})
 }
+
+// registerBoletoHTTP registers a boleto over HTTP and returns its id.
+func registerBoletoHTTP(t *testing.T, handler http.Handler, token, idemKey string) string {
+	t.Helper()
+	rec := do(t, handler, http.MethodPost, "/v1/boletos", token,
+		map[string]string{"Idempotency-Key": idemKey}, boletoBody())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register: status %d body %s", rec.Code, rec.Body.String())
+	}
+	return decodePix(t, rec)["boleto_id"].(string)
+}
+
+func updateBoletoBody() map[string]any {
+	return map[string]any{
+		"amount_cents":         70000,
+		"currency":             "BRL",
+		"due_date":             time.Now().Add(360 * time.Hour).UTC().Format(time.RFC3339),
+		"valid_until":          time.Now().Add(600 * time.Hour).UTC().Format(time.RFC3339),
+		"fine_bps":             150,
+		"monthly_interest_bps": 80,
+	}
+}
+
+// roteiro grupo 4: baixa via DELETE → 204; GET depois reflete CANCELLED.
+func TestBoletoDeleteHTTP(t *testing.T) {
+	t.Parallel()
+	handler, _, _ := newBoletoFixture(t)
+	id := registerBoletoHTTP(t, handler, tenantToken, "kdel")
+
+	rec := do(t, handler, http.MethodDelete, "/v1/boletos/"+id, tenantToken, nil, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: want 204, got %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = do(t, handler, http.MethodGet, "/v1/boletos/"+id, tenantToken, nil, nil)
+	if rec.Code != http.StatusOK || decodePix(t, rec)["status"] != "CANCELLED" {
+		t.Fatalf("get after delete: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// roteiro grupo 5: alteração via PUT → 200 com os novos parâmetros.
+func TestBoletoUpdateHTTP(t *testing.T) {
+	t.Parallel()
+	handler, _, _ := newBoletoFixture(t)
+	id := registerBoletoHTTP(t, handler, tenantToken, "kupd")
+
+	rec := do(t, handler, http.MethodPut, "/v1/boletos/"+id, tenantToken,
+		map[string]string{"Idempotency-Key": "kupd-put"}, updateBoletoBody())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: want 200, got %d body %s", rec.Code, rec.Body.String())
+	}
+	body := decodePix(t, rec)
+	if body["boleto_id"] != id || body["amount_cents"].(float64) != 70000 || body["valid_until"] == "" {
+		t.Fatalf("update echo mismatch: %v", body)
+	}
+}
+
+// OWASP A01: DELETE/PUT for another tenant's boleto must 404 (no oracle).
+func TestBoletoCrossTenantWriteIsolation(t *testing.T) {
+	t.Parallel()
+	handler, _, _ := newBoletoFixture(t)
+	id := registerBoletoHTTP(t, handler, tenantToken, "kiso")
+
+	rec := do(t, handler, http.MethodDelete, "/v1/boletos/"+id, tenantTokenB, nil, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant delete: want 404, got %d", rec.Code)
+	}
+	rec = do(t, handler, http.MethodPut, "/v1/boletos/"+id, tenantTokenB,
+		map[string]string{"Idempotency-Key": "x"}, updateBoletoBody())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant put: want 404, got %d", rec.Code)
+	}
+	// The boleto is untouched for its real owner.
+	rec = do(t, handler, http.MethodGet, "/v1/boletos/"+id, tenantToken, nil, nil)
+	if rec.Code != http.StatusOK || decodePix(t, rec)["status"] != "REGISTERED" {
+		t.Fatalf("owner read after blocked cross-tenant writes: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBoletoWriteAuthAndValidation(t *testing.T) {
+	t.Parallel()
+	handler, _, _ := newBoletoFixture(t)
+	id := registerBoletoHTTP(t, handler, tenantToken, "kwav")
+
+	t.Run("delete_requires_auth", func(t *testing.T) {
+		rec := do(t, handler, http.MethodDelete, "/v1/boletos/"+id, "", nil, nil)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("want 401, got %d", rec.Code)
+		}
+	})
+	t.Run("put_requires_auth", func(t *testing.T) {
+		rec := do(t, handler, http.MethodPut, "/v1/boletos/"+id, "",
+			map[string]string{"Idempotency-Key": "k"}, updateBoletoBody())
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("want 401, got %d", rec.Code)
+		}
+	})
+	t.Run("put_missing_idempotency_key", func(t *testing.T) {
+		rec := do(t, handler, http.MethodPut, "/v1/boletos/"+id, tenantToken, nil, updateBoletoBody())
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("want 400, got %d", rec.Code)
+		}
+	})
+	t.Run("put_unknown_field", func(t *testing.T) {
+		body := updateBoletoBody()
+		body["evil"] = "x"
+		rec := do(t, handler, http.MethodPut, "/v1/boletos/"+id, tenantToken,
+			map[string]string{"Idempotency-Key": "k"}, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("want 400, got %d", rec.Code)
+		}
+	})
+	t.Run("put_bad_due_date", func(t *testing.T) {
+		body := updateBoletoBody()
+		body["due_date"] = "nope"
+		rec := do(t, handler, http.MethodPut, "/v1/boletos/"+id, tenantToken,
+			map[string]string{"Idempotency-Key": "k"}, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("want 400, got %d", rec.Code)
+		}
+	})
+	t.Run("delete_unknown_id", func(t *testing.T) {
+		rec := do(t, handler, http.MethodDelete, "/v1/boletos/nope", tenantToken, nil, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("want 404, got %d", rec.Code)
+		}
+	})
+}
