@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -183,6 +184,27 @@ func TestCheckoutCreateValidationErrors(t *testing.T) {
 				t.Fatalf("%s: want validation error, got %v", tc.name, err)
 			}
 		})
+	}
+}
+
+// An item set whose running int64 sum wraps past math.MaxInt64 must be rejected
+// with ErrValidation before any payment is reserved — never reserved/displayed at
+// the wrapped (small positive) total. Three items (≤100) trigger the wrap.
+func TestCheckoutCreateItemSumOverflow(t *testing.T) {
+	t.Parallel()
+	svc, h, tenantID := newCheckoutHarness(t)
+	in := baseCheckoutInput(tenantID, "k-overflow")
+	in.Items = []app.CheckoutItemInput{
+		{Description: "a", AmountCents: math.MaxInt64},
+		{Description: "b", AmountCents: math.MaxInt64},
+		{Description: "c", AmountCents: 5},
+	}
+	_, _, err := svc.CreateSession(context.Background(), in)
+	if !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("want ErrValidation for overflowing item sum, got %v", err)
+	}
+	if h.store.LedgerLen() != 0 {
+		t.Fatalf("an overflowing total must not reserve/bill, got %d ledger entries", h.store.LedgerLen())
 	}
 }
 

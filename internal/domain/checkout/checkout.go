@@ -98,7 +98,10 @@ func New(id, tenantID, currency string, items []Item, expiresAt time.Time) (Sess
 
 	var sum int64
 	for _, it := range items {
-		sum += it.amountCents
+		var err error
+		if sum, err = shared.AddCents(sum, it.amountCents); err != nil {
+			return Session{}, err
+		}
 	}
 	total, err := shared.NewMoney(sum, currency)
 	if err != nil {

@@ -118,7 +118,10 @@ func (s *CheckoutService) CreateSession(ctx context.Context, in CreateCheckoutSe
 	// the PSP collapses it.
 	var sum int64
 	for _, it := range items {
-		sum += it.AmountCents()
+		var addErr error
+		if sum, addErr = shared.AddCents(sum, it.AmountCents()); addErr != nil {
+			return nil, ports.CheckoutResult{}, addErr
+		}
 	}
 	total, err := shared.NewMoney(sum, in.Currency)
 	if err != nil {
