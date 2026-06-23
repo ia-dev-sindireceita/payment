@@ -95,8 +95,7 @@ func buildDevedor(req ports.ChargeRequest) *pixDevedor {
 // buildDevedorFields maps a (taxID, name) pair into the PSP devedor block, or
 // returns nil when both are empty. The document is placed in cpf or cnpj by length
 // (14 ⇒ CNPJ, otherwise CPF): the use-case has already validated the id is an 11- or
-// 14-digit string before it reaches here, so no further check is needed. It is shared
-// by the immediate (optional devedor) and scheduled (required devedor) charge paths.
+// 14-digit string before it reaches here, so no further check is needed.
 func buildDevedorFields(taxID, name string) *pixDevedor {
 	taxID = strings.TrimSpace(taxID)
 	name = strings.TrimSpace(name)

@@ -26,16 +26,6 @@ type Deps struct {
 	// provider itself (the raw PixProvider, NOT the settlement wrapper); in stub mode
 	// it is the in-memory StubProvider. When nil, PixService is simply not wired.
 	Pix ports.PixProvider
-	// PixScheduled is the scheduled-PIX-charge port (cobrança com vencimento, roteiro
-	// 7.5–7.7). Segregated from Pix (ISP): only the scheduled-charge half of PixService
-	// depends on it. In production it is the same C6 provider as Pix; in stub mode the
-	// in-memory StubProvider. When nil, PixService's scheduled methods are not wired.
-	PixScheduled ports.PixScheduledProvider
-	// PixWebhook is the PIX-received webhook-registration port (roteiro 7.8). Segregated
-	// (ISP): registering a notification URL is a config write unrelated to charges. In
-	// production it is the same C6 provider; in stub mode the StubProvider. When nil,
-	// PixService.RegisterPixWebhook is not wired.
-	PixWebhook ports.PixWebhookRegistrar
 	// PixDueCharge is the PIX cobrança-com-vencimento (cobv) port. Segregated from
 	// Pix (ISP): PixDueChargeService depends only on it. In production it is the C6
 	// provider; in stub mode the in-memory StubProvider. When nil, the service is

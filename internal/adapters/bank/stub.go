@@ -28,9 +28,6 @@ type StubProvider struct {
 	consents   map[string]ports.ConsentResult  // keyed by tenantID+"\x00"+consentID (C6-C)
 	pixCharges map[string]stubPixCharge        // keyed by tenantID+"\x00"+txID (PIX cobrança imediata)
 	pixByIdem  map[string]string               // keyed by tenantID+"\x00"+idempotencyKey -> txID
-	cobv       map[string]stubPixCharge        // keyed by tenantID+"\x00"+txID (PIX cobrança com vencimento)
-	cobvByIdem map[string]string               // keyed by tenantID+"\x00"+idempotencyKey -> txID
-	webhooks   map[string]string               // keyed by tenantID+"\x00"+chave -> webhook URL
 	boletos    map[string]ports.BoletoResult   // keyed by tenantID+"\x00"+boletoID (BolePix)
 	checkouts  map[string]ports.CheckoutResult // keyed by tenantID+"\x00"+sessionID (unified checkout)
 	// cobvCharges holds PIX cobrança-com-vencimento (cobv) charges keyed by
@@ -58,9 +55,6 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		consents:      make(map[string]ports.ConsentResult),
 		pixCharges:    make(map[string]stubPixCharge),
 		pixByIdem:     make(map[string]string),
-		cobv:          make(map[string]stubPixCharge),
-		cobvByIdem:    make(map[string]string),
-		webhooks:      make(map[string]string),
 		boletos:       make(map[string]ports.BoletoResult),
 		checkouts:     make(map[string]ports.CheckoutResult),
 		cobvCharges:   make(map[string]ports.PixDueChargeResult),
