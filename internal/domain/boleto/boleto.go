@@ -70,6 +70,10 @@ type Boleto struct {
 	fineBps            int64
 	fineFixedCents     int64
 	monthlyInterestBps int64
+	// validUntil is the last day the boleto may be paid (data limite de pagamento),
+	// distinct from the due date: late payment is still accepted up to this instant.
+	// Zero means "unset" (payment accepted indefinitely after the due date).
+	validUntil time.Time
 	// discounts is the early-payment discount schedule, ordered strictly descending
 	// by DaysBeforeDue (largest discount first). Empty when the boleto carries no
 	// discount. Always validated by WithDiscounts before being attached.
@@ -180,8 +184,27 @@ func (b Boleto) WithFixedFine(cents int64) (Boleto, error) {
 	return b, nil
 }
 
+// WithValidUntil returns a copy of the boleto carrying a payment-validity limit
+// (data limite de pagamento, roteiro 5.b). The invariant lives in the core: the limit
+// must not fall before the due date — a boleto cannot stop being payable before it is
+// even due.
+func (b Boleto) WithValidUntil(t time.Time) (Boleto, error) {
+	if t.IsZero() {
+		return Boleto{}, shared.NewValidationError("valid_until", "valid until is required")
+	}
+	if startOfDay(t).Before(startOfDay(b.dueDate)) {
+		return Boleto{}, shared.NewValidationError("valid_until", "valid until must not be before the due date")
+	}
+	b.validUntil = t
+	return b, nil
+}
+
 // ID returns the boleto identifier.
 func (b Boleto) ID() string { return b.id }
+
+// ValidUntil returns the payment-validity limit (data limite de pagamento), or the
+// zero time when unset.
+func (b Boleto) ValidUntil() time.Time { return b.validUntil }
 
 // FineFixedCents returns the fixed late-payment fine in cents, or 0 when the fine is
 // expressed as a percentage (FineBps) or absent.

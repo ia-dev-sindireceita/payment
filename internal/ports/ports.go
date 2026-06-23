@@ -425,7 +425,10 @@ type BoletoRequest struct {
 	AmountCents int64
 	Currency    string
 	DueDate     time.Time
-	FineBps     int64
+	// ValidUntil is the last day the boleto may be paid (data limite de pagamento,
+	// roteiro 5.b). Zero when unset.
+	ValidUntil time.Time
+	FineBps    int64
 	// FineFixedCents is the late-payment fine as a fixed amount (roteiro 2.c). It is
 	// mutually exclusive with FineBps; zero when the fine is a percentage or absent.
 	FineFixedCents     int64
@@ -449,19 +452,31 @@ type BoletoResult struct {
 	Barcode            string    // boleto linha digitável / barcode
 	AmountCents        int64     // principal the bank registered
 	DueDate            time.Time // registered due date (vencimento); zero when unknown
+	ValidUntil         time.Time // registered payment-validity limit (roteiro 5.b); zero when unset
 	FineBps            int64     // registered one-time fine rate
 	FineFixedCents     int64     // registered fixed fine (roteiro 2.c); zero when percentage
 	MonthlyInterestBps int64     // registered monthly mora interest rate
 	Discounts          []BoletoDiscountTier
 }
 
-// BoletoProvider is the output port for BolePix boleto registration and read.
+// BoletoProvider is the output port for the BolePix boleto lifecycle: register, read,
+// cancel (baixa) and amend (alteração).
 type BoletoProvider interface {
 	CreateBoleto(ctx context.Context, tenantID string, req BoletoRequest) (BoletoResult, error)
 	// GetBoleto reconciles the authoritative state of a registered boleto for the
 	// tenant (roteiro 6.a). An unknown id within the tenant is shared.ErrNotFound;
 	// the read is tenant-scoped so one tenant can never observe another's boleto.
 	GetBoleto(ctx context.Context, tenantID, boletoID string) (BoletoResult, error)
+	// CancelBoleto performs the baixa/cancelamento of a registered boleto (roteiro
+	// grupo 4), whether still due (4.a) or overdue (4.b). It is idempotent: cancelling
+	// an already-cancelled boleto succeeds and returns the cancelled state. An unknown
+	// id within the tenant is shared.ErrNotFound; the operation is tenant-scoped.
+	CancelBoleto(ctx context.Context, tenantID, boletoID string) (BoletoResult, error)
+	// UpdateBoleto amends a registered boleto's parameters (roteiro grupo 5): due date
+	// (5.a), validity (5.b) and amount/fine/interest (5.c). req carries the full new
+	// parameter set. An unknown id within the tenant is shared.ErrNotFound; the
+	// operation is tenant-scoped so one tenant can never amend another's boleto.
+	UpdateBoleto(ctx context.Context, tenantID, boletoID string, req BoletoRequest) (BoletoResult, error)
 }
 
 // CheckoutItem is one line of a checkout request (transport mirror of the
