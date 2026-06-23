@@ -340,6 +340,98 @@ type PixProvider interface {
 	ListImmediateCharges(ctx context.Context, tenantID string, filter PixListFilter) (PixChargeList, error)
 }
 
+// PixDueChargeRequest is the input to register or amend a PIX charge with a due
+// date (cobrança com vencimento, cobv — roteiro 7.5/7.7). It carries the fine,
+// interest and discount RATES so the bank registers them; the amount owed at any
+// instant is computed by the pixcobv domain, never here (Hexagonal). The devedor
+// (DebtorTaxID/DebtorName) and the creditor PIX key are required for a cobv, unlike
+// an immediate charge. The tenant is explicit so per-tenant credential isolation is
+// never bypassed (threat H1/P1).
+type PixDueChargeRequest struct {
+	TenantID    string
+	TxID        string
+	AmountCents int64
+	Currency    string
+	DueDate     time.Time
+	// ValidityDays is the number of days after the due date the charge may still be
+	// paid (validade após vencimento, roteiro 7.5). Zero means payable only up to the
+	// due date.
+	ValidityDays       int
+	FineBps            int64
+	MonthlyInterestBps int64
+	// DiscountBps and DiscountFixedCents are the mutually exclusive early-payment
+	// discount forms (desconto). At most one is non-zero.
+	DiscountBps        int64
+	DiscountFixedCents int64
+	DebtorTaxID        string
+	DebtorName         string
+	// CreditorKey is the recebedor's PIX key (chave) the charge is registered under.
+	CreditorKey string
+	// IdempotencyKey, when present, is forwarded so the PSP collapses retried/
+	// concurrent registrations into one charge.
+	IdempotencyKey string
+}
+
+// PixDueChargeResult is the bank's response to a cobv register/read/amend. It
+// carries the QR material (the BACEN "PIX copia e cola" string + render location)
+// the payer scans, the reconciled lifecycle status, the due date / validity echoed
+// back for reconciliation (roteiro 7.6), and the money needed to reconcile a
+// settlement (expected vs received).
+//
+//   - Status is the PSP's charge status verbatim (e.g. "ATIVA", "CONCLUIDA").
+//     Settlement decisions read this from GetDueCharge, never from a raw webhook
+//     (reconcile-before-settle, threat W3).
+//   - ExpectedAmountCents is the charge's original amount (valor.original) in cents.
+//   - ReceivedAmountCents is the amount actually received in cents (zero while
+//     unpaid). AmountReconciled asserts the two add up before settling.
+type PixDueChargeResult struct {
+	TxID                string
+	Status              string
+	QRCodePayload       string
+	QRCodeLocation      string
+	DueDate             time.Time
+	ValidityDays        int
+	FineBps             int64
+	MonthlyInterestBps  int64
+	DiscountBps         int64
+	DiscountFixedCents  int64
+	ExpectedAmountCents int64
+	ReceivedAmountCents int64
+}
+
+// AmountReconciled reports whether the amount received exactly matches the expected
+// (original) amount. It mirrors PixChargeResult.AmountReconciled: a non-positive
+// expected amount is never reconciled and overpayment is a divergence too, so the
+// check is strict equality.
+func (r PixDueChargeResult) AmountReconciled() bool {
+	return r.ExpectedAmountCents > 0 && r.ReceivedAmountCents == r.ExpectedAmountCents
+}
+
+// PixDueChargeProvider is the output port for PIX charges with a due date (cobv,
+// roteiro 7.5–7.7): register, reconcile-read and amend. It is kept SEPARATE from
+// PixProvider (ISP) rather than widening it: a cobv carries a richer request shape
+// (due date, validity window, fine/interest/discount, devedor, creditor key) that
+// the immediate-charge port does not, and an immediate-charge consumer must not be
+// forced to depend on cobv semantics — exactly the segregation BoletoProvider
+// follows for the BolePix slip, of which cobv is the PIX analogue. The C6 adapter
+// implements both; a stub backs them for tests. Each carries tenantID explicitly so
+// the per-tenant credential isolation the adapter enforces is never bypassed.
+type PixDueChargeProvider interface {
+	// CreateDueCharge idempotently registers a cobv charge and returns its QR code.
+	// req.IdempotencyKey (falling back to the TxID) anchors idempotency: a re-submit
+	// with the same anchor resolves to the same charge and never creates a duplicate.
+	CreateDueCharge(ctx context.Context, tenantID string, req PixDueChargeRequest) (PixDueChargeResult, error)
+	// GetDueCharge reconciles the authoritative state of a cobv charge — the source
+	// of truth for settlement (never trust a raw webhook — threat W3). An unknown
+	// txid within the tenant is shared.ErrNotFound; the read is tenant-scoped.
+	GetDueCharge(ctx context.Context, tenantID, txID string) (PixDueChargeResult, error)
+	// UpdateDueCharge amends a registered cobv's parameters (roteiro 7.7). req carries
+	// the full new parameter set. An unknown txid within the tenant is
+	// shared.ErrNotFound; the operation is tenant-scoped so one tenant can never amend
+	// another's charge.
+	UpdateDueCharge(ctx context.Context, tenantID, txID string, req PixDueChargeRequest) (PixDueChargeResult, error)
+}
+
 // PixListFilter is the date-window + pagination filter for listing immediate PIX
 // charges. Start and End are the BACEN inicio/fim bounds (required); Page and
 // PageSize map to paginacao.paginaAtual / paginacao.itensPorPagina (optional — a

@@ -29,6 +29,11 @@ type StubProvider struct {
 	pixCharges map[string]stubPixCharge       // keyed by tenantID+"\x00"+txID (PIX cobrança imediata)
 	pixByIdem  map[string]string              // keyed by tenantID+"\x00"+idempotencyKey -> txID
 	boletos    map[string]ports.BoletoResult  // keyed by tenantID+"\x00"+boletoID (BolePix)
+	// cobvCharges holds PIX cobrança-com-vencimento (cobv) charges keyed by
+	// tenantID+"\x00"+txID; cobvByIdem maps the idempotency anchor to its txID so a
+	// re-submit resolves to the same charge (roteiro 7.5–7.7).
+	cobvCharges map[string]ports.PixDueChargeResult
+	cobvByIdem  map[string]string // keyed by tenantID+"\x00"+anchor -> txID
 }
 
 // stubPixCharge is the in-memory record for an immediate PIX charge: the port
@@ -42,14 +47,16 @@ type stubPixCharge struct {
 // credential isolation at charge time (the secret is never logged).
 func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 	return &StubProvider{
-		creds:      creds,
-		now:        time.Now,
-		charges:    make(map[string]ports.ChargeResult),
-		byIdem:     make(map[string]ports.ChargeResult),
-		consents:   make(map[string]ports.ConsentResult),
-		pixCharges: make(map[string]stubPixCharge),
-		pixByIdem:  make(map[string]string),
-		boletos:    make(map[string]ports.BoletoResult),
+		creds:       creds,
+		now:         time.Now,
+		charges:     make(map[string]ports.ChargeResult),
+		byIdem:      make(map[string]ports.ChargeResult),
+		consents:    make(map[string]ports.ConsentResult),
+		pixCharges:  make(map[string]stubPixCharge),
+		pixByIdem:   make(map[string]string),
+		boletos:     make(map[string]ports.BoletoResult),
+		cobvCharges: make(map[string]ports.PixDueChargeResult),
+		cobvByIdem:  make(map[string]string),
 	}
 }
 

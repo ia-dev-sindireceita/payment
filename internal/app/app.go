@@ -26,6 +26,11 @@ type Deps struct {
 	// provider itself (the raw PixProvider, NOT the settlement wrapper); in stub mode
 	// it is the in-memory StubProvider. When nil, PixService is simply not wired.
 	Pix ports.PixProvider
+	// PixDueCharge is the PIX cobrança-com-vencimento (cobv) port. Segregated from
+	// Pix (ISP): PixDueChargeService depends only on it. In production it is the C6
+	// provider; in stub mode the in-memory StubProvider. When nil, the service is
+	// simply not wired.
+	PixDueCharge ports.PixDueChargeProvider
 	// Checkout is the unified C6 hosted-checkout port (roteiro 9). Segregated from
 	// Bank/Pix (ISP): CheckoutService depends only on it. In production it is the C6
 	// provider; in stub mode the in-memory StubProvider. When nil, CheckoutService is

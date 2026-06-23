@@ -79,6 +79,9 @@ func run() error {
 	checkoutProvider, _ := pixProvider.(ports.CheckoutProvider)
 	// The raw provider also satisfies the segregated boleto port (BolePix grupos 1–6).
 	boletoProvider, _ := pixProvider.(ports.BoletoProvider)
+	// The raw provider also satisfies the segregated cobv port (PIX com vencimento,
+	// roteiro 7.5–7.7).
+	cobvProvider, _ := pixProvider.(ports.PixDueChargeProvider)
 
 	deps := app.Deps{
 		Payments:        store,
@@ -89,6 +92,7 @@ func run() error {
 		Bus:             inmemory.NewBus(),
 		Bank:            bankProvider,
 		Pix:             pixProvider,
+		PixDueCharge:    cobvProvider,
 		Checkout:        checkoutProvider,
 		Boleto:          boletoProvider,
 		Credentials:     creds,
@@ -147,6 +151,7 @@ func run() error {
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:       app.NewChargeService(deps),
 		Pix:           app.NewPixService(deps),
+		PixCobV:       app.NewPixDueChargeService(deps),
 		Checkout:      app.NewCheckoutService(deps),
 		Boleto:        app.NewBoletoService(deps),
 		Admin:         app.NewAdminService(deps),
