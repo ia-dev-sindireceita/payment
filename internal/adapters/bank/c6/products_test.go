@@ -39,6 +39,10 @@ type productServer struct {
 	boletoCancel  http.HandlerFunc
 	boletoUpdate  http.HandlerFunc
 	checkout      http.HandlerFunc
+	// cobvPut backs both create and amend (both PUT /v1/pix/cobv/{txid}); cobvGet
+	// backs the reconcile read (roteiro 7.5–7.7).
+	cobvPut http.HandlerFunc
+	cobvGet http.HandlerFunc
 }
 
 func newProductServer(t *testing.T) *productServer {
@@ -133,6 +137,25 @@ func newProductServer(t *testing.T) *productServer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"session_id":"sess_1","status":"OPEN","redirect_url":"https://pay.c6/sess_1","amount_cents":1500}`))
+	})
+
+	mux.HandleFunc("PUT /v1/pix/cobv/{txid}", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if ps.cobvPut != nil {
+			ps.cobvPut(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"txid":"` + r.PathValue("txid") + `","status":"ATIVA","qr_code":"pix-cobv-emv","qr_code_location":"https://pix.c6/cobv","amount_cents":1000,"validity_days":5,"fine_bps":200,"monthly_interest_bps":100,"discount_bps":500}`))
+	})
+	mux.HandleFunc("GET /v1/pix/cobv/{txid}", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if ps.cobvGet != nil {
+			ps.cobvGet(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"txid":"` + r.PathValue("txid") + `","status":"CONCLUIDA","qr_code":"pix-cobv-emv","qr_code_location":"https://pix.c6/cobv","amount_cents":1000,"received_amount_cents":1000,"validity_days":5,"fine_bps":200,"monthly_interest_bps":100}`))
 	})
 
 	ps.Server = httptest.NewTLSServer(mux)
