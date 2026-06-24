@@ -228,12 +228,26 @@ func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.Bank
 		stub := bank.NewStubProvider(creds)
 		return stub, stub, nil
 	}
-	c6p, err := c6.New(c6.Config{
+	c6cfg := c6.Config{
 		BaseURL:  cfg.C6.BaseURL,
 		TokenURL: cfg.C6.TokenURL,
 		Scope:    cfg.C6.Scope,
 		Timeout:  cfg.C6.Timeout,
-	}, creds)
+	}
+	// C6 requires an mTLS client certificate on the connection. When a cert/key
+	// path is configured, build a client-cert transport and inject it; a load
+	// failure fails the boot closed (explicit error) rather than silently
+	// connecting without the cert. Both paths empty ⇒ no client cert (the default
+	// transport), preserving stub/dev behaviour.
+	if cfg.C6.ClientCertPath != "" || cfg.C6.ClientKeyPath != "" {
+		httpc, err := c6.MTLSHTTPClient(cfg.C6.ClientCertPath, cfg.C6.ClientKeyPath, cfg.C6.Timeout)
+		if err != nil {
+			return nil, nil, err
+		}
+		c6cfg.HTTPClient = httpc
+		log.Print("api: C6 mTLS client certificate loaded")
+	}
+	c6p, err := c6.New(c6cfg, creds)
 	if err != nil {
 		return nil, nil, err
 	}

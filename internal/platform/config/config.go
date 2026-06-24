@@ -52,6 +52,14 @@ type C6Config struct {
 	TokenURL string        // OAuth2 client_credentials token endpoint
 	Scope    string        // optional OAuth2 scope
 	Timeout  time.Duration // per-request timeout for the C6 HTTP client
+	// ClientCertPath and ClientKeyPath are filesystem paths to the PEM-encoded
+	// client certificate and its private key for the mutual-TLS connection C6
+	// requires (in addition to the OAuth2 bearer). Both empty ⇒ no client cert is
+	// presented (current behaviour preserved). The SECRET (the private key) lives
+	// only in the file referenced by the path — never in code, env value, or URL
+	// (threat C1); only the path comes from the environment.
+	ClientCertPath string
+	ClientKeyPath  string
 }
 
 // FromEnv builds a Config from environment variables, applying safe defaults.
@@ -67,10 +75,12 @@ func FromEnv() Config {
 		RabbitURL:      os.Getenv("PAYMENT_RABBIT_URL"),
 		SecureCookies:  getenvBool("PAYMENT_SECURE_COOKIES", true),
 		C6: C6Config{
-			BaseURL:  os.Getenv("PAYMENT_C6_BASE_URL"),
-			TokenURL: os.Getenv("PAYMENT_C6_TOKEN_URL"),
-			Scope:    os.Getenv("PAYMENT_C6_SCOPE"),
-			Timeout:  getenvDuration("PAYMENT_C6_TIMEOUT", 15*time.Second),
+			BaseURL:        os.Getenv("PAYMENT_C6_BASE_URL"),
+			TokenURL:       os.Getenv("PAYMENT_C6_TOKEN_URL"),
+			Scope:          os.Getenv("PAYMENT_C6_SCOPE"),
+			Timeout:        getenvDuration("PAYMENT_C6_TIMEOUT", 15*time.Second),
+			ClientCertPath: os.Getenv("PAYMENT_C6_CLIENT_CERT"),
+			ClientKeyPath:  os.Getenv("PAYMENT_C6_CLIENT_KEY"),
 		},
 	}
 }

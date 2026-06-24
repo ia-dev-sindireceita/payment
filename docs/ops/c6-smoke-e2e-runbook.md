@@ -240,8 +240,65 @@ Quando as credenciais chegarem ([SIN-65344](/SIN/issues/SIN-65344)):
 
 1. Preencha `PAYMENT_C6_BASE_URL`, `PAYMENT_C6_TOKEN_URL`, `PAYMENT_C6_SCOPE`
    (HTTPS; URL `http://` falha o startup por design).
-2. Forneça `PAYMENT_BANK_CREDS` com o `client_id`/`secret` reais do tenant (via
+2. Forneça o **certificado de cliente mTLS** (ver §8): `PAYMENT_C6_CLIENT_CERT` e
+   `PAYMENT_C6_CLIENT_KEY` apontando para os arquivos PEM montados pelo secret
+   manager.
+3. Forneça `PAYMENT_BANK_CREDS` com o `client_id`/`secret` reais do tenant (via
    secret manager), ou escreva via `PUT /admin/tenants/{id}/bank-credential`.
-3. Registre a URL `https://<dominio>/webhooks/c6/$REF` no portal C6.
-4. Rode a §5 idêntica: agora o caminho **positivo** de liquidação fecha por HTTP
+4. Registre a URL `https://<dominio>/webhooks/c6/$REF` no portal C6.
+5. Rode a §5 idêntica: agora o caminho **positivo** de liquidação fecha por HTTP
    (o C6 reporta `paid` na reconciliação) e a §5.4 vira o caso de liquidação real.
+
+## 8. mTLS do C6 — certificado de cliente ([SIN-65805](/SIN/issues/SIN-65805))
+
+O C6 exige um **certificado de cliente (mutual TLS)** na conexão, **além** do
+bearer OAuth2. Sem o cert, o handshake TLS é recusado pelo C6 antes de qualquer
+request HTTP — o OAuth2 sozinho não basta.
+
+### 8.1 Como ligar
+
+Duas env vars novas, ambas **caminhos** para arquivos PEM (o segredo — a chave
+privada — vive só no arquivo, nunca em código/env/URL; threat C1):
+
+| Var | Conteúdo |
+| --- | --- |
+| `PAYMENT_C6_CLIENT_CERT` | caminho do PEM do **certificado** do cliente |
+| `PAYMENT_C6_CLIENT_KEY`  | caminho do PEM da **chave privada** do cliente |
+
+Comportamento (`cmd/api/main.go` `newBankProvider` → `c6.MTLSHTTPClient`):
+
+- **Ambas vazias** ⇒ sem cert de cliente — comportamento atual preservado (stub/dev
+  e qualquer endpoint que não exija mTLS).
+- **Setadas** ⇒ o par é carregado com `tls.LoadX509KeyPair` e injetado no
+  transporte do adapter C6 via `c6.Config.HTTPClient`, mantendo **TLS >= 1.2** e
+  **redirects desabilitados** (anti-SSRF) idênticos ao transporte default.
+- **Falha ao carregar o par** (arquivo ausente, PEM inválido, só uma das duas
+  setada) ⇒ **erro explícito de boot (fail-closed)** — o processo NÃO sobe sem o
+  cert quando ele foi pedido, em vez de degradar silenciosamente para sem-mTLS.
+
+Em homologação/produção os arquivos vêm do secret manager, montados read-only no
+FS do processo (não do repositório). Permissões `0600`; nunca commitar PEM.
+
+### 8.2 Endpoints do sandbox — status (BLOQUEADO no portal, NÃO bloqueia o cert)
+
+`PAYMENT_C6_BASE_URL` / `PAYMENT_C6_TOKEN_URL` do **sandbox de homologação** não
+vieram no e-mail de onboarding e o Portal do Desenvolvedor C6
+(<https://developers.c6bank.com.br/>) é **login-walled** — a referência de API,
+os hostnames de sandbox e o material do mTLS ficam atrás do login/onboarding e
+**não são alcançáveis sem credencial do portal**. Confirmação pública também não
+existe (busca aberta não retorna os hosts).
+
+> **PLACEHOLDER — preencher na obtenção dos endpoints (rotear via SIN-65805 / SIN-65344):**
+>
+> ```
+> PAYMENT_C6_BASE_URL=https://<sandbox-base-host-do-portal>      # ex.: baseapi homologação
+> PAYMENT_C6_TOKEN_URL=https://<sandbox-token-host-do-portal>/oauth/token
+> PAYMENT_C6_SCOPE=<scope-se-exigido-pelo-portal>
+> PAYMENT_C6_CLIENT_CERT=/etc/payment/c6/client.crt   # PEM emitido/registrado no portal
+> PAYMENT_C6_CLIENT_KEY=/etc/payment/c6/client.key
+> ```
+
+O **plumbing do cert (entregáveis 2–3) está completo e testado** independentemente
+desses valores: assim que o portal liberar base/token URLs + o PEM do cliente,
+basta preencher as cinco vars acima e rodar a §5/§7 — nenhuma mudança de código é
+necessária.
