@@ -40,7 +40,12 @@ type Deps struct {
 	// Bank/Pix/Checkout (ISP): BoletoService depends only on it. In production it is
 	// the C6 provider; in stub mode the in-memory StubProvider. When nil, BoletoService
 	// is simply not wired.
-	Boleto      ports.BoletoProvider
+	Boleto ports.BoletoProvider
+	// DDA is the DDA / agendamento-de-pagamentos port (roteiro grupo 8). Segregated
+	// from the other bank ports (ISP): DDAService depends only on it. In production it
+	// is the C6 provider; in stub mode the in-memory StubProvider. When nil, DDAService
+	// is simply not wired.
+	DDA         ports.DDAProvider
 	Credentials ports.CredentialStore
 	// CredWriter is the admin-plane write path for per-tenant bank credentials.
 	// Kept separate from Credentials (the reader) so each service depends only on

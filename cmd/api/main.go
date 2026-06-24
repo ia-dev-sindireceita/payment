@@ -82,6 +82,9 @@ func run() error {
 	// The raw provider also satisfies the segregated cobv port (PIX cobrança com
 	// vencimento, roteiro 7.5–7.8), kept apart from the immediate Pix port (ISP).
 	cobvProvider, _ := pixProvider.(ports.PixDueChargeProvider)
+	// The raw provider also satisfies the segregated DDA port (agendamento de
+	// pagamentos, roteiro grupo 8), kept apart from the other bank ports (ISP).
+	ddaProvider, _ := pixProvider.(ports.DDAProvider)
 
 	deps := app.Deps{
 		Payments:        store,
@@ -95,6 +98,7 @@ func run() error {
 		PixDueCharge:    cobvProvider,
 		Checkout:        checkoutProvider,
 		Boleto:          boletoProvider,
+		DDA:             ddaProvider,
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
@@ -154,6 +158,7 @@ func run() error {
 		PixCobV:       app.NewPixDueChargeService(deps),
 		Checkout:      app.NewCheckoutService(deps),
 		Boleto:        app.NewBoletoService(deps),
+		DDA:           app.NewDDAService(deps),
 		Admin:         app.NewAdminService(deps),
 		Console:       console,
 		UI:            ui,
