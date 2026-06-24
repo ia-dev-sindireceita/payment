@@ -20,6 +20,7 @@ type Server struct {
 	pixCobV     *app.PixDueChargeService
 	checkout    *app.CheckoutService
 	boleto      *app.BoletoService
+	dda         *app.DDAService
 	admin       *app.AdminService
 	console     *app.ConsoleService
 	ui          *adminweb.Renderer
@@ -50,7 +51,11 @@ type Config struct {
 	// Boleto backs the BolePix boleto tenant routes (/v1/boletos). It may be nil for
 	// deployments/tests that do not serve the boleto surface — the routes are then
 	// registered but never exercised.
-	Boleto      *app.BoletoService
+	Boleto *app.BoletoService
+	// DDA backs the DDA / agendamento-de-pagamentos tenant routes (/v1/dda, roteiro
+	// grupo 8). It may be nil for deployments/tests that do not serve the DDA surface —
+	// the routes are then registered but never exercised.
+	DDA         *app.DDAService
 	Admin       *app.AdminService
 	Console     *app.ConsoleService
 	UI          *adminweb.Renderer
@@ -72,6 +77,7 @@ func NewServer(c Config) *Server {
 		pixCobV:     c.PixCobV,
 		checkout:    c.Checkout,
 		boleto:      c.Boleto,
+		dda:         c.DDA,
 		admin:       c.Admin,
 		console:     c.Console,
 		ui:          c.UI,
@@ -146,6 +152,18 @@ func (s *Server) Router() http.Handler {
 		r.Get("/boletos/{id}", s.handleGetBoleto)
 		r.Delete("/boletos/{id}", s.handleDeleteBoleto)
 		r.Put("/boletos/{id}", s.handleUpdateBoleto)
+		// DDA / agendamento de pagamentos (roteiro grupo 8): list the boletos open in
+		// the tenant's DDA (8.1), submit a payment group for the initial consult (8.2),
+		// read its items (8.3), trim items as a list (8.4) or one at a time (8.5) and
+		// submit the group for approval (8.6). The {id}/{itemID} path params are
+		// tenant-scoped in the use-case (a group owned by another tenant is 404, never a
+		// cross-tenant existence oracle).
+		r.Get("/dda/boletos", s.handleListDDABoletos)
+		r.Post("/dda/payment-groups", s.handleCreateDDAGroup)
+		r.Get("/dda/payment-groups/{id}/items", s.handleGetDDAGroupItems)
+		r.Delete("/dda/payment-groups/{id}/items", s.handleRemoveDDAGroupItems)
+		r.Delete("/dda/payment-groups/{id}/items/{itemID}", s.handleRemoveDDAGroupItem)
+		r.Post("/dda/payment-groups/{id}/submit", s.handleSubmitDDAGroup)
 	})
 
 	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route

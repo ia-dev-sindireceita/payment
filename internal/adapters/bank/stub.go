@@ -35,6 +35,13 @@ type StubProvider struct {
 	// re-submit resolves to the same charge (roteiro 7.5–7.7).
 	cobvCharges   map[string]ports.PixDueChargeResult
 	cobvDueByIdem map[string]string // keyed by tenantID+"\x00"+anchor -> txID
+	// ddaBoletos holds the boletos open in a tenant's DDA (roteiro 8.1), keyed by
+	// tenantID. ddaGroups holds DDA payment groups keyed by tenantID+"\x00"+groupID;
+	// ddaGroupByIdem maps the idempotency anchor to its groupID so a re-submitted
+	// consult resolves to the same group (roteiro 8.2–8.6).
+	ddaBoletos     map[string][]ports.DDABoleto
+	ddaGroups      map[string]*stubDDAGroup
+	ddaGroupByIdem map[string]string // keyed by tenantID+"\x00"+anchor -> groupID
 }
 
 // stubPixCharge is the in-memory record for an immediate PIX charge: the port
@@ -48,17 +55,20 @@ type stubPixCharge struct {
 // credential isolation at charge time (the secret is never logged).
 func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 	return &StubProvider{
-		creds:         creds,
-		now:           time.Now,
-		charges:       make(map[string]ports.ChargeResult),
-		byIdem:        make(map[string]ports.ChargeResult),
-		consents:      make(map[string]ports.ConsentResult),
-		pixCharges:    make(map[string]stubPixCharge),
-		pixByIdem:     make(map[string]string),
-		boletos:       make(map[string]ports.BoletoResult),
-		checkouts:     make(map[string]ports.CheckoutResult),
-		cobvCharges:   make(map[string]ports.PixDueChargeResult),
-		cobvDueByIdem: make(map[string]string),
+		creds:          creds,
+		now:            time.Now,
+		charges:        make(map[string]ports.ChargeResult),
+		byIdem:         make(map[string]ports.ChargeResult),
+		consents:       make(map[string]ports.ConsentResult),
+		pixCharges:     make(map[string]stubPixCharge),
+		pixByIdem:      make(map[string]string),
+		boletos:        make(map[string]ports.BoletoResult),
+		checkouts:      make(map[string]ports.CheckoutResult),
+		cobvCharges:    make(map[string]ports.PixDueChargeResult),
+		cobvDueByIdem:  make(map[string]string),
+		ddaBoletos:     make(map[string][]ports.DDABoleto),
+		ddaGroups:      make(map[string]*stubDDAGroup),
+		ddaGroupByIdem: make(map[string]string),
 	}
 }
 
