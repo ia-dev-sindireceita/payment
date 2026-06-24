@@ -85,6 +85,9 @@ func run() error {
 	// The raw provider also satisfies the segregated DDA port (agendamento de
 	// pagamentos, roteiro grupo 8), kept apart from the other bank ports (ISP).
 	ddaProvider, _ := pixProvider.(ports.DDAProvider)
+	// The raw provider also satisfies the segregated statement port (extrato, roteiro
+	// grupo 13), kept apart from the other bank ports (ISP).
+	statementProvider, _ := pixProvider.(ports.StatementProvider)
 
 	deps := app.Deps{
 		Payments:        store,
@@ -99,6 +102,7 @@ func run() error {
 		Checkout:        checkoutProvider,
 		Boleto:          boletoProvider,
 		DDA:             ddaProvider,
+		Statement:       statementProvider,
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
@@ -159,6 +163,7 @@ func run() error {
 		Checkout:      app.NewCheckoutService(deps),
 		Boleto:        app.NewBoletoService(deps),
 		DDA:           app.NewDDAService(deps),
+		Statement:     app.NewStatementService(deps),
 		Admin:         app.NewAdminService(deps),
 		Console:       console,
 		UI:            ui,

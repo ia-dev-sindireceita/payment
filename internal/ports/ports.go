@@ -731,3 +731,48 @@ type DDAProvider interface {
 	// Tenant-scoped; an unknown group is shared.ErrNotFound.
 	SubmitPaymentGroup(ctx context.Context, tenantID, groupID, idemKey string) error
 }
+
+// StatementEntry is one posted line of an account statement (extrato, roteiro
+// 13.a): the bank's entry id, the posting date, the amount in cents, its direction
+// ("credit"/"debit" verbatim) and a short description (histórico). It is a read
+// projection the adapter transports from the bank; the amount is always positive and
+// the direction carries the sign meaning.
+type StatementEntry struct {
+	ID          string
+	Date        time.Time
+	AmountCents int64
+	Kind        string
+	Description string
+}
+
+// Statement is a tenant's account statement over a period: the entries posted within
+// the requested window. The use-case maps it onto the domain statement.Statement to
+// re-validate the entries (defense in depth) before surfacing it.
+type Statement struct {
+	Entries []StatementEntry
+}
+
+// StatementFilter is the date window for an extrato query (roteiro 13.a). Start and
+// End are the inicio/fim bounds; both are required and the use-case validates the
+// window (fim >= inicio, <= 30 days) through the domain before this reaches the
+// adapter.
+type StatementFilter struct {
+	Start time.Time
+	End   time.Time
+}
+
+// StatementProvider is the output port for the account-statement surface (extrato,
+// roteiro grupo 13). It is kept SEPARATE from the other bank ports (ISP): a use-case
+// that reads an extrato must not be forced to depend on PIX/boleto/checkout/DDA
+// semantics, and those consumers must not depend on the statement read. The C6
+// adapter implements it; a stub backs it for tests. The single method carries
+// tenantID explicitly so the per-tenant credential/token isolation the adapter
+// enforces is never bypassed — the tenant is derived from the authenticated caller,
+// never client input (threat H1/P1).
+type StatementProvider interface {
+	// GetStatement returns the entries posted to the tenant's account within the
+	// filter's date window (roteiro 13.a). Pure read; never mutates state. The window
+	// is already validated by the use-case (the domain caps it at 30 days); the
+	// adapter only transports it.
+	GetStatement(ctx context.Context, tenantID string, filter StatementFilter) (Statement, error)
+}

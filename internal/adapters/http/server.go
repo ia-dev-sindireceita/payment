@@ -21,6 +21,7 @@ type Server struct {
 	checkout    *app.CheckoutService
 	boleto      *app.BoletoService
 	dda         *app.DDAService
+	statement   *app.StatementService
 	admin       *app.AdminService
 	console     *app.ConsoleService
 	ui          *adminweb.Renderer
@@ -55,7 +56,11 @@ type Config struct {
 	// DDA backs the DDA / agendamento-de-pagamentos tenant routes (/v1/dda, roteiro
 	// grupo 8). It may be nil for deployments/tests that do not serve the DDA surface —
 	// the routes are then registered but never exercised.
-	DDA         *app.DDAService
+	DDA *app.DDAService
+	// Statement backs the account-statement tenant route (GET /v1/statement, roteiro
+	// grupo 13). It may be nil for deployments/tests that do not serve the extrato
+	// surface — the route is then registered but never exercised.
+	Statement   *app.StatementService
 	Admin       *app.AdminService
 	Console     *app.ConsoleService
 	UI          *adminweb.Renderer
@@ -78,6 +83,7 @@ func NewServer(c Config) *Server {
 		checkout:    c.Checkout,
 		boleto:      c.Boleto,
 		dda:         c.DDA,
+		statement:   c.Statement,
 		admin:       c.Admin,
 		console:     c.Console,
 		ui:          c.UI,
@@ -164,6 +170,11 @@ func (s *Server) Router() http.Handler {
 		r.Delete("/dda/payment-groups/{id}/items", s.handleRemoveDDAGroupItems)
 		r.Delete("/dda/payment-groups/{id}/items/{itemID}", s.handleRemoveDDAGroupItem)
 		r.Post("/dda/payment-groups/{id}/submit", s.handleSubmitDDAGroup)
+		// Account statement (extrato, roteiro grupo 13): read the entries posted to the
+		// authenticated tenant's account over a period (inicio/fim, máx. 30 dias, 13.a).
+		// The tenant is derived from the credential, never the query — no parameter
+		// selects which tenant's extrato is read (threat H1/P1).
+		r.Get("/statement", s.handleGetStatement)
 	})
 
 	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route
