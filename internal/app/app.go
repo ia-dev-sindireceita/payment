@@ -45,7 +45,12 @@ type Deps struct {
 	// from the other bank ports (ISP): DDAService depends only on it. In production it
 	// is the C6 provider; in stub mode the in-memory StubProvider. When nil, DDAService
 	// is simply not wired.
-	DDA         ports.DDAProvider
+	DDA ports.DDAProvider
+	// Statement is the account-statement (extrato) port (roteiro grupo 13). Segregated
+	// from the other bank ports (ISP): StatementService depends only on it. In
+	// production it is the C6 provider; in stub mode the in-memory StubProvider. When
+	// nil, StatementService is simply not wired.
+	Statement   ports.StatementProvider
 	Credentials ports.CredentialStore
 	// CredWriter is the admin-plane write path for per-tenant bank credentials.
 	// Kept separate from Credentials (the reader) so each service depends only on

@@ -42,6 +42,10 @@ type StubProvider struct {
 	ddaBoletos     map[string][]ports.DDABoleto
 	ddaGroups      map[string]*stubDDAGroup
 	ddaGroupByIdem map[string]string // keyed by tenantID+"\x00"+anchor -> groupID
+	// stmtEntries holds the statement entries (extrato, roteiro 13.a) posted to a
+	// tenant's account, keyed by tenantID. GetStatement filters them by the requested
+	// date window.
+	stmtEntries map[string][]ports.StatementEntry
 }
 
 // stubPixCharge is the in-memory record for an immediate PIX charge: the port
@@ -69,6 +73,7 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		ddaBoletos:     make(map[string][]ports.DDABoleto),
 		ddaGroups:      make(map[string]*stubDDAGroup),
 		ddaGroupByIdem: make(map[string]string),
+		stmtEntries:    make(map[string][]ports.StatementEntry),
 	}
 }
 
