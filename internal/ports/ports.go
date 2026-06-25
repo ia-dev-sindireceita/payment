@@ -457,6 +457,40 @@ type PixDueChargeProvider interface {
 	UpdateDueCharge(ctx context.Context, tenantID, txID string, req PixDueChargeRequest) (PixDueChargeResult, error)
 }
 
+// WebhookRegistration is the registered PIX notification callback read back from
+// the PSP (roteiro: outbound webhook registration). WebhookURL is the HTTPS
+// callback C6 POSTs settlement notifications to for a recebedor key; CreatedAt is
+// the PSP-assigned creation instant (an opaque echo, zero when the PSP omits it).
+//
+// WebhookURL embeds the unguessable per-tenant callback ref (/webhooks/c6/{ref}),
+// which IS the per-tenant credential for the unsigned C6 webhook (ADR-0002/F4) —
+// it is a SECRET and must never be logged. It is returned so a caller can confirm,
+// in memory, that the registered URL matches the one it intended to register
+// (idempotent confirmation) without printing it.
+type WebhookRegistration struct {
+	WebhookURL string
+	CreatedAt  time.Time
+}
+
+// PixWebhookRegistrar is the output port for registering and reading the PSP-side
+// PIX notification webhook (BACEN PIX v2 webhook-by-key). It is kept SEPARATE from
+// the charge ports (ISP): registering the outbound callback URL is a distinct
+// concern from creating/reconciling a charge, and a charge consumer must not be
+// forced to depend on webhook-registration semantics. The C6 adapter implements
+// it; each method carries tenantID explicitly so the per-tenant OAuth2 credential
+// isolation the adapter enforces is never bypassed.
+type PixWebhookRegistrar interface {
+	// RegisterWebhook idempotently registers (PUTs) the HTTPS webhookURL the PSP
+	// will notify for the recebedor key pixKey. A re-run with the same URL replaces
+	// rather than duplicates (the registration is keyed by pixKey at the PSP). A
+	// non-HTTPS webhookURL, or an empty tenantID/pixKey, is shared.ErrValidation.
+	RegisterWebhook(ctx context.Context, tenantID, pixKey, webhookURL string) error
+	// GetWebhook reads back the webhook currently registered for pixKey so a caller
+	// can confirm the registration idempotently. An unregistered key is
+	// shared.ErrNotFound; the read is tenant-scoped through the per-tenant bearer.
+	GetWebhook(ctx context.Context, tenantID, pixKey string) (WebhookRegistration, error)
+}
+
 // PixListFilter is the date-window + pagination filter for listing immediate PIX
 // charges. Start and End are the BACEN inicio/fim bounds (required); Page and
 // PageSize map to paginacao.paginaAtual / paginacao.itensPorPagina (optional — a

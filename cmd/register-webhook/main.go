@@ -1,0 +1,152 @@
+// Command register-webhook is a one-shot operator entrypoint that registers the
+// PIX settlement webhook URL with C6 for every configured tenant, then reads it
+// back to confirm. It MUST run from the receiver VPS, where the mTLS client
+// certificate (PAYMENT_C6_CLIENT_CERT/KEY) is mounted — the cert is a secret that
+// never leaves that host (threat C1), so registration cannot be done by curl from
+// anywhere else. It reuses the same mTLS C6 adapter the API serves with, so the
+// wire/auth path is exactly the one proven in production.
+//
+// It is idempotent: the C6 webhook is keyed by PIX key (chave do recebedor), so a
+// re-run PUTs the same URL and replaces rather than duplicates. The callback URL
+// embeds a secret per-tenant ref (/webhooks/c6/{ref}) and is NEVER logged; only
+// non-sensitive identifiers (tenant id, a masked PIX key) and the outcome are
+// emitted.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/ia-dev-sindireceita/payment/internal/adapters/bank/c6"
+	"github.com/ia-dev-sindireceita/payment/internal/adapters/secret"
+	"github.com/ia-dev-sindireceita/payment/internal/platform/config"
+	"github.com/ia-dev-sindireceita/payment/internal/ports"
+)
+
+// defaultWebhookBaseURL is the receiver's public origin. The callback path is
+// /webhooks/c6/{tenantRef} (the inbound surface from SIN-65856/65858). Overridable
+// via PAYMENT_WEBHOOK_BASE_URL for staging.
+const defaultWebhookBaseURL = "https://payment.lmhost.com.br"
+
+func main() {
+	if err := run(log.New(os.Stdout, "", log.LstdFlags)); err != nil {
+		log.Fatalf("register-webhook: %v", err)
+	}
+}
+
+// run wires the mTLS C6 adapter from the environment and registers+confirms the
+// webhook for every configured tenant ref. logger is injected so the flow is
+// testable without touching process globals; configuration is read from the
+// environment via config.FromEnv (the same loader the api/worker use).
+func run(logger *log.Logger) error {
+	cfg := config.FromEnv()
+
+	if cfg.C6.BaseURL == "" {
+		return errors.New("PAYMENT_C6_BASE_URL not set: refusing to run against the bank stub")
+	}
+	// mTLS is mandatory: C6 requires a client certificate on the connection in
+	// addition to the OAuth2 bearer (secure-by-default). Refuse to run without it
+	// rather than silently connecting cert-less.
+	if cfg.C6.ClientCertPath == "" || cfg.C6.ClientKeyPath == "" {
+		return errors.New("PAYMENT_C6_CLIENT_CERT and PAYMENT_C6_CLIENT_KEY are required (mTLS)")
+	}
+	if len(cfg.WebhookRefs) == 0 {
+		return errors.New("PAYMENT_WEBHOOK_REFS empty: nothing to register (provisioning gate)")
+	}
+
+	httpc, err := c6.MTLSHTTPClient(cfg.C6.ClientCertPath, cfg.C6.ClientKeyPath, cfg.C6.Timeout)
+	if err != nil {
+		return err
+	}
+	provider, err := c6.New(c6.Config{
+		BaseURL:    cfg.C6.BaseURL,
+		TokenURL:   cfg.C6.TokenURL,
+		Scope:      cfg.C6.Scope,
+		Timeout:    cfg.C6.Timeout,
+		HTTPClient: httpc,
+	}, secret.NewStore(cfg.BankCreds))
+	if err != nil {
+		return err
+	}
+
+	baseURL := strings.TrimRight(os.Getenv("PAYMENT_WEBHOOK_BASE_URL"), "/")
+	if baseURL == "" {
+		baseURL = defaultWebhookBaseURL
+	}
+
+	return registerAll(context.Background(), provider, cfg.WebhookRefs, cfg.BankCreds, baseURL, logger)
+}
+
+// registerAll registers and confirms the webhook for every (tenantRef -> tenantID)
+// entry. For each, it resolves the tenant's PIX creditor key (the chave the
+// webhook is keyed under) from the per-tenant credential, PUTs the callback URL,
+// then GETs it back to confirm the registered URL matches (idempotent
+// confirmation). Per-tenant failures are collected and surfaced together so one
+// bad tenant does not abort the rest; the secret ref and full URL are never
+// logged. It returns a non-nil error when any tenant failed.
+//
+// Refs are processed in a stable (sorted by tenantRef) order so a re-run logs
+// deterministically. A tenant with no configured creditor key cannot be keyed at
+// the PSP and is reported as a failure (a provisioning gap), not silently skipped.
+func registerAll(ctx context.Context, reg ports.PixWebhookRegistrar, refs map[string]string, creds map[string]ports.BankCredential, baseURL string, logger *log.Logger) error {
+	tenantRefs := make([]string, 0, len(refs))
+	for ref := range refs {
+		tenantRefs = append(tenantRefs, ref)
+	}
+	sort.Strings(tenantRefs)
+
+	var failures int
+	for _, ref := range tenantRefs {
+		tenantID := refs[ref]
+		chave := strings.TrimSpace(creds[tenantID].CreditorKey)
+		if chave == "" {
+			logger.Printf("tenant=%s: FAILED — no PIX creditor key configured (provisioning gap)", tenantID)
+			failures++
+			continue
+		}
+		// The callback URL embeds the secret ref; it is built here but never logged.
+		webhookURL := baseURL + "/webhooks/c6/" + ref
+
+		if err := reg.RegisterWebhook(ctx, tenantID, chave, webhookURL); err != nil {
+			logger.Printf("tenant=%s key=%s: FAILED to register: %v", tenantID, maskKey(chave), err)
+			failures++
+			continue
+		}
+		got, err := reg.GetWebhook(ctx, tenantID, chave)
+		if err != nil {
+			logger.Printf("tenant=%s key=%s: registered but FAILED to confirm: %v", tenantID, maskKey(chave), err)
+			failures++
+			continue
+		}
+		if got.WebhookURL != webhookURL {
+			// Mismatch means the PSP holds a DIFFERENT URL than we just PUT — surface
+			// it as a failure WITHOUT printing either URL (both embed the secret ref).
+			logger.Printf("tenant=%s key=%s: confirmation MISMATCH — registered URL differs from readback", tenantID, maskKey(chave))
+			failures++
+			continue
+		}
+		logger.Printf("tenant=%s key=%s: OK (registered + confirmed)", tenantID, maskKey(chave))
+	}
+
+	if failures > 0 {
+		return fmt.Errorf("%d of %d webhook registration(s) failed", failures, len(tenantRefs))
+	}
+	logger.Printf("all %d webhook(s) registered and confirmed", len(tenantRefs))
+	return nil
+}
+
+// maskKey renders a PIX key for logs without exposing the full routing-sensitive
+// value (a CPF/CNPJ/email/EVP is PII / fund-routing data, threat C4). It keeps the
+// first and last character and replaces the middle with a fixed marker; a very
+// short key is fully masked.
+func maskKey(key string) string {
+	if len(key) <= 4 {
+		return "****"
+	}
+	return key[:1] + "***" + key[len(key)-1:]
+}
