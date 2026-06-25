@@ -137,21 +137,34 @@ type BankCredential struct {
 	ClientID string
 	// Secret is populated only transiently when resolved from the store.
 	Secret string
+	// CreditorKey is the tenant's registered PIX key (chave do recebedor) the
+	// adapter injects into a cob/cobv when the request does not carry one. It is
+	// NOT a secret — it is the account's public PIX identifier — but it IS
+	// sensitive to fund routing: it belongs to the same identity aggregate as
+	// ClientID (the tenant's bank identity) and sourcing it from per-tenant config
+	// instead of per-request input constrains fund routing to the tenant's
+	// registered account (OWASP A01, confused-deputy defense; ADR-0004, SIN-65862).
+	// It is redacted from String()/LogValue() so an error or log path that prints a
+	// credential cannot leak account-routing data (threat C1/C4).
+	CreditorKey string
 }
 
 // String implements fmt.Stringer so a credential can never leak its secret
-// through %v/%s/%+v formatting in logs or errors (defense-in-depth, threat C1).
+// (or the routing-sensitive creditor key) through %v/%s/%+v formatting in logs
+// or errors (defense-in-depth, threat C1/C4; ADR-0004).
 func (c BankCredential) String() string {
-	return fmt.Sprintf("BankCredential{TenantID:%s ClientID:%s Secret:[REDACTED]}", c.TenantID, c.ClientID)
+	return fmt.Sprintf("BankCredential{TenantID:%s ClientID:%s Secret:[REDACTED] CreditorKey:[REDACTED]}", c.TenantID, c.ClientID)
 }
 
 // LogValue implements slog.LogValuer so structured logging emits the credential
-// without its secret, even when logged as an attribute value (threat C1/C4).
+// without its secret or its routing-sensitive creditor key, even when logged as
+// an attribute value (threat C1/C4; ADR-0004).
 func (c BankCredential) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("tenant_id", c.TenantID),
 		slog.String("client_id", c.ClientID),
 		slog.String("secret", "[REDACTED]"),
+		slog.String("creditor_key", "[REDACTED]"),
 	)
 }
 
@@ -219,8 +232,11 @@ type ChargeRequest struct {
 	// adapter forwards it as the BACEN "chave" field. OPTIONAL on the port (a
 	// stub/test charge may omit it, and the omitempty wire field then drops it); a
 	// real homologação/production charge MUST carry the tenant's registered key.
-	// Wiring the app to populate it (per-tenant config vs request input) is tracked
-	// as a separate follow-up.
+	// No app surface (HTTP DTO / HTMX form) populates it: the C6 adapter injects
+	// the tenant's configured key (BankCredential.CreditorKey) when this field is
+	// empty, so the client boundary never carries fund-routing data (opção (a),
+	// ADR-0004 / SIN-65862). A non-empty value here is an optional per-request
+	// override, reserved for a future multi-key hook, and wins over the config.
 	CreditorKey string
 }
 

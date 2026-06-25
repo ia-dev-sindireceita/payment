@@ -86,9 +86,10 @@ func cobvTxID(anchor string) string {
 }
 
 // toCobvRequestBody maps the port request to the adapter transport JSON (shared by
-// register and amend). The txid is supplied explicitly so amend addresses the known
-// resource.
-func toCobvRequestBody(txID string, req ports.PixDueChargeRequest) cobvRequestBody {
+// register and amend). The txid and the resolved creditor key (chave do recebedor)
+// are supplied explicitly: txid so amend addresses the known resource, chave so the
+// caller injects the tenant's configured key when the request omits one (ADR-0004).
+func toCobvRequestBody(txID, chave string, req ports.PixDueChargeRequest) cobvRequestBody {
 	return cobvRequestBody{
 		TxID:               txID,
 		AmountCents:        req.AmountCents,
@@ -101,7 +102,7 @@ func toCobvRequestBody(txID string, req ports.PixDueChargeRequest) cobvRequestBo
 		DiscountFixedCents: req.DiscountFixedCents,
 		DebtorTaxID:        strings.TrimSpace(req.DebtorTaxID),
 		DebtorName:         strings.TrimSpace(req.DebtorName),
-		CreditorKey:        strings.TrimSpace(req.CreditorKey),
+		CreditorKey:        chave,
 	}
 }
 
@@ -137,7 +138,12 @@ func (p *Provider) CreateDueCharge(ctx context.Context, tenantID string, req por
 	}
 	txid := cobvTxID(anchor)
 
-	payload, err := json.Marshal(toCobvRequestBody(txid, req))
+	chave, err := p.resolveCreditorKey(ctx, tenantID, req.CreditorKey)
+	if err != nil {
+		return ports.PixDueChargeResult{}, err
+	}
+
+	payload, err := json.Marshal(toCobvRequestBody(txid, chave, req))
 	if err != nil {
 		return ports.PixDueChargeResult{}, &Error{Op: "create_cobv", sentinel: shared.ErrValidation}
 	}
@@ -182,7 +188,11 @@ func (p *Provider) UpdateDueCharge(ctx context.Context, tenantID, txID string, r
 	if req.AmountCents <= 0 {
 		return ports.PixDueChargeResult{}, &Error{Op: "update_cobv", sentinel: shared.ErrValidation}
 	}
-	payload, err := json.Marshal(toCobvRequestBody(txID, req))
+	chave, err := p.resolveCreditorKey(ctx, tenantID, req.CreditorKey)
+	if err != nil {
+		return ports.PixDueChargeResult{}, err
+	}
+	payload, err := json.Marshal(toCobvRequestBody(txID, chave, req))
 	if err != nil {
 		return ports.PixDueChargeResult{}, &Error{Op: "update_cobv", sentinel: shared.ErrValidation}
 	}
