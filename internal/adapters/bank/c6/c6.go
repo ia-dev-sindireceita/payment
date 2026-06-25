@@ -57,6 +57,12 @@ type Provider struct {
 	baseURL string
 	httpc   *http.Client
 	tokens  *tokenManager
+	// creds resolves a tenant's bank credential, including its registered PIX
+	// creditor key (chave do recebedor), which the adapter injects into a cob/cobv
+	// when the request omits one (per-tenant config injection, ADR-0004 /
+	// SIN-65862). It is the same per-tenant store the token manager uses, so a
+	// charge can never route funds under another tenant's identity (threat H1/P1).
+	creds ports.CredentialStore
 	// now is the clock used for PIX QR-expiry computation when the PSP omits the
 	// charge creation timestamp. Defaults to time.Now (overridable for tests).
 	now func() time.Time
@@ -109,8 +115,35 @@ func New(cfg Config, creds ports.CredentialStore) (*Provider, error) {
 		baseURL: trimTrailingSlash(cfg.BaseURL),
 		httpc:   httpc,
 		tokens:  newTokenManager(creds, cfg.TokenURL, cfg.Scope, httpc, now),
+		creds:   creds,
 		now:     now,
 	}, nil
+}
+
+// resolveCreditorKey returns the PIX key (chave do recebedor) a cob/cobv is
+// registered under. A non-empty reqKey (the optional per-request override,
+// reserved for a future multi-key hook) wins; otherwise the tenant's configured
+// key (BankCredential.CreditorKey) is injected from the per-tenant store. Sourcing
+// the key from per-tenant config instead of per-request input constrains fund
+// routing to the tenant's registered account: a compromised or buggy app surface
+// cannot reroute funds to an arbitrary PIX key (OWASP A01, confused-deputy
+// defense; ADR-0004 / SIN-65862).
+//
+// A credential-store failure (e.g. unknown tenant) is propagated verbatim so the
+// caller surfaces the same typed error it always has. When BOTH the request and
+// the configured key are empty, the resolved key is "" and the caller currently
+// omits the chave (the wire field is omitempty); turning that into a fail-fast
+// adapter-boundary error is gated on CTO authorization to update the existing
+// create-charge tests that omit a key (rule 3; tracked in SIN-65862).
+func (p *Provider) resolveCreditorKey(ctx context.Context, tenantID, reqKey string) (string, error) {
+	if k := strings.TrimSpace(reqKey); k != "" {
+		return k, nil
+	}
+	cred, err := p.creds.GetBankCredential(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(cred.CreditorKey), nil
 }
 
 // requireHTTPS rejects any endpoint that is not an absolute https:// URL. A
@@ -208,11 +241,16 @@ func (p *Provider) CreateCharge(ctx context.Context, tenantID string, req ports.
 	}
 	txid := pixTxID(req)
 
+	chave, err := p.resolveCreditorKey(ctx, tenantID, req.CreditorKey)
+	if err != nil {
+		return ports.ChargeResult{}, err
+	}
+
 	payload, err := json.Marshal(pixChargeRequestBody{
 		Calendario: pixCalendario{Expiracao: int64(defaultPixExpiry / time.Second)},
 		Devedor:    buildDevedor(req),
 		Valor:      pixValor{Original: formatAmount(req.AmountCents)},
-		Chave:      strings.TrimSpace(req.CreditorKey),
+		Chave:      chave,
 	})
 	if err != nil {
 		return ports.ChargeResult{}, &Error{Op: "create_charge", sentinel: shared.ErrValidation}

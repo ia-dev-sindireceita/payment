@@ -71,7 +71,7 @@ func FromEnv() Config {
 		AdminTokens:    splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
 		OperatorTokens: splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
 		WebhookRefs:    parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
-		BankCreds:      parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS"), slog.Default()),
+		BankCreds:      mergeCreditorKeys(parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS"), slog.Default()), os.Getenv("PAYMENT_BANK_CREDITOR_KEYS"), slog.Default()),
 		RabbitURL:      os.Getenv("PAYMENT_RABBIT_URL"),
 		SecureCookies:  getenvBool("PAYMENT_SECURE_COOKIES", true),
 		C6: C6Config{
@@ -177,6 +177,58 @@ func parseBankCreds(s string, logger *slog.Logger) map[string]ports.BankCredenti
 		}
 	}
 	return m
+}
+
+// mergeCreditorKeys folds the per-tenant PIX creditor keys parsed from
+// PAYMENT_BANK_CREDITOR_KEYS into the BankCredential map produced by
+// parseBankCreds. The creditor key (chave do recebedor) is carried in a SEPARATE
+// env var — not appended to the PAYMENT_BANK_CREDS tuple — on purpose: that tuple
+// keeps the OAuth2 secret as a greedy ':'-tolerant tail (parseBankCreds, SplitN
+// n=3), so there is no unambiguous slot to add a 4th field after the secret
+// without reinterpreting an existing ':'-bearing secret. A parallel var sidesteps
+// that ambiguity and keeps the secret-parsing contract (and its tests) intact
+// (ADR-0004 / SIN-65862).
+//
+// Format: "tenant:creditorKey,tenant2:creditorKey2". A PIX key (email, phone,
+// CPF/CNPJ or EVP UUID) never contains ':', so each entry splits cleanly on the
+// first ':' (SplitN n=2). Entries that are malformed, or that reference a tenant
+// with no bank credential, are skipped and logged at warn level — the routing-
+// sensitive key value itself is NEVER logged, only the non-sensitive tenant_id
+// and entry position (threat C1/C4).
+func mergeCreditorKeys(creds map[string]ports.BankCredential, s string, logger *slog.Logger) map[string]ports.BankCredential {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if creds == nil {
+		creds = make(map[string]ports.BankCredential)
+	}
+	for i, item := range splitNonEmpty(s) {
+		parts := strings.SplitN(item, ":", 2)
+		if len(parts) != 2 {
+			logger.Warn("skipping malformed bank creditor key: expected tenant:creditorKey",
+				slog.Int("entry_index", i), slog.Int("field_count", len(parts)))
+			continue
+		}
+		tenant := strings.TrimSpace(parts[0])
+		key := strings.TrimSpace(parts[1])
+		if tenant == "" || key == "" {
+			logger.Warn("skipping bank creditor key with empty tenant or key",
+				slog.Int("entry_index", i))
+			continue
+		}
+		cred, ok := creds[tenant]
+		if !ok {
+			// A creditor key without a matching bank credential cannot route a
+			// charge (the OAuth2 identity is missing); skip rather than synthesize a
+			// half-credential.
+			logger.Warn("skipping bank creditor key for tenant with no bank credential",
+				slog.String("tenant_id", tenant))
+			continue
+		}
+		cred.CreditorKey = key
+		creds[tenant] = cred
+	}
+	return creds
 }
 
 func splitNonEmpty(s string) []string {

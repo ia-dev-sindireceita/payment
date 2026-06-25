@@ -174,11 +174,16 @@ func (p *Provider) CreateImmediateCharge(ctx context.Context, tenantID string, r
 	}
 	txid := pixTxID(req)
 
+	chave, err := p.resolveCreditorKey(ctx, tenantID, req.CreditorKey)
+	if err != nil {
+		return ports.PixChargeResult{}, err
+	}
+
 	payload, err := json.Marshal(pixChargeRequestBody{
 		Calendario: pixCalendario{Expiracao: int64(expiresIn / time.Second)},
 		Devedor:    buildDevedor(req),
 		Valor:      pixValor{Original: formatAmount(req.AmountCents)},
-		Chave:      strings.TrimSpace(req.CreditorKey),
+		Chave:      chave,
 	})
 	if err != nil {
 		return ports.PixChargeResult{}, &Error{Op: "create_pix", sentinel: shared.ErrValidation}
