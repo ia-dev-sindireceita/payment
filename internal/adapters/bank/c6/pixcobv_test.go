@@ -48,14 +48,58 @@ func TestCreateDueChargeSuccess(t *testing.T) {
 	if ps.idemKey() != "cobv-key-1" {
 		t.Fatalf("idempotency key not forwarded: %q", ps.idemKey())
 	}
-	var sent map[string]json.RawMessage
+	// The wire is the real BACEN cobv shape: the schedule under calendario, the money
+	// and rate blocks under valor, the recebedor key as chave and the payer as devedor.
+	var sent struct {
+		Calendario struct {
+			DataDeVencimento       string `json:"dataDeVencimento"`
+			ValidadeAposVencimento int    `json:"validadeAposVencimento"`
+		} `json:"calendario"`
+		Valor struct {
+			Original string `json:"original"`
+			Multa    struct {
+				Modalidade int    `json:"modalidade"`
+				ValorPerc  string `json:"valorPerc"`
+			} `json:"multa"`
+			Juros struct {
+				ValorPerc string `json:"valorPerc"`
+			} `json:"juros"`
+			Desconto struct {
+				Modalidade int    `json:"modalidade"`
+				ValorPerc  string `json:"valorPerc"`
+			} `json:"desconto"`
+		} `json:"valor"`
+		Chave   string `json:"chave"`
+		Devedor struct {
+			CPF  string `json:"cpf"`
+			Nome string `json:"nome"`
+		} `json:"devedor"`
+	}
 	if err := json.Unmarshal(ps.body(), &sent); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	for _, f := range []string{"due_date", "validity_days", "fine_bps", "monthly_interest_bps", "creditor_key", "debtor_tax_id"} {
-		if _, ok := sent[f]; !ok {
-			t.Fatalf("cobv request must carry %q, body=%s", f, ps.body())
-		}
+	wantDue := cobvReq("t1").DueDate.UTC().Format("2006-01-02")
+	if sent.Calendario.DataDeVencimento != wantDue || sent.Calendario.ValidadeAposVencimento != 5 {
+		t.Fatalf("calendario not transported: %s", ps.body())
+	}
+	if sent.Valor.Original != "10.00" {
+		t.Fatalf("valor.original not transported: %s", ps.body())
+	}
+	// Rates are BACEN percent strings: 200 bps -> "2.00", 100 -> "1.00", 500 -> "5.00".
+	if sent.Valor.Multa.Modalidade != 2 || sent.Valor.Multa.ValorPerc != "2.00" {
+		t.Fatalf("multa not transported as percentual: %s", ps.body())
+	}
+	if sent.Valor.Juros.ValorPerc != "1.00" {
+		t.Fatalf("juros not transported as percentual: %s", ps.body())
+	}
+	if sent.Valor.Desconto.Modalidade != 5 || sent.Valor.Desconto.ValorPerc != "5.00" {
+		t.Fatalf("desconto not transported as percentual antecipação: %s", ps.body())
+	}
+	if sent.Chave != "acme@pix.example" {
+		t.Fatalf("chave not transported: %s", ps.body())
+	}
+	if sent.Devedor.CPF != "12345678901" || sent.Devedor.Nome != "Maria" {
+		t.Fatalf("devedor not transported: %s", ps.body())
 	}
 }
 
@@ -144,14 +188,17 @@ func TestUpdateDueChargeSuccess(t *testing.T) {
 	if res.TxID != "tx_cobv_1" {
 		t.Fatalf("amend must address the known txid, got %q", res.TxID)
 	}
+	// The txid is addressed via the path, never the body; the amended amount rides in
+	// valor.original as the BACEN decimal string (2000 cents -> "20.00").
 	var sent struct {
-		TxID        string `json:"txid"`
-		AmountCents int64  `json:"amount_cents"`
+		Valor struct {
+			Original string `json:"original"`
+		} `json:"valor"`
 	}
 	if err := json.Unmarshal(ps.body(), &sent); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if sent.TxID != "tx_cobv_1" || sent.AmountCents != 2000 {
+	if sent.Valor.Original != "20.00" {
 		t.Fatalf("update body not transported: %s", ps.body())
 	}
 	if ps.idemKey() != "upd-key" {

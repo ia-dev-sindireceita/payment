@@ -39,7 +39,7 @@ type productServer struct {
 	boletoCancel  http.HandlerFunc
 	boletoUpdate  http.HandlerFunc
 	checkout      http.HandlerFunc
-	// cobvPut backs both create and amend (both PUT /v1/pix/cobv/{txid}); cobvGet
+	// cobvPut backs both create and amend (both PUT /v2/pix/cobv/{txid}); cobvGet
 	// backs the reconcile read (roteiro 7.5–7.7).
 	cobvPut http.HandlerFunc
 	cobvGet http.HandlerFunc
@@ -139,23 +139,26 @@ func newProductServer(t *testing.T) *productServer {
 		_, _ = w.Write([]byte(`{"session_id":"sess_1","status":"OPEN","redirect_url":"https://pay.c6/sess_1","amount_cents":1500}`))
 	})
 
-	mux.HandleFunc("PUT /v1/pix/cobv/{txid}", func(w http.ResponseWriter, r *http.Request) {
+	// Real BACEN cobv wire (SIN-65860): calendario.dataDeVencimento/validadeApos-
+	// Vencimento, valor.original + multa/juros/desconto rate blocks, pixCopiaECola +
+	// top-level location, and a pix[] receipt list on the paid read.
+	mux.HandleFunc("PUT /v2/pix/cobv/{txid}", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		if ps.cobvPut != nil {
 			ps.cobvPut(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"txid":"` + r.PathValue("txid") + `","status":"ATIVA","qr_code":"pix-cobv-emv","qr_code_location":"https://pix.c6/cobv","amount_cents":1000,"validity_days":5,"fine_bps":200,"monthly_interest_bps":100,"discount_bps":500}`))
+		_, _ = w.Write([]byte(`{"txid":"` + r.PathValue("txid") + `","status":"ATIVA","pixCopiaECola":"pix-cobv-emv","location":"https://pix.c6/cobv","calendario":{"dataDeVencimento":"2030-03-17","validadeAposVencimento":5},"valor":{"original":"10.00","multa":{"modalidade":2,"valorPerc":"2.00"},"juros":{"modalidade":3,"valorPerc":"1.00"},"desconto":{"modalidade":5,"valorPerc":"5.00"}}}`))
 	})
-	mux.HandleFunc("GET /v1/pix/cobv/{txid}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v2/pix/cobv/{txid}", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		if ps.cobvGet != nil {
 			ps.cobvGet(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"txid":"` + r.PathValue("txid") + `","status":"CONCLUIDA","qr_code":"pix-cobv-emv","qr_code_location":"https://pix.c6/cobv","amount_cents":1000,"received_amount_cents":1000,"validity_days":5,"fine_bps":200,"monthly_interest_bps":100}`))
+		_, _ = w.Write([]byte(`{"txid":"` + r.PathValue("txid") + `","status":"CONCLUIDA","pixCopiaECola":"pix-cobv-emv","location":"https://pix.c6/cobv","calendario":{"dataDeVencimento":"2030-03-17","validadeAposVencimento":5},"valor":{"original":"10.00","multa":{"modalidade":2,"valorPerc":"2.00"},"juros":{"modalidade":3,"valorPerc":"1.00"}},"pix":[{"valor":"10.00"}]}`))
 	})
 
 	ps.Server = httptest.NewTLSServer(mux)
