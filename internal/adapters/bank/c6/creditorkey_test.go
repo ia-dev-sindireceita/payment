@@ -130,7 +130,7 @@ func TestCreateDueChargeInjectsConfiguredCreditorKey(t *testing.T) {
 	if err := json.Unmarshal(ps.body(), &sent); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if sent.CreditorKey != "cobv-config@pix.example" {
-		t.Fatalf("configured chave not injected on cobv: %q", sent.CreditorKey)
+	if sent.Chave != "cobv-config@pix.example" {
+		t.Fatalf("configured chave not injected on cobv: %q", sent.Chave)
 	}
 }
