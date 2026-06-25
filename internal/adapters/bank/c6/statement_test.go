@@ -15,7 +15,7 @@ import (
 )
 
 // stmtTestServer is a C6 + OAuth2 double exposing the extrato endpoint
-// (GET /v1/statement with inicio/fim) so the statement read path can be exercised.
+// (GET /v1/statement with start_date/end_date) so the statement read path can be exercised.
 type stmtTestServer struct {
 	*httptest.Server
 	lastQuery      url.Values
@@ -74,8 +74,8 @@ func TestGetStatementSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStatement: %v", err)
 	}
-	if ts.lastQuery.Get("inicio") != "2026-06-01" || ts.lastQuery.Get("fim") != "2026-06-30" {
-		t.Fatalf("date window not forwarded as YYYY-MM-DD: %v", ts.lastQuery)
+	if ts.lastQuery.Get("start_date") != "2026-06-01" || ts.lastQuery.Get("end_date") != "2026-06-30" {
+		t.Fatalf("date window not forwarded as start_date/end_date YYYY-MM-DD: %v", ts.lastQuery)
 	}
 	if ts.lastAuthHeader != "Bearer tok-client-1" {
 		t.Fatalf("per-tenant bearer not attached: %q", ts.lastAuthHeader)

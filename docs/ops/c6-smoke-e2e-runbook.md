@@ -302,3 +302,47 @@ O **plumbing do cert (entregáveis 2–3) está completo e testado** independent
 desses valores: assim que o portal liberar base/token URLs + o PEM do cliente,
 basta preencher as cinco vars acima e rodar a §5/§7 — nenhuma mudança de código é
 necessária.
+
+## 9. Contrato REAL do C6 — descoberto ao vivo ([SIN-65856](/SIN/issues/SIN-65856))
+
+O smoke contra o sandbox real ([SIN-65804](/SIN/issues/SIN-65804)) provou mTLS+OAuth2
+mas revelou que os paths do adapter eram **placeholders** (404). Iterando ao vivo
+(mTLS + bearer) descobriu-se o contrato real abaixo. Base do sandbox:
+`https://baas-api-sandbox.c6bank.info`; token em `/v1/auth/` (Basic auth + mTLS).
+Janela: seg–sex 7h–23h BRT. Erros = **RFC7807 problem+json** (BACEN PIX:
+`https://pix.bcb.gov.br/api/v2/error/...`; C6 próprio:
+`https://developers.c6bank.com.br/v1/error/...`).
+
+| Superfície | Path real | Status |
+| --- | --- | --- |
+| PIX cob (imediata) | `PUT`/`GET /v2/pix/cob/{txid}` · lista `GET /v2/pix/cob?inicio=&fim=` | ✅ remapeado + **positivo provado (HTTP 200)** |
+| PIX cobv (com venc.) | `/v2/pix/cobv/{txid}` | ⏳ DTO real pendente (follow-up) |
+| PIX recebidos / recorrência | `/v2/pix/pix` · `/v2/pix/rec` | ⏳ follow-up |
+| Extrato | `GET /v1/statement?start_date=&end_date=` (yyyy-MM-dd) | ✅ params remapeados |
+| Boleto | `POST /v1/bank_slips` | ⏳ path descoberto; DTO real pendente (follow-up) |
+| Checkout | `POST /v1/checkouts` | ⏳ path descoberto; schema `payment` portal-gated (follow-up) |
+| Webhook mgmt | `/v1/webhooks` (req: `service`,`url`) | ⏳ follow-up |
+
+### 9.1 PIX cob — caminho positivo confirmado (HTTP 200)
+
+`PUT /v2/pix/cob/{txid}` (txid BACEN `[a-zA-Z0-9]{26,35}`; o adapter usa
+`sha256(anchor)[:32]`) com corpo BACEN — **inclui `chave`** (a chave do recebedor;
+sem ela a cob não roteia):
+
+```bash
+curl --cert /etc/payment/c6/client.crt --key /etc/payment/c6/client.key \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -X PUT "https://baas-api-sandbox.c6bank.info/v2/pix/cob/<txid>" \
+  -d '{"calendario":{"expiracao":3600},"valor":{"original":"10.00"},"chave":"<chave>"}'
+# → HTTP 200: {"txid":...,"status":"ATIVA","location":"qrcode-h.c6pix.com/...","pixCopiaECola":"00020101...","calendario":{"criacao":...,"expiracao":3600}}
+```
+
+Notas de DTO já aplicadas no adapter (este PR): o `location` vem **top-level**
+(não `loc.location`); o request precisa de `chave` (port `ChargeRequest.CreditorKey`,
+encaminhado como `chave` omitempty). Detalhes completos no documento
+**"Descoberta ao vivo — contrato real C6 sandbox"** da SIN-65856.
+
+> **Pendente (follow-ups da SIN-65856):** fonte da `chave` no app (por-tenant vs
+> request — decisão de design), DTO real de cobv (spec BACEN pública), DTO de
+> boleto `/v1/bank_slips` (resposta 201 não capturada) e schema `payment` do
+> checkout `/v1/checkouts` (portal login-walled).

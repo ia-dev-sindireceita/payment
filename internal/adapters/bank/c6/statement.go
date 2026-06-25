@@ -67,9 +67,12 @@ func (p *Provider) GetStatement(ctx context.Context, tenantID string, filter por
 	if filter.Start.IsZero() || filter.End.IsZero() {
 		return ports.Statement{}, &Error{Op: "get_statement", sentinel: shared.ErrValidation}
 	}
+	// The C6 statement endpoint expects start_date / end_date (yyyy-MM-dd), NOT the
+	// BACEN inicio/fim used by the PIX surface (SIN-65856, live-verified against the
+	// sandbox problem+json).
 	q := url.Values{}
-	q.Set("inicio", filter.Start.UTC().Format(stmtDateFormat))
-	q.Set("fim", filter.End.UTC().Format(stmtDateFormat))
+	q.Set("start_date", filter.Start.UTC().Format(stmtDateFormat))
+	q.Set("end_date", filter.End.UTC().Format(stmtDateFormat))
 	endpoint := p.baseURL + "/v1/statement?" + q.Encode()
 	httpReq, err := p.authedJSONRequest(ctx, tenantID, "get_statement", http.MethodGet, endpoint, nil, "")
 	if err != nil {
