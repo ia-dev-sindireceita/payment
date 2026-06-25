@@ -213,6 +213,15 @@ type ChargeRequest struct {
 	// PSP's devedor block. DebtorName is the payer's name and is never logged.
 	DebtorTaxID string
 	DebtorName  string
+	// CreditorKey is the recebedor's PIX key (chave) the immediate charge is
+	// registered under at the PSP. The real C6 BACEN PIX v2 cob create
+	// (PUT /v2/pix/cob/{txid}) requires it to route the funds and mint the QR; the
+	// adapter forwards it as the BACEN "chave" field. OPTIONAL on the port (a
+	// stub/test charge may omit it, and the omitempty wire field then drops it); a
+	// real homologação/production charge MUST carry the tenant's registered key.
+	// Wiring the app to populate it (per-tenant config vs request input) is tracked
+	// as a separate follow-up.
+	CreditorKey string
 }
 
 // ChargeResult is the bank's response to a generic charge (the non-PIX charge
