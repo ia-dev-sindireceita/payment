@@ -182,7 +182,20 @@ PAYMENT_WEBHOOK_REFS=REPLACE-ref:REPLACE-tenantId
 # http and fails the boot closed). Empty BaseURL ⇒ in-memory stub (do NOT use in stg).
 PAYMENT_C6_BASE_URL=https://REPLACE-c6-base
 PAYMENT_C6_TOKEN_URL=https://REPLACE-c6-token
-PAYMENT_C6_SCOPE=REPLACE-scope
+# LEAVE EMPTY. Setting an explicit OAuth2 scope makes C6's /v1/auth/ reply
+# 400/invalid_request; omitting it returns 200 with the credential's full scopes.
+# Do NOT put a placeholder value here — empty is the working config (SIN-65917).
+PAYMENT_C6_SCOPE=
+
+# Per-tenant bank credentials: "tenant:client_id:secret,..." (client_id is
+# cross-checked against the webhook body). Real values from the secret manager.
+PAYMENT_BANK_CREDS=REPLACE-tenantId:REPLACE-c6-client:REPLACE-c6-secret
+
+# Per-tenant PIX creditor key (chave do recebedor): "tenant:creditorKey,...".
+# SEPARATE var from PAYMENT_BANK_CREDS (a PIX key may contain ':'; split is on the
+# first ':' only). This is where the `chave` lives — NOT in PAYMENT_BANK_CREDS.
+# Consumed by the cob (PUT /v2/pix/cob) and by cmd/register-webhook.
+PAYMENT_BANK_CREDITOR_KEYS=REPLACE-tenantId:REPLACE-recebedor@pix.example
 
 # mTLS client cert/key: FILE PATHS to 0600 files owned by `payment` (NEVER inline
 # the bytes — threat C1). Provisioned per SIN-65806.
@@ -213,6 +226,53 @@ curl -fsS http://127.0.0.1:8080/healthz   # expect {"status":"ok","version":...,
 
 From here, pushes to upstream `main` that pass `CI` auto-deploy via `cd-stg.yml`,
 or trigger a manual deploy from the Actions tab (`workflow_dispatch`).
+
+---
+
+## 9.1 Bootstrap the tenant (REQUIRED on every fresh DB) ⚠️
+
+> 🪤 **Gotcha that recurs on every new deploy.** The service comes up with an
+> **empty SQLite DB** (`PAYMENT_DB_PATH=/opt/payment/payment.db`). The `.env.stg`
+> already references a `tenantId` in `PAYMENT_WEBHOOK_REFS` /
+> `PAYMENT_BANK_CREDS` / `PAYMENT_BANK_CREDITOR_KEYS`, but **no row exists in the
+> DB for it** until you create it. Until then `POST /v1/charges` fails with
+> `not found`. A redeploy onto a fresh/wiped DB **re-introduces** the mismatch —
+> this is not one-time bootstrap, it must be re-checked after any DB reset.
+
+Create the tenant and align the id, on the VPS as `payment` (admin token from
+`.env.stg`):
+
+```bash
+# 1. create the tenant — capture the generated 32-hex id
+TID=$(curl -s -X POST http://127.0.0.1:8080/admin/tenants \
+  -H "Authorization: Bearer $PAYMENT_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"sindireceita-stg"}' | sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p')
+echo "tenantID=$TID"
+
+# 2. set the per-endpoint price (billing ledger), e.g. /v1/notify
+curl -s -X POST "http://127.0.0.1:8080/admin/tenants/$TID/pricing" \
+  -H "Authorization: Bearer $PAYMENT_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"endpoint":"/v1/notify","price_cents":5}'
+```
+
+Then make **every** `tenantId` placeholder in `/opt/payment/.env.stg` equal the
+`$TID` just generated — `PAYMENT_WEBHOOK_REFS`, `PAYMENT_TENANT_TOKENS`,
+`PAYMENT_BANK_CREDS`, `PAYMENT_BANK_CREDITOR_KEYS` — and
+`sudo systemctl restart payment-api`. Verify the tenant resolves before declaring
+the deploy good:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8080/v1/charges \
+  -H "Authorization: Bearer $PAYMENT_TENANT_TOKEN" -H "Idempotency-Key: stg-probe-1" \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint":"/v1/notify","amount_cents":500,"currency":"BRL"}'
+# → 201 (NOT 404/"not found"). Keep amount_cents ≤ 1000 (≤ R$10) for sandbox auto-confirm.
+```
+
+> **Follow-up (tracked separately):** a seed/bootstrap step in `cd-stg.yml` that
+> idempotently ensures the tenant row after deploy would remove this manual step.
+> Until that lands, this section is the source of truth and **must** be run after
+> any fresh-DB deploy. See [SIN-65951](/SIN/issues/SIN-65951).
 
 ---
 
