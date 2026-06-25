@@ -125,10 +125,10 @@ func buildDevedorFields(taxID, name string) *pixDevedor {
 // pixChargeResponseBody is the subset of C6's PIX charge representation we
 // consume. Human-readable / unmodelled fields are ignored on purpose.
 type pixChargeResponseBody struct {
-	TxID          string        `json:"txid"`
-	Status        string        `json:"status"`
-	Calendario    pixCalendario `json:"calendario"`
-	Valor         pixValor      `json:"valor"`
+	TxID       string        `json:"txid"`
+	Status     string        `json:"status"`
+	Calendario pixCalendario `json:"calendario"`
+	Valor      pixValor      `json:"valor"`
 	// Loc is the BACEN loc object; Location is the top-level location string the real
 	// C6 sandbox returns (SIN-65856, live-verified). C6 populates the top-level
 	// "location"; toPixResult prefers it and falls back to loc.location.
