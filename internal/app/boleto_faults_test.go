@@ -91,7 +91,7 @@ func TestRegisterBoletoWithValidPayer(t *testing.T) {
 	t.Parallel()
 	svc, h, tenantID := newBoletoHarness(t)
 	in := baseBoletoInput(tenantID, "k-payer")
-	in.PayerTaxID = "12345678901"
+	in.Payer.TaxID = "12345678901"
 	if _, _, err := svc.RegisterBoleto(context.Background(), in); err != nil {
 		t.Fatalf("register with payer: %v", err)
 	}

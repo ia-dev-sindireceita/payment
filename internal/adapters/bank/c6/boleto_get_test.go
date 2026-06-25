@@ -21,6 +21,7 @@ func TestCreateBoletoCarriesDiscounts(t *testing.T) {
 	if _, err := p.CreateBoleto(context.Background(), "t1", ports.BoletoRequest{
 		TenantID: "t1", BoletoID: "bol_1", AmountCents: 100000, Currency: "BRL",
 		FineBps: 200, MonthlyInterestBps: 100,
+		Payer: fullBoletoPayer(),
 		Discounts: []ports.BoletoDiscountTier{
 			{DaysBeforeDue: 10, Bps: 1000},
 			{DaysBeforeDue: 0, FixedCents: 500},
@@ -139,13 +140,13 @@ func TestUpdateBoletoSuccess(t *testing.T) {
 		t.Fatalf("amended params not reconciled: %+v", res)
 	}
 	var sent struct {
-		AmountCents int64 `json:"amount_cents"`
-		FineBps     int64 `json:"fine_bps"`
+		Amount  int64 `json:"amount"`
+		FineBps int64 `json:"fine_bps"`
 	}
 	if err := json.Unmarshal(ps.body(), &sent); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if sent.AmountCents != 2000 || sent.FineBps != 150 {
+	if sent.Amount != 2000 || sent.FineBps != 150 {
 		t.Fatalf("update body not transported: %s", ps.body())
 	}
 	if ps.idemKey() != "upd-key" {

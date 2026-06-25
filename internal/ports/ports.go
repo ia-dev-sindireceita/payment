@@ -532,6 +532,29 @@ type BoletoDiscountTier struct {
 	FixedCents    int64
 }
 
+// BoletoAddress is the payer's address. Number is an int because the real C6
+// contract (POST /v1/bank_slips) models the address number as an integer; see
+// ADR-0005 "Riscos conhecidos" for the "S/N"/alphanumeric homologation question.
+// These are plain Go types — transport tags and wire formatting live in the adapter.
+type BoletoAddress struct {
+	Street  string
+	Number  int
+	City    string
+	State   string // UF, 2 letters
+	ZipCode string // CEP, digits only
+}
+
+// BoletoPayer identifies the sacado/pagador of a boleto. It is the domain mirror of
+// the `payer` object the real C6 contract requires for POST /v1/bank_slips. It is a
+// per-charge value object (each boleto has a different payer), so it flows from the
+// boundary — it is not adapter/tenant config (ADR-0005). Plain Go types, no transport
+// tags: the JSON shape and mandatory-field validation are the C6 adapter's job.
+type BoletoPayer struct {
+	Name    string
+	TaxID   string // CPF/CNPJ, digits only
+	Address BoletoAddress
+}
+
 // BoletoRequest is the input to register a BolePix boleto at the bank. The fine,
 // interest and discount RATES are transported so the bank registers them, but the
 // amount owed at any instant is computed by the boleto domain, never here
@@ -552,8 +575,11 @@ type BoletoRequest struct {
 	MonthlyInterestBps int64
 	// Discounts is the early-payment discount schedule (roteiro grupo 3), ordered
 	// descending by DaysBeforeDue. Empty when the boleto carries no discount.
-	Discounts      []BoletoDiscountTier
-	PayerTaxID     string
+	Discounts []BoletoDiscountTier
+	// Payer is the boleto's sacado/pagador. The real C6 contract requires the full
+	// payer (name + tax id + address) on POST /v1/bank_slips; mandatory-field
+	// validation lives in the C6 adapter so the stub stays lenient (ADR-0005).
+	Payer          BoletoPayer
 	IdempotencyKey string
 }
 

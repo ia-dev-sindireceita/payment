@@ -21,10 +21,29 @@ type boletoDiscountReq struct {
 	FixedCents    int64 `json:"fixed_cents"`
 }
 
+// boletoAddressReq is the payer address in the request body (ADR-0005). number is an
+// integer mirroring the C6 contract.
+type boletoAddressReq struct {
+	Street  string `json:"street"`
+	Number  int    `json:"number"`
+	City    string `json:"city"`
+	State   string `json:"state"`
+	ZipCode string `json:"zip_code"`
+}
+
+// boletoPayerReq is the nested payer block in the request body (ADR-0005). It is
+// optional at the boundary; the C6 adapter is the one that requires the full payer.
+type boletoPayerReq struct {
+	Name    string           `json:"name"`
+	TaxID   string           `json:"tax_id"`
+	Address boletoAddressReq `json:"address"`
+}
+
 // createBoletoRequest is the boundary body for POST /v1/boletos. due_date is RFC3339.
 // fine_bps/monthly_interest_bps express the late-payment rates (groups 1–2); discounts
-// the early-payment schedule (group 3). payer is optional. Unknown fields are rejected
-// by decodeJSON (anti mass-assignment).
+// the early-payment schedule (group 3). payer is the nested sacado/pagador block
+// (ADR-0005), optional at the boundary. Unknown fields (including nested ones) are
+// rejected by decodeJSON (anti mass-assignment).
 type createBoletoRequest struct {
 	AmountCents        int64               `json:"amount_cents"`
 	Currency           string              `json:"currency"`
@@ -33,7 +52,22 @@ type createBoletoRequest struct {
 	FineFixedCents     int64               `json:"fine_fixed_cents"`
 	MonthlyInterestBps int64               `json:"monthly_interest_bps"`
 	Discounts          []boletoDiscountReq `json:"discounts"`
-	PayerTaxID         string              `json:"payer_tax_id"`
+	Payer              boletoPayerReq      `json:"payer"`
+}
+
+// toPayerInput maps the nested payer request block to the use-case input.
+func toPayerInput(p boletoPayerReq) app.BoletoPayerInput {
+	return app.BoletoPayerInput{
+		Name:  p.Name,
+		TaxID: p.TaxID,
+		Address: app.BoletoAddressInput{
+			Street:  p.Address.Street,
+			Number:  p.Address.Number,
+			City:    p.Address.City,
+			State:   p.Address.State,
+			ZipCode: p.Address.ZipCode,
+		},
+	}
 }
 
 // updateBoletoRequest is the boundary body for PUT /v1/boletos/{id} (alteração, grupo
@@ -139,7 +173,7 @@ func (s *Server) handleCreateBoleto(w http.ResponseWriter, r *http.Request) {
 		FineBps:            req.FineBps,
 		FineFixedCents:     req.FineFixedCents,
 		MonthlyInterestBps: req.MonthlyInterestBps,
-		PayerTaxID:         req.PayerTaxID,
+		Payer:              toPayerInput(req.Payer),
 		IdempotencyKey:     idemKey,
 		Discounts:          toDiscountInputs(req.Discounts),
 	}

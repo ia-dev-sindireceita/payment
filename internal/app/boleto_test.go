@@ -165,7 +165,7 @@ func TestRegisterBoletoValidationErrors(t *testing.T) {
 		{"fine_over_cap", mut(func(in *app.RegisterBoletoInput) { in.FineBps = 201 })},
 		{"interest_over_cap", mut(func(in *app.RegisterBoletoInput) { in.MonthlyInterestBps = 101 })},
 		{"missing_idem", mut(func(in *app.RegisterBoletoInput) { in.IdempotencyKey = "" })},
-		{"bad_payer_tax_id", mut(func(in *app.RegisterBoletoInput) { in.PayerTaxID = "123" })},
+		{"bad_payer_tax_id", mut(func(in *app.RegisterBoletoInput) { in.Payer.TaxID = "123" })},
 		{"both_fine_forms", mut(func(in *app.RegisterBoletoInput) { in.FineBps = 200; in.FineFixedCents = 100 })},
 		{"fixed_fine_over_cap", mut(func(in *app.RegisterBoletoInput) { in.FineBps = 0; in.FineFixedCents = 9999 })},
 		{"discount_both_set", mut(func(in *app.RegisterBoletoInput) {
