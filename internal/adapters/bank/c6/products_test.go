@@ -100,7 +100,8 @@ func newProductServer(t *testing.T) *productServer {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"boleto_id":"bol_1","txid":"tx_1","status":"REGISTERED","qr_code":"pix-emv","barcode":"123","amount_cents":1000}`))
+		// Real C6 201 shape (SIN-65888): id/our_number/bar_code/digitable_line/amount(decimal).
+		_, _ = w.Write([]byte(`{"id":"01HBANKSLIP0000000000000001","our_number":"55501","originator_id":"000000000001","bar_code":"bc-1","digitable_line":"dl-1","amount":10.00,"billing_scheme":"21","billing_type":"3","due_date":"2027-01-15"}`))
 	})
 	mux.HandleFunc("GET /boletos/{id}", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -362,8 +363,16 @@ func TestCreateBoletoSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateBoleto: %v", err)
 	}
-	if res.TxID != "tx_1" || res.Status != "REGISTERED" || res.QRCode != "pix-emv" || res.Barcode != "123" {
-		t.Fatalf("unexpected result: %+v", res)
+	// Real 201 maps id→TxID (non-empty: billing-finalized marker), our_number, bar_code,
+	// digitable_line and amount(decimal 10.00)→1000 centavos. No status/qr_code on create.
+	if res.TxID != "01HBANKSLIP0000000000000001" || res.BoletoID != "01HBANKSLIP0000000000000001" {
+		t.Fatalf("id must map to BoletoID and TxID, got %+v", res)
+	}
+	if res.OurNumber != "55501" || res.Barcode != "bc-1" || res.DigitableLine != "dl-1" {
+		t.Fatalf("our_number/bar_code/digitable_line not mapped: %+v", res)
+	}
+	if res.AmountCents != 1000 {
+		t.Fatalf("amount 10.00 must parse to 1000 centavos, got %d", res.AmountCents)
 	}
 	if ps.lastAuthHeader != "Bearer tok-client-1" {
 		t.Fatalf("bearer not attached: %q", ps.lastAuthHeader)
@@ -371,12 +380,13 @@ func TestCreateBoletoSuccess(t *testing.T) {
 	if ps.idemKey() != "bol_1" {
 		t.Fatalf("idempotency key should fall back to boleto id, got %q", ps.idemKey())
 	}
-	// The adapter transports the fine/interest RATES (the domain computes amounts).
+	// The adapter transports the fine/interest RATES as the real {value,type} objects and
+	// the decimal amount (the domain still computes amounts owed).
 	var sent map[string]json.RawMessage
 	if err := json.Unmarshal(ps.body(), &sent); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	for _, f := range []string{"fine_bps", "monthly_interest_bps", "due_date"} {
+	for _, f := range []string{"fine", "interest", "due_date", "amount"} {
 		if _, ok := sent[f]; !ok {
 			t.Fatalf("boleto request must carry %q, body=%s", f, ps.body())
 		}
