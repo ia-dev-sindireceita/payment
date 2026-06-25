@@ -9,6 +9,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
 	"github.com/ia-dev-sindireceita/payment/internal/app"
+	"github.com/ia-dev-sindireceita/payment/internal/version"
 )
 
 // Server holds the application services and authenticators behind the HTTP
@@ -120,8 +121,19 @@ func (s *Server) Router() http.Handler {
 	consoleLimiter := newRateLimiter(20, 10, nil)
 	webhookLimiter := newRateLimiter(50, 25, nil)
 
+	// Public health check (the only unauthenticated route). It also surfaces the
+	// build provenance (version/commit/built_at) so the CD smoke gate can assert
+	// the deployed SHA actually went live, not just that *some* binary answers.
+	// version.Info() carries no secrets — only the git SHA, tag, and build time —
+	// so it is safe on an unauthenticated endpoint.
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		b := version.Info()
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":   "ok",
+			"version":  b.Version,
+			"commit":   b.Commit,
+			"built_at": b.BuiltAt,
+		})
 	})
 
 	// Tenant API (TB1) — authenticated, tenant-scoped, rate-limited.
