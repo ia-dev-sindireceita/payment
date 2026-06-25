@@ -109,6 +109,8 @@ type boletoView struct {
 	Status             string               `json:"status"`
 	QRCode             string               `json:"qr_code"`
 	Barcode            string               `json:"barcode"`
+	OurNumber          string               `json:"our_number,omitempty"`
+	DigitableLine      string               `json:"digitable_line,omitempty"`
 	AmountCents        int64                `json:"amount_cents"`
 	DueDate            string               `json:"due_date,omitempty"`
 	ValidUntil         string               `json:"valid_until,omitempty"`
@@ -127,6 +129,8 @@ func toBoletoView(r ports.BoletoResult, amountCents int64) boletoView {
 		Status:             r.Status,
 		QRCode:             r.QRCode,
 		Barcode:            r.Barcode,
+		OurNumber:          r.OurNumber,
+		DigitableLine:      r.DigitableLine,
 		AmountCents:        amountCents,
 		FineBps:            r.FineBps,
 		FineFixedCents:     r.FineFixedCents,

@@ -622,10 +622,19 @@ type BoletoRequest struct {
 // barcode/linha digitável) the caller renders for the payer, plus the registered
 // parameters echoed back for reconciliation/homologação evidence (roteiro 6.a).
 type BoletoResult struct {
-	BoletoID           string
-	TxID               string
-	Status             string
-	QRCode             string    // PIX EMV copy-and-paste payload (BolePix)
+	BoletoID string
+	// TxID is the bank's registration reference (C6 bank_slips `id`). The app treats a
+	// non-empty TxID as the billing-finalized marker, so the C6 adapter MUST populate it on
+	// create — an empty TxID would let a retry/concurrent registration re-bill (duplicate
+	// ledger entry).
+	TxID   string
+	Status string
+	QRCode string // PIX EMV copy-and-paste payload (BolePix)
+	// OurNumber is C6's "nosso número" (bank_slips `our_number`), reconciliation evidence
+	// (roteiro 6.a). DigitableLine is the linha digitável (bank_slips `digitable_line`),
+	// distinct from the numeric Barcode (`bar_code`). Both zero until the bank returns them.
+	OurNumber          string
+	DigitableLine      string
 	Barcode            string    // boleto linha digitável / barcode
 	AmountCents        int64     // principal the bank registered
 	DueDate            time.Time // registered due date (vencimento); zero when unknown
