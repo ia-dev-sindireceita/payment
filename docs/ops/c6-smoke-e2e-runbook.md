@@ -277,7 +277,77 @@ Comportamento (`cmd/api/main.go` `newBankProvider` → `c6.MTLSHTTPClient`):
   cert quando ele foi pedido, em vez de degradar silenciosamente para sem-mTLS.
 
 Em homologação/produção os arquivos vêm do secret manager, montados read-only no
-FS do processo (não do repositório). Permissões `0600`; nunca commitar PEM.
+FS do processo (não do repositório). Nunca commitar PEM.
+
+> ⚠️ **Permissão obrigatória: `0600`, NUNCA `0644`.** A chave privada mTLS é o
+> segredo C1. World-readable (`0644`) é violação de **least privilege** + OWASP
+> **A02 (cryptographic failures)** — já encontrada ao vivo no ingress
+> (`/etc/payment/c6/client.key` em `0644`, [SIN-65913](/SIN/issues/SIN-65913)).
+> O `umask` default dos operadores deposita `0644`; por isso a provisão **não**
+> pode depender de prosa — use os blocos `install`/`stat` abaixo, que cravam
+> owner + modo de forma idempotente e auto-verificável.
+
+### 8.1.1 Provisão do PEM — dois perfis de host (copiar-colar)
+
+Não há IaC/deploy/compose que provisione estes arquivos (`cd-stg.yml` só envia o
+binário por SSH e **não** injeta nenhum segredo de cert C6). A provisão é
+**manual por operador**, então este runbook é a fonte da verdade — os blocos
+abaixo são a forma canônica. `install` aplica owner + modo na escrita (não herda
+o `umask`), então o arquivo **nunca** existe em `0644`, nem por um instante.
+
+**Perfil A — host ingress one-shot (`143.198.66.140`).** O único consumidor é o
+agente runtime **não-root `paperclip`** que roda os one-shots `curl --cert` do
+mTLS C6 (§8/§9). **Nenhum payment-api roda aqui** — owner = `paperclip`.
+
+```bash
+# diretório dono do paperclip, 0700 (só o dono entra)
+sudo install -d -m 0700 -o paperclip -g paperclip /etc/payment/c6
+
+# chave privada — 0600, dono paperclip; heredoc com PLACEHOLDER (nunca commitar PEM real)
+sudo install -m 0600 -o paperclip -g paperclip /dev/stdin /etc/payment/c6/client.key <<'PEM'
+<PEM da chave privada — NUNCA commitar>
+PEM
+
+# certificado — 0600, dono paperclip
+sudo install -m 0600 -o paperclip -g paperclip /dev/stdin /etc/payment/c6/client.crt <<'PEM'
+<PEM do certificado>
+PEM
+
+# VERIFICAR — DEVE imprimir exatamente: 600 paperclip:paperclip ...
+sudo stat -c '%a %U:%G %n' /etc/payment/c6/client.key
+sudo stat -c '%a %U:%G %n' /etc/payment/c6/client.crt
+```
+
+> 🔥 **Forte recomendação (ingress = box internet-facing): PEM transiente.**
+> Não há consumidor permanente entre one-shots. Materialize → rode o one-shot →
+> `rm` imediatamente, em vez de deixar a chave privada parada num host exposto:
+>
+> ```bash
+> # ... bloco install acima ...
+> curl --cert /etc/payment/c6/client.crt --key /etc/payment/c6/client.key ...   # o one-shot (§8.2/§9)
+> shred -u /etc/payment/c6/client.key /etc/payment/c6/client.crt 2>/dev/null || rm -f /etc/payment/c6/client.{key,crt}
+> ```
+
+**Perfil B — host de serviço backend (`payment.someu.com.br`).** Owner = o
+usuário de serviço do **payment-api** (não `paperclip`), `0600`, montado
+**read-only** a partir do secret manager (não do repositório). Também é
+provisionado por operador (sem code path), então o estado final exigido é:
+
+```bash
+# substitua <payment-svc-user> pelo usuário/grupo de serviço do payment-api
+sudo install -d -m 0700 -o <payment-svc-user> -g <payment-svc-user> /etc/payment/c6
+# (chave/cert montados read-only pelo secret manager; se materializados em disco, use -m 0600 -o <payment-svc-user>)
+
+# VERIFICAR — DEVE imprimir: 600 <payment-svc-user>:<payment-svc-user> ...
+sudo stat -c '%a %U:%G %n' /etc/payment/c6/client.key
+sudo stat -c '%a %U:%G %n' /etc/payment/c6/client.crt
+```
+
+Em ambos os perfis: se `stat -c %a` imprimir qualquer coisa **diferente de
+`600`**, a provisão está errada — refaça pelo bloco `install` (nunca `chmod`
+pós-fato deixa janela `0644`). Grant de leitura é para o **único consumidor**,
+nunca para `world`/`group` amplo (defesa em profundidade: perms + ownership +
+lifetime transiente no ingress).
 
 ### 8.2 Endpoints do sandbox — status (BLOQUEADO no portal, NÃO bloqueia o cert)
 
