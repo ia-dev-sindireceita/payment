@@ -63,10 +63,31 @@ type DiscountTierInput struct {
 	FixedCents    int64
 }
 
+// BoletoAddressInput is the payer's address at the boundary (ADR-0005). Number is an
+// integer to mirror the C6 contract; "S/N"/alphanumeric numbers are an open
+// homologation question handled at the adapter/contract level.
+type BoletoAddressInput struct {
+	Street  string
+	Number  int
+	City    string
+	State   string
+	ZipCode string
+}
+
+// BoletoPayerInput is the boleto sacado/pagador at the boundary. It is optional at the
+// app layer (kept lenient like the stub); the real C6 contract's mandatory-payer rule
+// is enforced in the C6 adapter, not here, so the stub and its tests stay green
+// (ADR-0005). When fields are present they are structurally validated.
+type BoletoPayerInput struct {
+	Name    string
+	TaxID   string
+	Address BoletoAddressInput
+}
+
 // RegisterBoletoInput is the validated boundary input for registering a boleto.
 // TenantID is the authenticated tenant. DueDate is the vencimento; FineBps and
 // MonthlyInterestBps are the late-payment rates (groups 1–2); Discounts is the
-// optional early-payment schedule (group 3). PayerTaxID is optional.
+// optional early-payment schedule (group 3). Payer is the sacado/pagador (ADR-0005).
 type RegisterBoletoInput struct {
 	TenantID    string
 	AmountCents int64
@@ -78,7 +99,7 @@ type RegisterBoletoInput struct {
 	FineFixedCents     int64
 	MonthlyInterestBps int64
 	Discounts          []DiscountTierInput
-	PayerTaxID         string
+	Payer              BoletoPayerInput
 	IdempotencyKey     string
 }
 
@@ -98,7 +119,7 @@ func (s *BoletoService) RegisterBoleto(ctx context.Context, in RegisterBoletoInp
 	if in.IdempotencyKey == "" {
 		return nil, ports.BoletoResult{}, shared.NewValidationError("idempotency_key", "idempotency key is required")
 	}
-	if err := validateBoletoPayer(in.PayerTaxID); err != nil {
+	if err := validateBoletoPayer(in.Payer); err != nil {
 		return nil, ports.BoletoResult{}, err
 	}
 
@@ -133,7 +154,7 @@ func (s *BoletoService) RegisterBoleto(ctx context.Context, in RegisterBoletoInp
 		return nil, ports.BoletoResult{}, err
 	}
 
-	res, err := s.boleto.CreateBoleto(ctx, in.TenantID, toBoletoRequest(b, in.PayerTaxID, in.IdempotencyKey))
+	res, err := s.boleto.CreateBoleto(ctx, in.TenantID, toBoletoRequest(b, in.Payer, in.IdempotencyKey))
 	if err != nil {
 		return nil, ports.BoletoResult{}, fmt.Errorf("bank create boleto: %w", err)
 	}
@@ -242,7 +263,7 @@ func (s *BoletoService) UpdateBoleto(ctx context.Context, tenantID, boletoID str
 	if err != nil {
 		return ports.BoletoResult{}, err
 	}
-	return s.boleto.UpdateBoleto(ctx, tenantID, boletoID, toBoletoRequest(b, "", in.IdempotencyKey))
+	return s.boleto.UpdateBoleto(ctx, tenantID, boletoID, toBoletoRequest(b, BoletoPayerInput{}, in.IdempotencyKey))
 }
 
 // reservePayment returns the payment to bill for this boleto: an existing one for the
@@ -346,9 +367,9 @@ func buildDiscountTiers(in []DiscountTierInput) ([]boleto.DiscountTier, error) {
 }
 
 // toBoletoRequest maps a validated domain boleto to the PSP port request. The boleto
-// id is taken from the domain object (b.ID()); payerTaxID/idemKey are supplied by the
-// caller (register carries a payer; amend does not).
-func toBoletoRequest(b boleto.Boleto, payerTaxID, idemKey string) ports.BoletoRequest {
+// id is taken from the domain object (b.ID()); payer/idemKey are supplied by the
+// caller (register carries a payer; amend passes the zero payer).
+func toBoletoRequest(b boleto.Boleto, payer BoletoPayerInput, idemKey string) ports.BoletoRequest {
 	domainTiers := b.Discounts()
 	tiers := make([]ports.BoletoDiscountTier, len(domainTiers))
 	for i, d := range domainTiers {
@@ -365,21 +386,67 @@ func toBoletoRequest(b boleto.Boleto, payerTaxID, idemKey string) ports.BoletoRe
 		FineFixedCents:     b.FineFixedCents(),
 		MonthlyInterestBps: b.MonthlyInterestBps(),
 		Discounts:          tiers,
-		PayerTaxID:         strings.TrimSpace(payerTaxID),
+		Payer:              toPortBoletoPayer(payer),
 		IdempotencyKey:     idemKey,
 	}
 }
 
-// validateBoletoPayer enforces the optional payer document: it may be omitted, but
-// when present must be a syntactically valid CPF (11) or CNPJ (14). Mirrors the PIX
-// devedor guard.
-func validateBoletoPayer(taxID string) error {
-	taxID = strings.TrimSpace(taxID)
-	if taxID == "" {
-		return nil
+// toPortBoletoPayer maps the boundary payer to the port value object, trimming the
+// tax id (mirrors the prior PayerTaxID handling).
+func toPortBoletoPayer(in BoletoPayerInput) ports.BoletoPayer {
+	return ports.BoletoPayer{
+		Name:  strings.TrimSpace(in.Name),
+		TaxID: strings.TrimSpace(in.TaxID),
+		Address: ports.BoletoAddress{
+			Street:  strings.TrimSpace(in.Address.Street),
+			Number:  in.Address.Number,
+			City:    strings.TrimSpace(in.Address.City),
+			State:   strings.TrimSpace(in.Address.State),
+			ZipCode: strings.TrimSpace(in.Address.ZipCode),
+		},
 	}
-	if !validTaxID(taxID) {
+}
+
+// validateBoletoPayer enforces the optional payer at the boundary: the payer may be
+// omitted entirely (the C6 adapter is the one that requires it — ADR-0005), but any
+// field that IS present must be structurally valid. The tax id, when present, must be
+// a syntactically valid CPF (11) or CNPJ (14); the UF, when present, must be 2 letters;
+// the CEP, when present, must be 8 digits. Mirrors the PIX devedor guard.
+func validateBoletoPayer(p BoletoPayerInput) error {
+	if taxID := strings.TrimSpace(p.TaxID); taxID != "" && !validTaxID(taxID) {
 		return shared.NewValidationError("payer.tax_id", "payer tax id must be 11 (CPF) or 14 (CNPJ) digits")
 	}
+	if uf := strings.TrimSpace(p.Address.State); uf != "" && !validUF(uf) {
+		return shared.NewValidationError("payer.address.state", "payer address state must be a 2-letter UF")
+	}
+	if cep := strings.TrimSpace(p.Address.ZipCode); cep != "" && !validCEP(cep) {
+		return shared.NewValidationError("payer.address.zip_code", "payer address zip code must be 8 digits")
+	}
 	return nil
+}
+
+// validUF reports whether s is two ASCII letters (a Brazilian state abbreviation).
+func validUF(s string) bool {
+	if len(s) != 2 {
+		return false
+	}
+	for _, r := range s {
+		if (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
+// validCEP reports whether s is exactly 8 ASCII digits (a Brazilian postal code).
+func validCEP(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

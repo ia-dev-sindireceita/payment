@@ -93,7 +93,7 @@ func newProductServer(t *testing.T) *productServer {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"consent_id":"con_1","status":"CANCELLED"}`))
 	})
-	mux.HandleFunc("POST /boletos", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/bank_slips", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		if ps.boletoCreate != nil {
 			ps.boletoCreate(w, r)
@@ -354,7 +354,7 @@ func TestCreateBoletoSuccess(t *testing.T) {
 	res, err := p.CreateBoleto(context.Background(), "t1", ports.BoletoRequest{
 		TenantID: "t1", BoletoID: "bol_1", AmountCents: 1000, Currency: "BRL",
 		DueDate: time.Unix(1_800_000_000, 0), FineBps: 200, MonthlyInterestBps: 100,
-		PayerTaxID: "12345678901",
+		Payer: fullBoletoPayer(),
 	})
 	if err != nil {
 		t.Fatalf("CreateBoleto: %v", err)
@@ -390,6 +390,7 @@ func TestCreateBoletoErrorMapping(t *testing.T) {
 	p := ps.provider(t, oneTenant("t1", "c", "s"))
 	if _, err := p.CreateBoleto(context.Background(), "t1", ports.BoletoRequest{
 		TenantID: "t1", BoletoID: "b", AmountCents: 1, Currency: "BRL", DueDate: time.Unix(1, 0),
+		Payer: fullBoletoPayer(),
 	}); !errors.Is(err, shared.ErrValidation) {
 		t.Fatalf("400 should map to ErrValidation, got %v", err)
 	}
@@ -401,6 +402,7 @@ func TestBoletoMissingCredential(t *testing.T) {
 	p := ps.provider(t, &fakeCreds{creds: map[string]ports.BankCredential{}})
 	if _, err := p.CreateBoleto(context.Background(), "unknown", ports.BoletoRequest{
 		TenantID: "unknown", BoletoID: "b", AmountCents: 1, Currency: "BRL", DueDate: time.Unix(1, 0),
+		Payer: fullBoletoPayer(),
 	}); !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("missing credential should propagate ErrNotFound, got %v", err)
 	}
@@ -543,6 +545,7 @@ func TestProductSecretNeverLeaks(t *testing.T) {
 	}
 	_, err = p.CreateBoleto(context.Background(), "t1", ports.BoletoRequest{
 		TenantID: "t1", BoletoID: "b", AmountCents: 1, Currency: "BRL", DueDate: time.Unix(1, 0),
+		Payer: fullBoletoPayer(),
 	})
 	if err == nil {
 		t.Fatal("expected error")
