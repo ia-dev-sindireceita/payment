@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
@@ -116,6 +117,22 @@ func (b recResponseBody) toResult() ports.RecResult {
 	}
 }
 
+// validateObjeto enforces C6's charset restriction on vinculo.objeto. C6's rec
+// schema rejects any objeto containing whitespace (confirmed live in SIN-66072:
+// objeto "Mensalidade homologacao PIX Automatico" → 400, "Mensalidade" → 201),
+// and the upstream RFC7807 detail is otherwise discarded — the caller would only
+// see an opaque 400. Validating at the boundary turns that into a precise
+// ErrValidation. objeto is optional (omitempty), so an empty value is allowed.
+func validateObjeto(objeto string) error {
+	if objeto == "" {
+		return nil
+	}
+	if strings.ContainsFunc(objeto, unicode.IsSpace) {
+		return &Error{Op: "create_rec", sentinel: shared.ErrValidation, detail: "objeto must not contain whitespace"}
+	}
+	return nil
+}
+
 // CreateRec registers a recurring-debit mandate (POST /v2/pix/rec). The recebedor
 // is auto-filled by C6 from the authenticated tenant's account and is therefore
 // never sent (confused-deputy defense, ADR-0004). Required fields are validated at
@@ -126,6 +143,9 @@ func (p *Provider) CreateRec(ctx context.Context, tenantID string, req ports.Cre
 		req.Calendario.Periodicidade == "" ||
 		req.PoliticaRetentativa == "" {
 		return ports.RecResult{}, &Error{Op: "create_rec", sentinel: shared.ErrValidation}
+	}
+	if err := validateObjeto(req.Vinculo.Objeto); err != nil {
+		return ports.RecResult{}, err
 	}
 	payload, err := json.Marshal(recRequestBody{
 		Vinculo: recVinculoBody{
@@ -326,7 +346,10 @@ type cobrRequestBody struct {
 	Valor     cobrValorReqBody  `json:"valor"`
 	Recebedor cobrRecebedorBody `json:"recebedor"`
 	IDRec     string            `json:"idRec"`
-	TxID      string            `json:"txid"`
+	// txid is NOT a body field: C6 rejects it (additionalProperties:false →
+	// 400 RequisicaoInvalida "properties which are not allowed by the schema: [txid]",
+	// confirmed live in SIN-66072). It is the resource key in the URL path
+	// (PUT /v2/pix/cobr/{txid}), per the BACEN cob pattern.
 }
 
 type cobrResponseBody struct {
@@ -350,7 +373,8 @@ func (b cobrResponseBody) toResult() ports.CobRResult {
 }
 
 // buildCobRBody renders a CobR request body. valor.original is centavos rendered as
-// the BACEN decimal string (no float; padrão brlDecimal).
+// the BACEN decimal string (no float; padrão brlDecimal). The txid is intentionally
+// absent — it travels in the URL path, never the body (see cobrRequestBody).
 func buildCobRBody(req ports.CreateCobRRequest) cobrRequestBody {
 	return cobrRequestBody{
 		AjusteDiaUtil: req.AjusteDiaUtil,
@@ -358,12 +382,14 @@ func buildCobRBody(req ports.CreateCobRRequest) cobrRequestBody {
 		Valor:         cobrValorReqBody{Original: formatAmount(req.ValorCents)},
 		Recebedor:     cobrRecebedorBody{Conta: req.Recebedor.Conta, TipoConta: string(req.Recebedor.TipoConta)},
 		IDRec:         req.IDRec,
-		TxID:          req.TxID,
 	}
 }
 
-// CreateCobR creates a recurring charge instance against an APROVADA mandate (POST
-// /v2/pix/cobr). Complete mediation at the money seam: an empty txid (the
+// CreateCobR creates a recurring charge instance against an APROVADA mandate. The
+// txid is the client-defined resource key, so the charge is created with an
+// idempotent upsert against its own URL (PUT /v2/pix/cobr/{txid}) — the BACEN cob
+// pattern. Sending txid in the body is rejected by C6 (400 RequisicaoInvalida,
+// SIN-66072). Complete mediation at the money seam: an empty txid (the
 // anti-double-bill anchor), empty idRec, or non-positive amount is never a valid
 // charge and fails fast. The txid is forwarded as the Idempotency-Key so a retried
 // create targets the same charge.
@@ -379,7 +405,7 @@ func (p *Provider) CreateCobR(ctx context.Context, tenantID string, req ports.Cr
 	if idem == "" {
 		idem = req.TxID
 	}
-	httpReq, err := p.authedJSONRequest(ctx, tenantID, "create_cobr", http.MethodPost, p.baseURL+cobrPath, payload, idem)
+	httpReq, err := p.authedJSONRequest(ctx, tenantID, "create_cobr", http.MethodPut, p.baseURL+cobrPath+"/"+url.PathEscape(req.TxID), payload, idem)
 	if err != nil {
 		return ports.CobRResult{}, err
 	}

@@ -293,6 +293,83 @@ func TestCreateRecValidation(t *testing.T) {
 	}
 }
 
+func TestCreateRecObjetoValidation(t *testing.T) {
+	t.Parallel()
+	rs := newRecServer(t)
+	p := rs.provider(t, oneTenant("t1", "client-1", "secret-1"), nil)
+
+	// C6 rejects an objeto with whitespace; the adapter must fail fast at the
+	// boundary (SIN-66072) without ever hitting the upstream.
+	for name, objeto := range map[string]string{
+		"space":          "Mensalidade homologacao",
+		"leading space":  " Mensalidade",
+		"trailing space": "Mensalidade ",
+		"tab":            "Mensalidade\tX",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := recReq()
+			req.Vinculo.Objeto = objeto
+			_, err := p.CreateRec(context.Background(), "t1", req)
+			if !errors.Is(err, shared.ErrValidation) {
+				t.Fatalf("want ErrValidation for %q, got %v", objeto, err)
+			}
+			if rs.lastBody != nil {
+				t.Fatalf("invalid objeto must not reach upstream, body=%s", rs.lastBody)
+			}
+		})
+	}
+}
+
+func TestCreateRecObjetoAccepted(t *testing.T) {
+	t.Parallel()
+	rs := newRecServer(t)
+	p := rs.provider(t, oneTenant("t1", "client-1", "secret-1"), nil)
+
+	// A single-token objeto (and an empty one) are accepted and forwarded verbatim.
+	for name, objeto := range map[string]string{"single token": "Mensalidade", "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			req := recReq()
+			req.Vinculo.Objeto = objeto
+			if _, err := p.CreateRec(context.Background(), "t1", req); err != nil {
+				t.Fatalf("CreateRec(%q): %v", objeto, err)
+			}
+			var wire struct {
+				Vinculo struct {
+					Objeto string `json:"objeto"`
+				} `json:"vinculo"`
+			}
+			if err := json.Unmarshal(rs.lastBody, &wire); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if wire.Vinculo.Objeto != objeto {
+				t.Fatalf("objeto not forwarded verbatim: want %q got %q", objeto, wire.Vinculo.Objeto)
+			}
+		})
+	}
+}
+
+func TestCreateCobRPutsTxidInPath(t *testing.T) {
+	t.Parallel()
+	rs := newRecServer(t)
+	var gotTxid string
+	rs.cobrPut = func(w http.ResponseWriter, r *http.Request) {
+		gotTxid = r.PathValue("txid")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(cobrRespJSON))
+	}
+	p := rs.provider(t, oneTenant("t1", "client-1", "secret-1"), nil)
+
+	if _, err := p.CreateCobR(context.Background(), "t1", cobrReq()); err != nil {
+		t.Fatalf("CreateCobR: %v", err)
+	}
+	if gotTxid != "tx-cobr-1" {
+		t.Fatalf("txid must be the path resource key, got %q", gotTxid)
+	}
+	if rs.lastMethod != http.MethodPut {
+		t.Fatalf("CobR create must PUT, got %q", rs.lastMethod)
+	}
+}
+
 func TestCreateRecUpstreamError(t *testing.T) {
 	t.Parallel()
 	rs := newRecServer(t)
@@ -576,10 +653,15 @@ func TestCreateCobRSuccess(t *testing.T) {
 	if len(wire.Devedor) != 0 {
 		t.Fatalf("devedor must be empty object: %v", wire.Devedor)
 	}
+	// txid MUST NOT be in the body — C6 rejects it (SIN-66072). It is the resource
+	// key in the path, proven by routing to the PUT /v2/pix/cobr/{txid} handler.
 	if !wire.AjusteDiaUtil || wire.Calendario.DataDeVencimento != "2026-09-01" ||
 		wire.Recebedor.Conta != "12345" || wire.Recebedor.TipoConta != "CORRENTE" ||
-		wire.IDRec == "" || wire.TxID != "tx-cobr-1" {
+		wire.IDRec == "" || wire.TxID != "" {
 		t.Fatalf("wire shape wrong: %+v", wire)
+	}
+	if rs.lastMethod != http.MethodPut {
+		t.Fatalf("CobR create must PUT /v2/pix/cobr/{txid}, got %q", rs.lastMethod)
 	}
 }
 
