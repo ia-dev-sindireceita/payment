@@ -59,8 +59,9 @@ func (a Action) valid() bool {
 // billing.LedgerEntry).
 //
 // txID/expectedCents/receivedCents are populated only for money-movement events
-// (ActionSettlementAmountMismatch). They are zero-valued for admin-plane actions,
-// which have no charge or amounts. No field ever carries a secret.
+// (ActionSettlementAmountMismatch). bankID is populated only for a credential
+// write (ActionSetBankCredential). They are zero-valued for the other actions. No
+// field ever carries a secret — bankID is a non-secret routing slug (ADR-0007).
 type Entry struct {
 	id            string
 	operatorID    string
@@ -70,6 +71,7 @@ type Entry struct {
 	txID          string
 	expectedCents int64
 	receivedCents int64
+	bankID        string
 }
 
 // NewEntry builds an audit entry, enforcing invariants: a non-empty id, a known
@@ -95,6 +97,36 @@ func NewEntry(id, operatorID string, action Action, tenantID string, at time.Tim
 		action:     action,
 		tenantID:   tenantID,
 		at:         at,
+	}, nil
+}
+
+// NewCredentialSetEntry builds the audit record for a bank credential write
+// (ActionSetBankCredential). Beyond who/what/tenant/when it carries the non-secret
+// bankID, so the trail records WHICH bank's credential was (re)written for the
+// tenant. It NEVER records the secret or the client id by construction — it has
+// no such parameter (threat C1/C4). Invariants: a non-empty id, tenant and bankID;
+// the admin service normalizes an empty selector to the default bank before
+// calling, so a blank bankID here is a programming error.
+func NewCredentialSetEntry(id, operatorID, tenantID, bankID string, at time.Time) (Entry, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Entry{}, shared.NewValidationError("id", "audit entry id is required")
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return Entry{}, shared.NewValidationError("tenant_id", "tenant id is required")
+	}
+	bankID = strings.TrimSpace(bankID)
+	if bankID == "" {
+		return Entry{}, shared.NewValidationError("bank_id", "bank id is required")
+	}
+	return Entry{
+		id:         id,
+		operatorID: strings.TrimSpace(operatorID),
+		action:     ActionSetBankCredential,
+		tenantID:   tenantID,
+		at:         at,
+		bankID:     bankID,
 	}, nil
 }
 
@@ -160,3 +192,7 @@ func (e Entry) ExpectedCents() int64 { return e.expectedCents }
 // ReceivedCents returns the received amount in cents for a money-movement event,
 // or 0 for an admin-plane action.
 func (e Entry) ReceivedCents() int64 { return e.receivedCents }
+
+// BankID returns the non-secret bank slug for a credential.set event, or "" for
+// any other action.
+func (e Entry) BankID() string { return e.bankID }

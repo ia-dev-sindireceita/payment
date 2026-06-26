@@ -45,7 +45,7 @@ func TestSetBankCredentialRequiresExistingTenant(t *testing.T) {
 	w := &recordingWriter{}
 	admin := app.NewAdminService(newCredDeps(w))
 
-	err := admin.SetBankCredential(context.Background(), "ghost", "cid", "shh")
+	err := admin.SetBankCredential(context.Background(), "ghost", ports.BankIDC6, "cid", "shh")
 	if !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("want ErrNotFound for unknown tenant, got %v", err)
 	}
@@ -71,7 +71,7 @@ func TestSetBankCredentialHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
-	if err := admin.SetBankCredential(context.Background(), tn.ID(), "client-123", "top-secret"); err != nil {
+	if err := admin.SetBankCredential(context.Background(), tn.ID(), ports.BankIDC6, "client-123", "top-secret"); err != nil {
 		t.Fatalf("set credential: %v", err)
 	}
 	got, err := creds.GetBankCredential(context.Background(), tn.ID(), ports.BankIDC6)
@@ -101,7 +101,7 @@ func TestSetBankCredentialNeverLeaksSecretInError(t *testing.T) {
 		t.Fatalf("seed tenant: %v", err)
 	}
 
-	err = admin.SetBankCredential(context.Background(), tn.ID(), "client-123", secretVal)
+	err = admin.SetBankCredential(context.Background(), tn.ID(), ports.BankIDC6, "client-123", secretVal)
 	if err == nil {
 		t.Fatal("want error from writer")
 	}

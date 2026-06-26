@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
@@ -143,6 +144,38 @@ type MessageBus interface {
 // single-bank behaviour while the credential boundary becomes keyed by the
 // composite (tenantID, bankID) pair (ADR-0007 / SIN-66015).
 const BankIDC6 = "c6"
+
+// knownBankIDs is the closed allow-list of bank slugs the platform has a wired
+// adapter for. A credential may be written only for a bank in this set
+// (deny-by-default, ADR-0007): an unknown slug is rejected at the admin boundary
+// rather than silently persisted under a bank that can never route a charge. The
+// set grows as adapters land; today only C6 is integrated.
+var knownBankIDs = map[string]struct{}{
+	BankIDC6: {},
+}
+
+// NormalizeBankID canonicalises a bank slug for the (tenantID, bankID) key: it
+// trims surrounding space and lowercases, and applies the retro-compat default —
+// an empty selector resolves to BankIDC6. So "C6", " c6 " and "" all key the same
+// bank. It is the single place the default is applied on the admin write path so
+// the persisted key and the audited bank_id agree.
+func NormalizeBankID(bankID string) string {
+	bankID = strings.ToLower(strings.TrimSpace(bankID))
+	if bankID == "" {
+		return BankIDC6
+	}
+	return bankID
+}
+
+// IsKnownBankID reports whether bankID names a bank the platform supports. Pass a
+// value already run through NormalizeBankID. It is the boundary guard for the
+// admin credential-write path: an unknown bank MUST be rejected as a validation
+// error (deny-by-default) so a credential is never written under a bank with no
+// adapter to route it.
+func IsKnownBankID(bankID string) bool {
+	_, ok := knownBankIDs[bankID]
+	return ok
+}
 
 // BankCredential is a tenant's bank (PSP) credential reference, keyed inside the
 // credential store by the composite pair (TenantID, BankID): a single tenant may

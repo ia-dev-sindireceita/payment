@@ -11,6 +11,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/app"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
+	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
 
 // maxBodyBytes caps request bodies to bound memory use (threat H3/W4).
@@ -149,17 +150,23 @@ func (s *Server) handleSetPrice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, priceView{TenantID: p.TenantID(), Endpoint: p.Endpoint(), PriceCents: p.PriceCents()})
 }
 
-// setBankCredentialRequest carries a tenant's PSP credential. The secret is
-// write-only: it is accepted here and forwarded to the secret store, never read
-// back, logged or echoed in any response (threat C1/C4).
+// setBankCredentialRequest carries a tenant's PSP credential for one bank. The
+// bank slug selects which bank the credential is stored under (ADR-0007); it is
+// optional and defaults to BankIDC6 for backward compatibility with the legacy
+// single-bank callers. The secret is write-only: it is accepted here and forwarded
+// to the secret store, never read back, logged or echoed in any response (threat
+// C1/C4).
 type setBankCredentialRequest struct {
+	Bank     string `json:"bank"`
 	ClientID string `json:"client_id"`
 	Secret   string `json:"secret"`
 }
 
-// bankCredentialView confirms a credential write WITHOUT the secret.
+// bankCredentialView confirms a credential write WITHOUT the secret. It echoes the
+// resolved (normalized) bank so the caller/UX can confirm which bank was written.
 type bankCredentialView struct {
 	TenantID string `json:"tenant_id"`
+	Bank     string `json:"bank"`
 	ClientID string `json:"client_id"`
 	Status   string `json:"status"`
 }
@@ -170,12 +177,20 @@ func (s *Server) handleSetBankCredential(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.admin.SetBankCredential(r.Context(), tenantID, req.ClientID, req.Secret); err != nil {
+	// Boundary validation (deny-by-default): normalize the optional bank slug and
+	// reject an unknown bank with a 400 before reaching the use-case. The
+	// AdminService re-validates (defense-in-depth); both layers resolve "" to c6.
+	bank := ports.NormalizeBankID(req.Bank)
+	if !ports.IsKnownBankID(bank) {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if err := s.admin.SetBankCredential(r.Context(), tenantID, bank, req.ClientID, req.Secret); err != nil {
 		writeDomainError(w, err)
 		return
 	}
 	// Echo only non-secret fields so the secret never leaves the secret store.
-	writeJSON(w, http.StatusOK, bankCredentialView{TenantID: tenantID, ClientID: req.ClientID, Status: "ok"})
+	writeJSON(w, http.StatusOK, bankCredentialView{TenantID: tenantID, Bank: bank, ClientID: req.ClientID, Status: "ok"})
 }
 
 // --- C6 bank webhook ---
