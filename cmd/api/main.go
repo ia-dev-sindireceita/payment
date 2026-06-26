@@ -233,7 +233,9 @@ func newBankRegistry(cfg config.Config, creds ports.CredentialStore) (*bank.Regi
 	if cfg.C6.BaseURL == "" {
 		log.Print("api: PAYMENT_C6_BASE_URL not set — using in-memory bank stub")
 		stub := bank.NewStubProvider(creds)
-		reg.Register(ports.BankIDC6, buildProviderSet(stub, stub))
+		if err := reg.Register(ports.BankIDC6, buildProviderSet(stub, stub)); err != nil {
+			return nil, err
+		}
 		return reg, nil
 	}
 	c6cfg := c6.Config{
@@ -259,7 +261,9 @@ func newBankRegistry(cfg config.Config, creds ports.CredentialStore) (*bank.Regi
 	if err != nil {
 		return nil, err
 	}
-	reg.Register(ports.BankIDC6, buildProviderSet(bank.NewPixSettlementProvider(c6p, c6p), c6p))
+	if err := reg.Register(ports.BankIDC6, buildProviderSet(bank.NewPixSettlementProvider(c6p, c6p), c6p)); err != nil {
+		return nil, err
+	}
 	return reg, nil
 }
 

@@ -95,17 +95,12 @@ func (b *BankResolver) defaultBank(ctx context.Context, tenantID string) string 
 // otherwise forge/collide a composite key once the slug is request-influenced
 // (SIN-66022 / SIN-66040 hardening). An empty result is reported as not-ok so the
 // caller treats it as the default-selector path, never as a valid explicit slug.
+//
+// It delegates to ports.CanonicalBankID — the single shared canonicaliser the
+// provider Registry also uses on its key boundary (SIN-66056) — so the request
+// selector and the registry key can never diverge.
 func normalizeBankID(bankID string) (string, bool) {
-	bankID = strings.ToLower(strings.TrimSpace(bankID))
-	if bankID == "" {
-		return "", false
-	}
-	for i := 0; i < len(bankID); i++ {
-		if c := bankID[i]; c < 0x20 || c == 0x7f {
-			return "", false
-		}
-	}
-	return bankID, true
+	return ports.CanonicalBankID(bankID)
 }
 
 // bankRouteMiddleware resolves the bank for every tenant request from the X-Bank-Id
