@@ -35,13 +35,14 @@ var (
 // adapter's current handle: the transaction when this repo came from WithinTx, the
 // connection pool otherwise. It never persists a secret — Entry exposes only
 // who/what/tenant/when plus, for a settlement mismatch, the txid and the
-// expected/received cents.
+// expected/received cents, and for a credential.set the non-secret bank slug
+// (bank_id, SIN-66044) — never the credential secret or client id (threat C1/C4).
 func (r repo) Append(ctx context.Context, e audit.Entry) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO audit_log (id, operator_id, action, tenant_id, at, tx_id, expected_cents, received_cents)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO audit_log (id, operator_id, action, tenant_id, at, tx_id, expected_cents, received_cents, bank_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID(), e.OperatorID(), string(e.Action()), e.TenantID(), e.At().Format(tsLayout),
-		e.TxID(), e.ExpectedCents(), e.ReceivedCents())
+		e.TxID(), e.ExpectedCents(), e.ReceivedCents(), e.BankID())
 	if err != nil {
 		return fmt.Errorf("append audit entry: %w", err)
 	}

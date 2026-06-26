@@ -19,8 +19,8 @@ import (
 // (reading the append-only trail directly in a test is fine; application code
 // only ever appends).
 type auditRow struct {
-	id, operatorID, action, tenantID, at, txID string
-	expected, received                         int64
+	id, operatorID, action, tenantID, at, txID, bankID string
+	expected, received                                 int64
 }
 
 // newAuditStore opens a fresh migrated SQLite database backed by a temp FILE (not
@@ -50,7 +50,7 @@ func readAudit(t *testing.T, dsn string) []auditRow {
 	}
 	defer func() { _ = db.Close() }()
 	rows, err := db.QueryContext(context.Background(),
-		`SELECT id, operator_id, action, tenant_id, at, tx_id, expected_cents, received_cents
+		`SELECT id, operator_id, action, tenant_id, at, tx_id, expected_cents, received_cents, bank_id
 		 FROM audit_log ORDER BY at ASC, id ASC`)
 	if err != nil {
 		t.Fatalf("query audit_log: %v", err)
@@ -59,7 +59,7 @@ func readAudit(t *testing.T, dsn string) []auditRow {
 	var out []auditRow
 	for rows.Next() {
 		var r auditRow
-		if err := rows.Scan(&r.id, &r.operatorID, &r.action, &r.tenantID, &r.at, &r.txID, &r.expected, &r.received); err != nil {
+		if err := rows.Scan(&r.id, &r.operatorID, &r.action, &r.tenantID, &r.at, &r.txID, &r.expected, &r.received, &r.bankID); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
 		out = append(out, r)
@@ -119,7 +119,13 @@ func TestAuditPreservesAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mismatch entry: %v", err)
 	}
-	for _, e := range []audit.Entry{human, internal, mismatch} {
+	// A credential.set entry carries the non-secret bank slug (SIN-66044): the
+	// durable trail must record WHICH bank's credential was (re)written.
+	cred, err := audit.NewCredentialSetEntry("c1", "operator-42", "ten-1", "c6", time.Unix(4, 0).UTC())
+	if err != nil {
+		t.Fatalf("credential entry: %v", err)
+	}
+	for _, e := range []audit.Entry{human, internal, mismatch, cred} {
 		if err := store.Append(ctx, e); err != nil {
 			t.Fatalf("append %s: %v", e.ID(), err)
 		}
@@ -141,6 +147,18 @@ func TestAuditPreservesAttribution(t *testing.T) {
 	}
 	if m.action != string(audit.ActionSettlementAmountMismatch) {
 		t.Fatalf("mismatch action = %q", m.action)
+	}
+	// bank_id round-trips for credential.set; legacy/non-credential entries store ''.
+	if got := byID["c1"].bankID; got != "c6" {
+		t.Fatalf("credential.set bank_id should round-trip, got %q", got)
+	}
+	if got := byID["c1"].action; got != string(audit.ActionSetBankCredential) {
+		t.Fatalf("credential.set action = %q", got)
+	}
+	for _, id := range []string{"h1", "i1", "m1"} {
+		if got := byID[id].bankID; got != "" {
+			t.Fatalf("non-credential entry %s bank_id should be empty, got %q", id, got)
+		}
 	}
 }
 
@@ -231,7 +249,8 @@ func TestAuditSchemaCarriesNoSecretColumn(t *testing.T) {
 		cols = append(cols, name)
 	}
 	sort.Strings(cols)
-	want := []string{"action", "at", "expected_cents", "id", "operator_id", "received_cents", "tenant_id", "tx_id"}
+	// bank_id (non-secret bank slug, SIN-66044) is expected; it carries no secret.
+	want := []string{"action", "at", "bank_id", "expected_cents", "id", "operator_id", "received_cents", "tenant_id", "tx_id"}
 	if len(cols) != len(want) {
 		t.Fatalf("audit_log columns = %v, want %v", cols, want)
 	}

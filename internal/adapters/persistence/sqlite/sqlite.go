@@ -40,8 +40,25 @@ func Open(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Migrate applies all *.up.sql files from the given filesystem in lexical order.
+// Migrate applies every *.up.sql file from the given filesystem in lexical order,
+// each exactly once, recording applied files in a schema_migrations ledger.
+//
+// The ledger is what makes Migrate safe to call on every boot. Earlier migrations
+// were all CREATE ... IF NOT EXISTS (re-runnable), but additive migrations such as
+// ALTER TABLE ... ADD COLUMN are NOT idempotent in SQLite (it has no ADD COLUMN IF
+// NOT EXISTS) — re-running one crashes with "duplicate column". The ledger skips a
+// file once applied, so any migration shape is safe across restarts (SIN-66044).
+//
+// Backward compatible: on an existing database whose tables were created by the
+// previous ledger-less runner, the ledger starts empty, so 0001/0002 are re-applied
+// once — harmlessly, since they are IF NOT EXISTS — then recorded and skipped
+// thereafter. Each file's apply and its ledger insert share one transaction, so a
+// failure leaves neither the schema half-changed nor the file marked applied.
 func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
+	if _, err := db.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("ensure schema_migrations: %w", err)
+	}
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
@@ -54,12 +71,34 @@ func Migrate(ctx context.Context, db *sql.DB, fsys fs.FS) error {
 	}
 	sort.Strings(ups)
 	for _, name := range ups {
+		var applied bool
+		if err := db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)`, name).Scan(&applied); err != nil {
+			return fmt.Errorf("check migration %s: %w", name, err)
+		}
+		if applied {
+			continue
+		}
 		b, err := fs.ReadFile(fsys, name)
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if _, err := db.ExecContext(ctx, string(b)); err != nil {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", name, err)
+		}
+		if _, err := tx.ExecContext(ctx, string(b)); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`,
+			name, time.Now().UTC().Format(tsLayout)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", name, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 	}
 	return nil
