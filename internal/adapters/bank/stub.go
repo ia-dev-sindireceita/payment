@@ -51,6 +51,12 @@ type StubProvider struct {
 	// tenant's account, keyed by tenantID. GetStatement filters them by the requested
 	// date window.
 	stmtEntries map[string][]ports.StatementEntry
+	// PIX Automático (Recorrência) in-memory state (SIN-66035): recs keyed by
+	// tenantID+"\x00"+idRec, solicRecs by tenantID+"\x00"+idSolicRec, cobrs by
+	// tenantID+"\x00"+txid. Lets wiring and use-cases run end-to-end without C6.
+	recs      map[string]ports.RecResult
+	solicRecs map[string]ports.SolicRecResult
+	cobrs     map[string]ports.CobRResult
 }
 
 // stubPixCharge is the in-memory record for an immediate PIX charge: the port
@@ -80,6 +86,9 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		ddaGroups:      make(map[string]*stubDDAGroup),
 		ddaGroupByIdem: make(map[string]string),
 		stmtEntries:    make(map[string][]ports.StatementEntry),
+		recs:           make(map[string]ports.RecResult),
+		solicRecs:      make(map[string]ports.SolicRecResult),
+		cobrs:          make(map[string]ports.CobRResult),
 	}
 }
 
