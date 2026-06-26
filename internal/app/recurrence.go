@@ -115,6 +115,13 @@ func (s *RecurrenceService) OriginateCobR(ctx context.Context, in OriginateCobRI
 		return nil, err
 	}
 
+	// Over-charge gate (SIN-66070): a fixed-value mandate caps every charge at the
+	// value the payer authorized. Refuse BEFORE the bank is asked to originate, so an
+	// amount above the mandate's ceiling never debits the payer.
+	if err := recurrence.RequireWithinAuthorizedValue(rec, in.ValorCents); err != nil {
+		return nil, err
+	}
+
 	// Build the durable charge aggregate (validates txid/idRec/tenant/vencimento and
 	// a strictly positive amount).
 	cobr, err := recurrence.NewCobR(recurrence.NewCobRParams{

@@ -35,6 +35,13 @@ var (
 	// mis-scoped, a mandate belonging to another tenant or another idRec can never
 	// authorize this charge.
 	ErrMandateMismatch = errors.New("recurrence: mandate does not match charge tenant/idRec")
+
+	// ErrChargeExceedsMandate means the recurring charge (CobR) amount is greater
+	// than the value the payer authorized on the mandate. A fixed-value mandate
+	// (Rec.ValorCents > 0) caps every charge at that ceiling; originating a CobR
+	// above it would debit the payer for more than they consented to (threat: a
+	// compromised/over-eager recebedor over-charging within an approved mandate).
+	ErrChargeExceedsMandate = errors.New("recurrence: charge exceeds mandate authorized value")
 )
 
 // RequireApprovedMandate enforces the referential gate. It returns nil only when
@@ -52,6 +59,28 @@ func RequireApprovedMandate(rec *Rec, tenantID, idRec string) error {
 	}
 	if rec.Status() != RecAprovada {
 		return ErrMandateNotApproved
+	}
+	return nil
+}
+
+// RequireWithinAuthorizedValue enforces the over-charge gate (SIN-66070): a CobR's
+// amount must not exceed the value the payer authorized on the mandate. rec must be
+// the already-loaded, referential-gated mandate (RequireApprovedMandate passed) for
+// the charge.
+//
+// A fixed-value mandate (rec.ValorCents() > 0) authorizes charges only up to that
+// ceiling; chargeCents == the ceiling is allowed, anything above it is refused with
+// ErrChargeExceedsMandate. A variable-value mandate (rec.ValorCents() == 0) carries
+// no in-house ceiling — its amount is decided per cycle — so the gate is a no-op for
+// it. A nil rec is ErrMandateNotFound (no mandate authorizes any amount). It never
+// mutates rec.
+func RequireWithinAuthorizedValue(rec *Rec, chargeCents int64) error {
+	if rec == nil {
+		return ErrMandateNotFound
+	}
+	authorized := rec.ValorCents()
+	if authorized > 0 && chargeCents > authorized {
+		return ErrChargeExceedsMandate
 	}
 	return nil
 }

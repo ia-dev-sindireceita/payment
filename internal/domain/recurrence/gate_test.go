@@ -87,3 +87,65 @@ func TestRequireApprovedMandateIDRecMismatch(t *testing.T) {
 		t.Fatalf("idRec mismatch: want ErrMandateMismatch, got %v", err)
 	}
 }
+
+// mandateValor builds an APROVADA mandate whose authorized value is valorCents,
+// for the over-charge gate cases (the shared `mandate` helper fixes it at 1000).
+func mandateValor(t *testing.T, valorCents int64) *recurrence.Rec {
+	t.Helper()
+	at := time.Unix(1000, 0).UTC()
+	dev, err := recurrence.NewDevedor("12345678901", "Fulano")
+	if err != nil {
+		t.Fatalf("devedor: %v", err)
+	}
+	rec, err := recurrence.NewRec(recurrence.NewRecParams{
+		IDRec:         "RN1",
+		TenantID:      "t1",
+		BankID:        "c6",
+		Contrato:      "C-1",
+		Devedor:       dev,
+		DataInicial:   "2026-07-01",
+		Periodicidade: recurrence.RecMensal,
+		ValorCents:    valorCents,
+	}, at)
+	if err != nil {
+		t.Fatalf("new rec: %v", err)
+	}
+	if err := rec.Transition(recurrence.RecAprovada, at.Add(time.Minute)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	return rec
+}
+
+func TestRequireWithinAuthorizedValueFixedMandate(t *testing.T) {
+	t.Parallel()
+	rec := mandateValor(t, 1000) // fixed-value mandate authorizing 1000 centavos
+	// At or below the ceiling is allowed; above it is refused.
+	for _, charge := range []int64{1, 999, 1000} {
+		if err := recurrence.RequireWithinAuthorizedValue(rec, charge); err != nil {
+			t.Fatalf("charge %d within ceiling 1000 should pass, got %v", charge, err)
+		}
+	}
+	for _, charge := range []int64{1001, 2000} {
+		if err := recurrence.RequireWithinAuthorizedValue(rec, charge); !errors.Is(err, recurrence.ErrChargeExceedsMandate) {
+			t.Fatalf("charge %d above ceiling 1000: want ErrChargeExceedsMandate, got %v", charge, err)
+		}
+	}
+}
+
+func TestRequireWithinAuthorizedValueVariableMandate(t *testing.T) {
+	t.Parallel()
+	rec := mandateValor(t, 0) // variable-value mandate: no in-house ceiling
+	// Any positive amount is allowed for a variable mandate — the gate is a no-op.
+	for _, charge := range []int64{1, 1000, 1_000_000} {
+		if err := recurrence.RequireWithinAuthorizedValue(rec, charge); err != nil {
+			t.Fatalf("variable mandate must not cap charge %d, got %v", charge, err)
+		}
+	}
+}
+
+func TestRequireWithinAuthorizedValueNilMandate(t *testing.T) {
+	t.Parallel()
+	if err := recurrence.RequireWithinAuthorizedValue(nil, 100); !errors.Is(err, recurrence.ErrMandateNotFound) {
+		t.Fatalf("nil mandate: want ErrMandateNotFound, got %v", err)
+	}
+}
