@@ -1,6 +1,6 @@
 # ADR-0007 — Credencial bancária por tenant passa a ser chaveada por `(tenantID, bankID)` (multi-banco)
 
-- **Status:** Proposto — aguardando ratificação do CTO ([SIN-66020](/SIN/issues/SIN-66020), headline de [SIN-66015](/SIN/issues/SIN-66015)).
+- **Status:** Aceito — ratificado pelo CTO em 2026-06-26 ([SIN-66020](/SIN/issues/SIN-66020), headline de [SIN-66015](/SIN/issues/SIN-66015)).
 - **Decisão de design pai:** [SIN-66015](/SIN/issues/SIN-66015) ([#document-plan](/SIN/issues/SIN-66015#document-plan)). Sucessor de [ADR-0004](adr-0004-c6-creditor-key-per-tenant.md).
 - **Autor:** SecurityEngineer. **Decisor:** CTO (revisão+merge dual-channel).
 - **Implementação (a seguir, com este ADR como pré-requisito):** #2 schema (`bank_id` no store), #3 roteamento (seletor de banco na borda). SecurityEngineer é o revisor de segurança pré-merge de ambos.
