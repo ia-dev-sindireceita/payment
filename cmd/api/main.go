@@ -244,6 +244,21 @@ func newBankRegistry(cfg config.Config, creds ports.CredentialStore) (*bank.Regi
 		c6cfg.HTTPClient = httpc
 		log.Print("api: C6 mTLS client certificate loaded")
 	}
+	// PIX Automático (Recorrência) reads are JWS-signed; wire the concrete verifier
+	// when a JWKS URL is configured. The verifier reuses the C6 HTTP client (so a
+	// JWKS served behind the same mTLS connection is reached with the client cert);
+	// when nil it builds its own TLS-1.2+ client. A bad JWKS URL fails the boot
+	// closed. When PAYMENT_C6_REC_JWKS_URL is unset the verifier stays nil and the
+	// recurrence reads fail secure (ErrUnavailable) — the correct interim until F4
+	// go-live (SIN-66061).
+	if cfg.C6.RecJWKSURL != "" {
+		verifier, err := c6.NewJWSVerifier(cfg.C6.RecJWKSURL, c6cfg.HTTPClient)
+		if err != nil {
+			return nil, err
+		}
+		c6cfg.RecurrenceVerifier = verifier
+		log.Print("api: C6 recurrence JWS verifier configured")
+	}
 	c6p, err := c6.New(c6cfg, creds)
 	if err != nil {
 		return nil, err

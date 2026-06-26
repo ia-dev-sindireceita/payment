@@ -35,11 +35,11 @@ var (
 // RecurrenceVerifier verifies a JWS-signed Recorrência read document and returns
 // its decoded JSON payload. C6 returns rec/solicrec/cobr reads as a JWS (Accept:
 // application/jose) so the BACEN mandate is non-reputable; the adapter MUST verify
-// the signature against C6's published JWKS before trusting the body. The concrete
-// implementation (JOSE lib choice vs stdlib + JWKS source/rotation) crosses a
-// dependency boundary and is pending CTO sign-off (SIN-66034 F0). F1 defines the
-// seam so the read path is hexagonal and table-testable; production wiring of a
-// real verifier lands with F2 (webhook/dispatch), where reads are consumed.
+// the signature against C6's published JWKS before trusting the body. F1 defines
+// this seam so the read path is hexagonal and table-testable; the concrete
+// implementation is *JWSVerifier (go-jose v4, explicit asymmetric allowlist + JWKS
+// by kid with rotation), wired in cmd/api/main.go when PAYMENT_C6_REC_JWKS_URL is
+// set (SIN-66061). When no verifier is injected the reads fail secure.
 type RecurrenceVerifier interface {
 	VerifyJWS(ctx context.Context, compact []byte) (payload []byte, err error)
 }
