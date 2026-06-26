@@ -24,7 +24,7 @@ var (
 // call for the same (tenant, consent id) returns the existing consent rather than
 // creating a new one, modelling PSP-side idempotency.
 func (s *StubProvider) CreateConsent(ctx context.Context, tenantID string, req ports.ConsentRequest) (ports.ConsentResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.ConsentResult{}, err
 	}
 	s.mu.Lock()
@@ -40,7 +40,7 @@ func (s *StubProvider) CreateConsent(ctx context.Context, tenantID string, req p
 
 // GetConsent returns the authoritative state of a consent for reconciliation.
 func (s *StubProvider) GetConsent(ctx context.Context, tenantID, consentID string) (ports.ConsentResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.ConsentResult{}, err
 	}
 	s.mu.Lock()
@@ -55,7 +55,7 @@ func (s *StubProvider) GetConsent(ctx context.Context, tenantID, consentID strin
 // CancelConsent revokes a consent. Cancelling is idempotent: a second cancel of an
 // already-cancelled consent succeeds and returns the cancelled state.
 func (s *StubProvider) CancelConsent(ctx context.Context, tenantID, consentID string) (ports.ConsentResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.ConsentResult{}, err
 	}
 	s.mu.Lock()
@@ -76,7 +76,7 @@ func (s *StubProvider) CancelConsent(ctx context.Context, tenantID, consentID st
 // reconcile it (roteiro 6.a). Registration is idempotent on (tenant, boleto id): a
 // repeat call returns the existing record rather than registering a new boleto.
 func (s *StubProvider) CreateBoleto(ctx context.Context, tenantID string, req ports.BoletoRequest) (ports.BoletoResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.BoletoResult{}, err
 	}
 	s.mu.Lock()
@@ -107,7 +107,7 @@ func (s *StubProvider) CreateBoleto(ctx context.Context, tenantID string, req po
 // (roteiro 6.a). An unknown id within the tenant is shared.ErrNotFound; the read is
 // keyed by (tenant, id) so one tenant can never observe another's boleto.
 func (s *StubProvider) GetBoleto(ctx context.Context, tenantID, boletoID string) (ports.BoletoResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.BoletoResult{}, err
 	}
 	s.mu.Lock()
@@ -124,7 +124,7 @@ func (s *StubProvider) GetBoleto(ctx context.Context, tenantID, boletoID string)
 // returns the cancelled state. An unknown (tenant, id) is shared.ErrNotFound, so one
 // tenant can never cancel another's boleto.
 func (s *StubProvider) CancelBoleto(ctx context.Context, tenantID, boletoID string) (ports.BoletoResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.BoletoResult{}, err
 	}
 	s.mu.Lock()
@@ -143,7 +143,7 @@ func (s *StubProvider) CancelBoleto(ctx context.Context, tenantID, boletoID stri
 // preserving its identity and scannable artifacts. An unknown (tenant, id) is
 // shared.ErrNotFound, so one tenant can never amend another's boleto.
 func (s *StubProvider) UpdateBoleto(ctx context.Context, tenantID, boletoID string, req ports.BoletoRequest) (ports.BoletoResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.BoletoResult{}, err
 	}
 	s.mu.Lock()
@@ -172,7 +172,7 @@ func (s *StubProvider) UpdateBoleto(ctx context.Context, tenantID, boletoID stri
 // (tenant, session id): a repeat call returns the existing record rather than
 // re-opening, modelling the PSP collapsing a retried open.
 func (s *StubProvider) CreateCheckoutSession(ctx context.Context, tenantID string, req ports.CheckoutRequest) (ports.CheckoutResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.CheckoutResult{}, err
 	}
 	var sum int64
@@ -201,7 +201,7 @@ func (s *StubProvider) CreateCheckoutSession(ctx context.Context, tenantID strin
 // tenant (roteiro 10). An unknown id within the tenant is shared.ErrNotFound; the read
 // is keyed by (tenant, id) so one tenant can never observe another's session.
 func (s *StubProvider) GetCheckoutSession(ctx context.Context, tenantID, sessionID string) (ports.CheckoutResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.CheckoutResult{}, err
 	}
 	s.mu.Lock()
@@ -219,7 +219,7 @@ func (s *StubProvider) GetCheckoutSession(ctx context.Context, tenantID, session
 // An unknown (tenant, id) is shared.ErrNotFound, so one tenant can never cancel
 // another's session.
 func (s *StubProvider) CancelCheckoutSession(ctx context.Context, tenantID, sessionID string) (ports.CheckoutResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.CheckoutResult{}, err
 	}
 	s.mu.Lock()

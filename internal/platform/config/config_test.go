@@ -72,8 +72,10 @@ func TestFromEnvParsing(t *testing.T) {
 	if cfg.WebhookRefs["refAAA"] != "tenantA" || cfg.WebhookRefs["refBBB"] != "tenantB" || cfg.RabbitURL != "amqp://localhost" {
 		t.Fatalf("webhook refs/rabbit mismatch: %+v", cfg.WebhookRefs)
 	}
-	cred, ok := cfg.BankCreds["tenantA"]
-	if !ok || cred.ClientID != "cidA" || cred.Secret != "secA" {
+	// BankCreds is now keyed by the composite (tenant, bank) pair; a legacy 3-field
+	// entry defaults to bank "c6" (ADR-0007 / SIN-66021).
+	cred, ok := cfg.BankCreds["tenantA\x00c6"]
+	if !ok || cred.ClientID != "cidA" || cred.Secret != "secA" || cred.BankID != "c6" {
 		t.Fatalf("bank creds: %+v", cfg.BankCreds)
 	}
 	if len(cfg.BankCreds) != 1 {

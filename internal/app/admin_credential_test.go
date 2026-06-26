@@ -18,14 +18,14 @@ import (
 // configurable error. Used to assert the use-case never leaks the secret into a
 // returned error.
 type recordingWriter struct {
-	gotTenant, gotClient, gotSecret string
-	called                          bool
-	err                             error
+	gotTenant, gotBank, gotClient, gotSecret string
+	called                                   bool
+	err                                      error
 }
 
-func (w *recordingWriter) SetBankCredential(_ context.Context, tenantID, clientID, secret string) error {
+func (w *recordingWriter) SetBankCredential(_ context.Context, tenantID, bankID, clientID, secret string) error {
 	w.called = true
-	w.gotTenant, w.gotClient, w.gotSecret = tenantID, clientID, secret
+	w.gotTenant, w.gotBank, w.gotClient, w.gotSecret = tenantID, bankID, clientID, secret
 	return w.err
 }
 
@@ -74,7 +74,7 @@ func TestSetBankCredentialHappyPath(t *testing.T) {
 	if err := admin.SetBankCredential(context.Background(), tn.ID(), "client-123", "top-secret"); err != nil {
 		t.Fatalf("set credential: %v", err)
 	}
-	got, err := creds.GetBankCredential(context.Background(), tn.ID())
+	got, err := creds.GetBankCredential(context.Background(), tn.ID(), ports.BankIDC6)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}

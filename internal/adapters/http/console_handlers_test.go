@@ -239,7 +239,7 @@ func TestConsoleSetCredential(t *testing.T) {
 	if strings.Contains(ok.Body.String(), "s3cr3t") {
 		t.Fatalf("secret leaked into response")
 	}
-	got, err := f.creds.GetBankCredential(context.Background(), "t1")
+	got, err := f.creds.GetBankCredential(context.Background(), "t1", ports.BankIDC6)
 	if err != nil || got.ClientID != "cid-1" || got.Secret != "s3cr3t" {
 		t.Fatalf("stored credential = %+v, %v", got, err)
 	}

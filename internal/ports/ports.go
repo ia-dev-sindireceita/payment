@@ -129,11 +129,29 @@ type MessageBus interface {
 	Subscribe(ctx context.Context, topic string, h MessageHandler) error
 }
 
-// BankCredential is a tenant's bank (PSP) credential reference. The secret value
+// BankIDC6 is the canonical, non-secret slug for the C6 bank. It is also the
+// retro-compatible DEFAULT bankID applied wherever a bank is not explicitly
+// specified (legacy single-bank config, internal pre-multi-bank calls, an empty
+// selector). Resolving an unspecified bank to "c6" preserves 100% of the current
+// single-bank behaviour while the credential boundary becomes keyed by the
+// composite (tenantID, bankID) pair (ADR-0007 / SIN-66015).
+const BankIDC6 = "c6"
+
+// BankCredential is a tenant's bank (PSP) credential reference, keyed inside the
+// credential store by the composite pair (TenantID, BankID): a single tenant may
+// hold independent credentials at more than one bank (ADR-0007). The secret value
 // is fetched via the store at use time and never stored in domain state or logs
 // (threat C1).
 type BankCredential struct {
 	TenantID string
+	// BankID is the non-secret routing slug of the bank this credential belongs to
+	// (e.g. "c6"). It is part of the credential's identity — the store keys on
+	// (TenantID, BankID) — and is exposed in String()/LogValue() alongside TenantID
+	// and ClientID so audit/log can reconstruct which bank routed a charge. It is NOT
+	// a secret and never relaxes the tenant scope, it only subdivides it (ADR-0007,
+	// threat T2/T4). An empty BankID is treated as the default BankIDC6 by the store
+	// (retro-compat); callers SHOULD set it explicitly.
+	BankID   string
 	ClientID string
 	// Secret is populated only transiently when resolved from the store.
 	Secret string
@@ -153,7 +171,7 @@ type BankCredential struct {
 // (or the routing-sensitive creditor key) through %v/%s/%+v formatting in logs
 // or errors (defense-in-depth, threat C1/C4; ADR-0004).
 func (c BankCredential) String() string {
-	return fmt.Sprintf("BankCredential{TenantID:%s ClientID:%s Secret:[REDACTED] CreditorKey:[REDACTED]}", c.TenantID, c.ClientID)
+	return fmt.Sprintf("BankCredential{TenantID:%s BankID:%s ClientID:%s Secret:[REDACTED] CreditorKey:[REDACTED]}", c.TenantID, c.BankID, c.ClientID)
 }
 
 // LogValue implements slog.LogValuer so structured logging emits the credential
@@ -162,24 +180,37 @@ func (c BankCredential) String() string {
 func (c BankCredential) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.String("tenant_id", c.TenantID),
+		slog.String("bank_id", c.BankID),
 		slog.String("client_id", c.ClientID),
 		slog.String("secret", "[REDACTED]"),
 		slog.String("creditor_key", "[REDACTED]"),
 	)
 }
 
-// CredentialStore isolates bank credentials per tenant behind a secret store.
-// No secret ever lives in code; the adapter reads from config/vault (threat C1/C4).
+// CredentialStore isolates bank credentials per tenant AND per bank behind a
+// secret store, keyed by the composite (tenantID, bankID) pair. No secret ever
+// lives in code; the adapter reads from config/vault (threat C1/C4).
 type CredentialStore interface {
-	GetBankCredential(ctx context.Context, tenantID string) (BankCredential, error)
+	// GetBankCredential resolves the credential for the EXACT (tenantID, bankID)
+	// pair. The tenantID always comes from the authenticated caller, never client
+	// input (threat T1/H1); bankID is a non-secret selector WITHIN that tenant's
+	// configured banks. The lookup is exact-match with NO fallback: a missing pair
+	// returns ErrNotFound and never resolves to another bank or another tenant's
+	// credential (deny-by-default, ADR-0007 T1/T2). An empty bankID is treated as the
+	// default BankIDC6 (retro-compat).
+	GetBankCredential(ctx context.Context, tenantID, bankID string) (BankCredential, error)
 }
 
-// CredentialWriter is the write path for per-tenant bank credentials (admin
-// plane). It is kept separate from CredentialStore (the reader) so use-cases
+// CredentialWriter is the write path for per-tenant, per-bank bank credentials
+// (admin plane). It is kept separate from CredentialStore (the reader) so use-cases
 // depend only on the capability they need (ISP). The secret transits straight to
 // the store: it MUST NOT enter domain state, logs, errors or URLs (threat C1/C4).
 type CredentialWriter interface {
-	SetBankCredential(ctx context.Context, tenantID, clientID, secret string) error
+	// SetBankCredential persists the credential for the (tenantID, bankID) pair. An
+	// empty bankID is stored under the default BankIDC6 (retro-compat). Empty
+	// tenantID/clientID/secret are rejected as a validation error WITHOUT echoing the
+	// secret value (threat C1/C4).
+	SetBankCredential(ctx context.Context, tenantID, bankID, clientID, secret string) error
 }
 
 // CredentialInvalidator is the optional hook the admin plane invokes right after

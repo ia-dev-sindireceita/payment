@@ -18,6 +18,11 @@ import (
 // (GetCharge) can be driven in tests.
 type StubProvider struct {
 	creds ports.CredentialStore
+	// bankID is the slug this stub instance is bound to ("c6"), mirroring how the
+	// real C6 adapter fixes its bank in its identity (ADR-0007 §3): every credential
+	// lookup resolves the (tenant, "c6") pair, never carrying the bank on a business
+	// request.
+	bankID string
 	// now is the clock for PIX QR-expiry computation. Defaults to time.Now;
 	// overridable (SetClock) so tests can pin the immediate-charge window/listing.
 	now func() time.Time
@@ -60,6 +65,7 @@ type stubPixCharge struct {
 func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 	return &StubProvider{
 		creds:          creds,
+		bankID:         ports.BankIDC6,
 		now:            time.Now,
 		charges:        make(map[string]ports.ChargeResult),
 		byIdem:         make(map[string]ports.ChargeResult),
@@ -100,7 +106,7 @@ func key(tenantID, txID string) string { return tenantID + "\x00" + txID }
 // bank, so a retry that races the local reservation cannot double-charge. The key
 // is tenant-scoped, so one tenant's key can never collide with another's.
 func (s *StubProvider) CreateCharge(ctx context.Context, tenantID string, req ports.ChargeRequest) (ports.ChargeResult, error) {
-	if _, err := s.creds.GetBankCredential(ctx, tenantID); err != nil {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
 		return ports.ChargeResult{}, err
 	}
 	s.mu.Lock()

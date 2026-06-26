@@ -79,7 +79,18 @@ func run(logger *log.Logger) error {
 		baseURL = defaultWebhookBaseURL
 	}
 
-	return registerAll(context.Background(), provider, cfg.WebhookRefs, cfg.BankCreds, baseURL, logger)
+	// cfg.BankCreds is now keyed by the composite (tenant, bank) pair (ADR-0007).
+	// register-webhook targets the C6 PIX webhook only, so project each tenant's C6
+	// credential into a tenant-keyed map for registerAll, which resolves the chave
+	// per tenant for the single (C6) bank.
+	c6Creds := make(map[string]ports.BankCredential, len(cfg.BankCreds))
+	for _, cred := range cfg.BankCreds {
+		if cred.BankID == ports.BankIDC6 {
+			c6Creds[cred.TenantID] = cred
+		}
+	}
+
+	return registerAll(context.Background(), provider, cfg.WebhookRefs, c6Creds, baseURL, logger)
 }
 
 // registerAll registers and confirms the webhook for every (tenantRef -> tenantID)

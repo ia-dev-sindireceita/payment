@@ -63,6 +63,11 @@ type Provider struct {
 	// SIN-65862). It is the same per-tenant store the token manager uses, so a
 	// charge can never route funds under another tenant's identity (threat H1/P1).
 	creds ports.CredentialStore
+	// bankID is the slug this adapter instance is bound to ("c6"). The bank is fixed
+	// in the adapter's identity, NOT carried on a business request, so the credential
+	// lookup always resolves the (tenant, "c6") pair (ADR-0007 §3). This keeps the
+	// multi-bank dimension confined to the credential boundary.
+	bankID string
 	// now is the clock used for PIX QR-expiry computation when the PSP omits the
 	// charge creation timestamp. Defaults to time.Now (overridable for tests).
 	now func() time.Time
@@ -114,8 +119,9 @@ func New(cfg Config, creds ports.CredentialStore) (*Provider, error) {
 	return &Provider{
 		baseURL: trimTrailingSlash(cfg.BaseURL),
 		httpc:   httpc,
-		tokens:  newTokenManager(creds, cfg.TokenURL, cfg.Scope, httpc, now),
+		tokens:  newTokenManager(creds, ports.BankIDC6, cfg.TokenURL, cfg.Scope, httpc, now),
 		creds:   creds,
+		bankID:  ports.BankIDC6,
 		now:     now,
 	}, nil
 }
@@ -139,7 +145,7 @@ func (p *Provider) resolveCreditorKey(ctx context.Context, tenantID, reqKey stri
 	if k := strings.TrimSpace(reqKey); k != "" {
 		return k, nil
 	}
-	cred, err := p.creds.GetBankCredential(ctx, tenantID)
+	cred, err := p.creds.GetBankCredential(ctx, tenantID, p.bankID)
 	if err != nil {
 		return "", err
 	}

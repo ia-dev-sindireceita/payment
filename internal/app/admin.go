@@ -116,7 +116,10 @@ func (s *AdminService) SetBankCredential(ctx context.Context, tenantID, clientID
 	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
 		return fmt.Errorf("resolve tenant: %w", err)
 	}
-	if err := s.credWriter.SetBankCredential(ctx, tenantID, clientID, secret); err != nil {
+	// The admin write path is single-bank for now: it persists under the default
+	// bank (BankIDC6), preserving current behaviour. A per-bank selector on this
+	// path is the routing workstream (SIN-66022), not this schema change.
+	if err := s.credWriter.SetBankCredential(ctx, tenantID, ports.BankIDC6, clientID, secret); err != nil {
 		// Wrap with a non-sensitive context only; never include the secret.
 		return fmt.Errorf("set bank credential: %w", err)
 	}

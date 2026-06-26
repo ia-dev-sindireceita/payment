@@ -134,9 +134,17 @@ func run() error {
 	// the cross-check is skipped (the channel remains authoritative).
 	webhookRefs := make(map[string]httpadapter.WebhookIdentity, len(cfg.WebhookRefs))
 	for ref, tenantID := range cfg.WebhookRefs {
+		// The C6 webhook cross-check uses the tenant's C6 client_id; resolve the
+		// (tenant, c6) credential from the store (cfg.BankCreds is now composite-keyed,
+		// ADR-0007). A tenant without one yields an empty client_id and the cross-check
+		// is skipped (the channel remains authoritative).
+		var clientID string
+		if cred, err := creds.GetBankCredential(context.Background(), tenantID, ports.BankIDC6); err == nil {
+			clientID = cred.ClientID
+		}
 		webhookRefs[ref] = httpadapter.WebhookIdentity{
 			TenantID: tenantID,
-			ClientID: cfg.BankCreds[tenantID].ClientID,
+			ClientID: clientID,
 		}
 	}
 	auth := httpadapter.NewStaticTokenAuthWithRoles(cfg.TenantTokens, adminRoles, webhookRefs)
