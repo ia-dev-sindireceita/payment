@@ -30,7 +30,6 @@ type StubProvider struct {
 	mu         sync.Mutex
 	charges    map[string]ports.ChargeResult   // keyed by tenantID+"\x00"+txID
 	byIdem     map[string]ports.ChargeResult   // keyed by tenantID+"\x00"+idempotencyKey
-	consents   map[string]ports.ConsentResult  // keyed by tenantID+"\x00"+consentID (C6-C)
 	pixCharges map[string]stubPixCharge        // keyed by tenantID+"\x00"+txID (PIX cobrança imediata)
 	pixByIdem  map[string]string               // keyed by tenantID+"\x00"+idempotencyKey -> txID
 	boletos    map[string]ports.BoletoResult   // keyed by tenantID+"\x00"+boletoID (BolePix)
@@ -51,6 +50,12 @@ type StubProvider struct {
 	// tenant's account, keyed by tenantID. GetStatement filters them by the requested
 	// date window.
 	stmtEntries map[string][]ports.StatementEntry
+	// PIX Automático (Recorrência) in-memory state (SIN-66035): recs keyed by
+	// tenantID+"\x00"+idRec, solicRecs by tenantID+"\x00"+idSolicRec, cobrs by
+	// tenantID+"\x00"+txid. Lets wiring and use-cases run end-to-end without C6.
+	recs      map[string]ports.RecResult
+	solicRecs map[string]ports.SolicRecResult
+	cobrs     map[string]ports.CobRResult
 }
 
 // stubPixCharge is the in-memory record for an immediate PIX charge: the port
@@ -69,7 +74,6 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		now:            time.Now,
 		charges:        make(map[string]ports.ChargeResult),
 		byIdem:         make(map[string]ports.ChargeResult),
-		consents:       make(map[string]ports.ConsentResult),
 		pixCharges:     make(map[string]stubPixCharge),
 		pixByIdem:      make(map[string]string),
 		boletos:        make(map[string]ports.BoletoResult),
@@ -80,6 +84,9 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		ddaGroups:      make(map[string]*stubDDAGroup),
 		ddaGroupByIdem: make(map[string]string),
 		stmtEntries:    make(map[string][]ports.StatementEntry),
+		recs:           make(map[string]ports.RecResult),
+		solicRecs:      make(map[string]ports.SolicRecResult),
+		cobrs:          make(map[string]ports.CobRResult),
 	}
 }
 

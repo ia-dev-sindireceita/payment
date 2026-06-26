@@ -16,12 +16,12 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
 
-// productServer is a configurable C6 double for the C6-C products (consent,
-// boleto, checkout) plus the OAuth2 token endpoint, backed by httptest TLS. It
-// uses Go's method+path routing so each product/operation has its own handler,
-// defaulting to a happy path that can be overridden per test. It records the last
-// Authorization / Idempotency-Key / request body so tests can assert plumbing
-// without races.
+// productServer is a configurable C6 double for the C6-C products (boleto,
+// checkout) plus the OAuth2 token endpoint, backed by httptest TLS. It uses
+// Go's method+path routing so each product/operation has its own handler,
+// defaulting to a happy path that can be overridden per test. It records the
+// last Authorization / Idempotency-Key / request body so tests can assert
+// plumbing without races.
 type productServer struct {
 	*httptest.Server
 
@@ -31,14 +31,11 @@ type productServer struct {
 	lastIdemKey    string
 	lastBody       []byte
 
-	consentCreate http.HandlerFunc
-	consentGet    http.HandlerFunc
-	consentCancel http.HandlerFunc
-	boletoCreate  http.HandlerFunc
-	boletoGet     http.HandlerFunc
-	boletoCancel  http.HandlerFunc
-	boletoUpdate  http.HandlerFunc
-	checkout      http.HandlerFunc
+	boletoCreate http.HandlerFunc
+	boletoGet    http.HandlerFunc
+	boletoCancel http.HandlerFunc
+	boletoUpdate http.HandlerFunc
+	checkout     http.HandlerFunc
 	// cobvPut backs both create and amend (both PUT /v2/pix/cobv/{txid}); cobvGet
 	// backs the reconcile read (roteiro 7.5–7.7).
 	cobvPut http.HandlerFunc
@@ -65,33 +62,6 @@ func newProductServer(t *testing.T) *productServer {
 		user, _, _ := r.BasicAuth()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"access_token":"tok-` + user + `","token_type":"Bearer","expires_in":3600}`))
-	})
-	mux.HandleFunc("POST /consents", func(w http.ResponseWriter, r *http.Request) {
-		record(r)
-		if ps.consentCreate != nil {
-			ps.consentCreate(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"consent_id":"con_1","status":"PENDING"}`))
-	})
-	mux.HandleFunc("GET /consents/{id}", func(w http.ResponseWriter, r *http.Request) {
-		record(r)
-		if ps.consentGet != nil {
-			ps.consentGet(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"consent_id":"con_1","status":"ACTIVE"}`))
-	})
-	mux.HandleFunc("POST /consents/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
-		record(r)
-		if ps.consentCancel != nil {
-			ps.consentCancel(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"consent_id":"con_1","status":"CANCELLED"}`))
 	})
 	mux.HandleFunc("POST /v1/bank_slips", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -198,156 +168,6 @@ func (ps *productServer) tokenCount() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return ps.tokenHits
-}
-
-// --- Consent ---
-
-func TestCreateConsentSuccess(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	p := ps.provider(t, oneTenant("t1", "client-1", "secret-1"))
-
-	res, err := p.CreateConsent(context.Background(), "t1", ports.ConsentRequest{
-		TenantID: "t1", ConsentID: "con_1", DebtorTaxID: "12345678901",
-		MaxAmountCents: 50000, Currency: "BRL", Frequency: "MONTHLY",
-		StartAt: time.Unix(1_700_000_000, 0),
-	})
-	if err != nil {
-		t.Fatalf("CreateConsent: %v", err)
-	}
-	if res.ConsentID != "con_1" || res.Status != "PENDING" {
-		t.Fatalf("unexpected result: %+v", res)
-	}
-	if ps.lastAuthHeader != "Bearer tok-client-1" {
-		t.Fatalf("bearer not attached: %q", ps.lastAuthHeader)
-	}
-	if ps.idemKey() != "con_1" {
-		t.Fatalf("idempotency key should fall back to consent id, got %q", ps.idemKey())
-	}
-}
-
-func TestCreateConsentForwardsIdempotencyKeyAndOmitsZeroEnd(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	p := ps.provider(t, oneTenant("t1", "c", "s"))
-
-	_, err := p.CreateConsent(context.Background(), "t1", ports.ConsentRequest{
-		TenantID: "t1", ConsentID: "con_1", DebtorTaxID: "12345678901",
-		MaxAmountCents: 50000, Currency: "BRL", Frequency: "MONTHLY",
-		StartAt: time.Unix(1_700_000_000, 0), IdempotencyKey: "idem-xyz",
-	})
-	if err != nil {
-		t.Fatalf("CreateConsent: %v", err)
-	}
-	if ps.idemKey() != "idem-xyz" {
-		t.Fatalf("explicit idempotency key should win, got %q", ps.idemKey())
-	}
-	// Open-ended consent: end_at must be omitted from the JSON body entirely.
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(ps.body(), &got); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if _, present := got["end_at"]; present {
-		t.Fatalf("end_at must be omitted when zero, body=%s", ps.body())
-	}
-}
-
-func TestCreateConsentSendsBoundedEnd(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	p := ps.provider(t, oneTenant("t1", "c", "s"))
-
-	_, err := p.CreateConsent(context.Background(), "t1", ports.ConsentRequest{
-		TenantID: "t1", ConsentID: "con_1", DebtorTaxID: "12345678901",
-		MaxAmountCents: 50000, Currency: "BRL", Frequency: "MONTHLY",
-		StartAt: time.Unix(1_700_000_000, 0), EndAt: time.Unix(1_800_000_000, 0),
-	})
-	if err != nil {
-		t.Fatalf("CreateConsent: %v", err)
-	}
-	var got map[string]json.RawMessage
-	if err := json.Unmarshal(ps.body(), &got); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if _, present := got["end_at"]; !present {
-		t.Fatalf("end_at must be present when bounded, body=%s", ps.body())
-	}
-}
-
-func TestGetConsentSuccess(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	p := ps.provider(t, oneTenant("t1", "client-1", "secret-1"))
-
-	res, err := p.GetConsent(context.Background(), "t1", "con_1")
-	if err != nil {
-		t.Fatalf("GetConsent: %v", err)
-	}
-	if res.Status != "ACTIVE" {
-		t.Fatalf("unexpected result: %+v", res)
-	}
-	if ps.lastAuthHeader != "Bearer tok-client-1" {
-		t.Fatalf("bearer not attached: %q", ps.lastAuthHeader)
-	}
-}
-
-func TestGetConsentNotFound(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	ps.consentGet = func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"code":"NOT_FOUND"}`))
-	}
-	p := ps.provider(t, oneTenant("t1", "c", "s"))
-	if _, err := p.GetConsent(context.Background(), "t1", "missing"); !errors.Is(err, shared.ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
-	}
-}
-
-func TestCancelConsentSuccess(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	p := ps.provider(t, oneTenant("t1", "c", "s"))
-
-	res, err := p.CancelConsent(context.Background(), "t1", "con_1")
-	if err != nil {
-		t.Fatalf("CancelConsent: %v", err)
-	}
-	if res.Status != "CANCELLED" {
-		t.Fatalf("unexpected result: %+v", res)
-	}
-	if ps.idemKey() != "con_1" {
-		t.Fatalf("cancel should carry consent id as idempotency key, got %q", ps.idemKey())
-	}
-}
-
-func TestCancelConsentError(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	ps.consentCancel = func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"code":"X"}`))
-	}
-	p := ps.provider(t, oneTenant("t1", "c", "s"))
-	if _, err := p.CancelConsent(context.Background(), "t1", "con_1"); !errors.Is(err, shared.ErrConflict) {
-		t.Fatalf("want ErrConflict, got %v", err)
-	}
-}
-
-func TestConsentMissingCredential(t *testing.T) {
-	t.Parallel()
-	ps := newProductServer(t)
-	p := ps.provider(t, &fakeCreds{creds: map[string]ports.BankCredential{}})
-
-	if _, err := p.CreateConsent(context.Background(), "unknown", ports.ConsentRequest{
-		TenantID: "unknown", ConsentID: "c", DebtorTaxID: "12345678901",
-		MaxAmountCents: 1, Currency: "BRL", Frequency: "MONTHLY", StartAt: time.Unix(1, 0),
-	}); !errors.Is(err, shared.ErrNotFound) {
-		t.Fatalf("missing credential should propagate ErrNotFound, got %v", err)
-	}
-	if ps.tokenCount() != 0 {
-		t.Fatalf("token endpoint must not be hit without a credential, hits=%d", ps.tokenCount())
-	}
 }
 
 // --- Boleto ---
