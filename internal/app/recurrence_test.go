@@ -226,3 +226,77 @@ func TestOriginateCobRBankErrorPropagates(t *testing.T) {
 		t.Fatalf("no audit on bank failure, got %d", n)
 	}
 }
+
+// seedMandateValor persists an APROVADA mandate whose authorized value is
+// valorCents, for the over-charge gate cases (seedMandate fixes it at 1000).
+func seedMandateValor(t *testing.T, h *harness, tenant, idRec string, valorCents int64) {
+	t.Helper()
+	at := time.Unix(1000, 0).UTC()
+	dev, err := recurrence.NewDevedor("12345678901", "Fulano")
+	if err != nil {
+		t.Fatalf("devedor: %v", err)
+	}
+	rec, err := recurrence.NewRec(recurrence.NewRecParams{
+		IDRec:         idRec,
+		TenantID:      tenant,
+		BankID:        "c6",
+		Contrato:      "C-1",
+		Devedor:       dev,
+		DataInicial:   "2026-07-01",
+		Periodicidade: recurrence.RecMensal,
+		ValorCents:    valorCents,
+	}, at)
+	if err != nil {
+		t.Fatalf("new rec: %v", err)
+	}
+	if err := rec.Transition(recurrence.RecAprovada, at.Add(time.Minute)); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if err := h.store.SaveRec(context.Background(), rec); err != nil {
+		t.Fatalf("save rec: %v", err)
+	}
+}
+
+func TestOriginateCobROverChargeRefused(t *testing.T) {
+	t.Parallel()
+	svc, h := recurrenceServiceHarness(t)
+	seedMandate(t, h, "t1", "RN1", recurrence.RecAprovada) // authorizes 1000
+	in := validOriginate()
+	in.ValorCents = 1500 // above the mandate ceiling
+	if _, err := svc.OriginateCobR(context.Background(), in); !errors.Is(err, recurrence.ErrChargeExceedsMandate) {
+		t.Fatalf("over-charge: want ErrChargeExceedsMandate, got %v", err)
+	}
+	// Refused before the bank/durable write: nothing persisted, nothing audited.
+	if got, err := h.store.FindCobRByTxID(context.Background(), "t1", "tx-1"); err == nil {
+		t.Fatalf("no charge should be persisted on over-charge refusal, got %v", got)
+	}
+	if n := len(h.store.AuditEntries()); n != 0 {
+		t.Fatalf("no audit on over-charge refusal, got %d", n)
+	}
+}
+
+func TestOriginateCobRAtCeilingAllowed(t *testing.T) {
+	t.Parallel()
+	svc, h := recurrenceServiceHarness(t)
+	seedMandate(t, h, "t1", "RN1", recurrence.RecAprovada) // authorizes 1000
+	in := validOriginate()
+	in.ValorCents = 1000 // exactly the ceiling — allowed
+	cobr, err := svc.OriginateCobR(context.Background(), in)
+	if err != nil {
+		t.Fatalf("charge at the ceiling should originate, got %v", err)
+	}
+	if cobr.ValorCents() != 1000 {
+		t.Fatalf("valor: %d", cobr.ValorCents())
+	}
+}
+
+func TestOriginateCobRVariableMandateUncapped(t *testing.T) {
+	t.Parallel()
+	svc, h := recurrenceServiceHarness(t)
+	seedMandateValor(t, h, "t1", "RN1", 0) // variable mandate: no ceiling
+	in := validOriginate()
+	in.ValorCents = 999999 // any amount is allowed for a variable mandate
+	if _, err := svc.OriginateCobR(context.Background(), in); err != nil {
+		t.Fatalf("variable mandate must not cap the charge, got %v", err)
+	}
+}
