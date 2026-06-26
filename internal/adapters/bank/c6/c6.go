@@ -50,6 +50,12 @@ type Config struct {
 	HTTPClient *http.Client
 	// Now overrides the clock (token expiry). Defaults to time.Now.
 	Now func() time.Time
+	// RecurrenceVerifier verifies the JWS-signed Recorrência reads (rec/solicrec/
+	// cobr GETs return Accept: application/jose). When nil, those reads fail secure
+	// (ErrUnavailable) rather than trusting an unverified mandate document. The
+	// concrete verifier (JOSE lib + JWKS) is a dependency decision pending CTO
+	// sign-off (SIN-66034 F0); the create/cancel paths do not need it.
+	RecurrenceVerifier RecurrenceVerifier
 }
 
 // Provider implements ports.BankProvider (and ports.PixProvider) against C6.
@@ -71,6 +77,9 @@ type Provider struct {
 	// now is the clock used for PIX QR-expiry computation when the PSP omits the
 	// charge creation timestamp. Defaults to time.Now (overridable for tests).
 	now func() time.Time
+	// recVerifier verifies JWS-signed Recorrência reads. Optional (nil ⇒ reads fail
+	// secure); see Config.RecurrenceVerifier.
+	recVerifier RecurrenceVerifier
 }
 
 // compile-time assertion that Provider satisfies the port.
@@ -117,12 +126,13 @@ func New(cfg Config, creds ports.CredentialStore) (*Provider, error) {
 	}
 
 	return &Provider{
-		baseURL: trimTrailingSlash(cfg.BaseURL),
-		httpc:   httpc,
-		tokens:  newTokenManager(creds, ports.BankIDC6, cfg.TokenURL, cfg.Scope, httpc, now),
-		creds:   creds,
-		bankID:  ports.BankIDC6,
-		now:     now,
+		baseURL:     trimTrailingSlash(cfg.BaseURL),
+		httpc:       httpc,
+		tokens:      newTokenManager(creds, ports.BankIDC6, cfg.TokenURL, cfg.Scope, httpc, now),
+		creds:       creds,
+		bankID:      ports.BankIDC6,
+		now:         now,
+		recVerifier: cfg.RecurrenceVerifier,
 	}, nil
 }
 
