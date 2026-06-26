@@ -50,7 +50,16 @@ type Deps struct {
 	// from the other bank ports (ISP): StatementService depends only on it. In
 	// production it is the C6 provider; in stub mode the in-memory StubProvider. When
 	// nil, StatementService is simply not wired.
-	Statement   ports.StatementProvider
+	Statement ports.StatementProvider
+	// RecReader / CobRReader are the recurrence reconcile-read ports (PIX Automático,
+	// SIN-66036). The recurrence webhook handler reconciles the authoritative mandate
+	// (GetRec) / charge (GetCobR) state before acting on an inbound notification —
+	// never trusting the raw webhook body (threat W3). Segregated from the create
+	// ports (ISP): WebhookService depends only on the narrow readers. When nil, the
+	// recurrence webhook dispatch is not wired. In production both are the C6
+	// provider; in stub mode the in-memory StubProvider.
+	RecReader   ports.RecProvider
+	CobRReader  ports.CobRProvider
 	Credentials ports.CredentialStore
 	// CredWriter is the admin-plane write path for per-tenant bank credentials.
 	// Kept separate from Credentials (the reader) so each service depends only on

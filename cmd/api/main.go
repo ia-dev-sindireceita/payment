@@ -78,6 +78,13 @@ func run() error {
 	// forwards InvalidateToken; the stub caches nothing). Nil when no bank caches
 	// anything, so the admin services fall back to a no-op evictor.
 	credInvalidator := registry.CredentialInvalidator()
+	// Recurrence reconcile-read ports for the PIX Automático webhook dispatch
+	// (SIN-66036). PIX Automático is a C6/BACEN feature; the C6 raw provider (and the
+	// stub) implement the Rec/CobR read ports. Derived from the C6 ProviderSet's raw
+	// provider rather than a router because recurrence ports are not yet part of the
+	// per-bank routing surface — that moves into the registry routers when a second
+	// bank gains PIX Automático (SIN-66022).
+	recReader, cobrReader := recurrenceReaders(registry)
 
 	deps := app.Deps{
 		Payments:        store,
@@ -93,6 +100,8 @@ func run() error {
 		Boleto:          routers.Boleto,
 		DDA:             routers.DDA,
 		Statement:       routers.Statement,
+		RecReader:       recReader,
+		CobRReader:      cobrReader,
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
@@ -281,4 +290,21 @@ func buildProviderSet(generic ports.BankProvider, raw ports.PixProvider) bank.Pr
 		set.CredInvalidator = v
 	}
 	return set
+}
+
+// recurrenceReaders derives the PIX Automático reconcile-read ports (Rec/CobR) for
+// the webhook dispatch (SIN-66036) from the C6 bank's raw provider, which (like the
+// stub) implements them. They are read off the ProviderSet's raw Pix provider rather
+// than a router because recurrence ports are not yet routed per-bank; that wiring
+// moves into the registry routers when a second bank gains PIX Automático
+// (SIN-66022). A bank that does not implement the read ports yields nil, leaving the
+// recurrence webhook dispatch unwired (it then fails closed) rather than panicking.
+func recurrenceReaders(reg *bank.Registry) (ports.RecProvider, ports.CobRProvider) {
+	set, ok := reg.Get(ports.BankIDC6)
+	if !ok || set.Pix == nil {
+		return nil, nil
+	}
+	recReader, _ := set.Pix.(ports.RecProvider)
+	cobrReader, _ := set.Pix.(ports.CobRProvider)
+	return recReader, cobrReader
 }

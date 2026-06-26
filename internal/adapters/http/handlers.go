@@ -216,6 +216,20 @@ const maxWebhookBytes = 64 << 10
 // other service is reconciled as a PIX/charge.
 const webhookServiceCheckout = "checkout"
 
+// webhookServiceRec / webhookServiceCobR are the c6WebhookNotification.service
+// values that mark a PIX Automático (recorrência) notification (SIN-66036): a
+// mandate-status change (rec) or a recurring-charge event (cobr). C6 fronts every
+// callback — PIX, checkout and the two recurrence streams — on the same opaque
+// channel with the same envelope, distinguishing them by service; routing here
+// reuses the channel auth, body cap and client_id cross-check already applied above.
+// The recurrence handlers reconcile the authoritative mandate/charge (GetRec /
+// GetCobR) before trusting the body (threat W3). Both matched case-insensitively.
+// The exact service tokens are confirmed against the C6 sandbox in F4 (homologação).
+const (
+	webhookServiceRec  = "rec"
+	webhookServiceCobR = "cobr"
+)
+
 // c6WebhookNotification is the inbound C6 callback body (notificações.yaml,
 // WebhookNotification). It is UNTRUSTED: the tenant comes from the authenticated
 // channel (never client_id), and settlement reconciles the authoritative state
@@ -305,9 +319,24 @@ func (s *Server) handleC6Webhook(w http.ResponseWriter, r *http.Request) {
 		EventKey: note.ExternalID + "|" + note.Service + "|" + note.Status,
 	}
 	var err error
-	if strings.EqualFold(strings.TrimSpace(note.Service), webhookServiceCheckout) {
+	switch strings.ToLower(strings.TrimSpace(note.Service)) {
+	case webhookServiceCheckout:
 		err = s.webhooks.HandleCheckoutEvent(r.Context(), ev)
-	} else {
+	case webhookServiceRec:
+		// Mandate-status notification: the external id is the idRec to reconcile.
+		err = s.webhooks.HandleRecEvent(r.Context(), app.RecEvent{
+			TenantID: id.TenantID,
+			IDRec:    note.ExternalID,
+			EventKey: ev.EventKey,
+		})
+	case webhookServiceCobR:
+		// Recurring-charge notification: the external id is the cobr txid.
+		err = s.webhooks.HandleCobREvent(r.Context(), app.CobREvent{
+			TenantID: id.TenantID,
+			TxID:     note.ExternalID,
+			EventKey: ev.EventKey,
+		})
+	default:
 		err = s.webhooks.HandlePaymentEvent(r.Context(), ev)
 	}
 	if err != nil {

@@ -56,6 +56,11 @@ type StubProvider struct {
 	recs      map[string]ports.RecResult
 	solicRecs map[string]ports.SolicRecResult
 	cobrs     map[string]ports.CobRResult
+	// recWebhooks / cobrWebhooks hold the singleton recurrence callback URLs
+	// registered per tenant (PIX Automático, SIN-66036), keyed by tenantID. Unlike
+	// the immediate-PIX webhook (per chave), these are one-per-recebedor.
+	recWebhooks  map[string]ports.WebhookRegistration
+	cobrWebhooks map[string]ports.WebhookRegistration
 }
 
 // stubPixCharge is the in-memory record for an immediate PIX charge: the port
@@ -87,6 +92,8 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		recs:           make(map[string]ports.RecResult),
 		solicRecs:      make(map[string]ports.SolicRecResult),
 		cobrs:          make(map[string]ports.CobRResult),
+		recWebhooks:    make(map[string]ports.WebhookRegistration),
+		cobrWebhooks:   make(map[string]ports.WebhookRegistration),
 	}
 }
 

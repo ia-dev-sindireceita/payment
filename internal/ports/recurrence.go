@@ -209,3 +209,27 @@ type CobRProvider interface {
 	// retentativa, on the given date (yyyy-MM-dd).
 	RetryCobR(ctx context.Context, tenantID, txID, dataRetentativa string) (CobRResult, error)
 }
+
+// RecurrenceWebhookRegistrar is the output port for registering and reading the
+// PSP-side recurrence notification callbacks (PIX Automático, SIN-66036). Unlike
+// the immediate-PIX webhook (keyed per chave do recebedor, PixWebhookRegistrar),
+// the recurrence callbacks are SINGLETONS per recebedor: BACEN exposes them at
+// PUT|GET|DELETE /webhookrec (mandate-status callback) and /webhookcobr (recurring
+// charge callback) with NO path key, so a tenant has exactly one of each. The URL
+// crosses as a single {"webhookUrl": "https://…"} body; HTTPS is mandatory (a
+// plaintext callback would leak the secret per-tenant ref the URL embeds). Both
+// register operations are idempotent (a re-PUT replaces the registered URL).
+type RecurrenceWebhookRegistrar interface {
+	// RegisterRecWebhook idempotently registers (PUTs /webhookrec) the HTTPS
+	// webhookURL the PSP notifies on every mandate (Rec) status transition for the
+	// tenant. A non-HTTPS url or empty tenant is refused at the boundary.
+	RegisterRecWebhook(ctx context.Context, tenantID, webhookURL string) error
+	// GetRecWebhook reads back the registered Rec callback (GET /webhookrec) so a
+	// caller can confirm the registration idempotently.
+	GetRecWebhook(ctx context.Context, tenantID string) (WebhookRegistration, error)
+	// RegisterCobRWebhook idempotently registers (PUTs /webhookcobr) the HTTPS
+	// webhookURL the PSP notifies on every recurring charge (CobR) event.
+	RegisterCobRWebhook(ctx context.Context, tenantID, webhookURL string) error
+	// GetCobRWebhook reads back the registered CobR callback (GET /webhookcobr).
+	GetCobRWebhook(ctx context.Context, tenantID string) (WebhookRegistration, error)
+}
