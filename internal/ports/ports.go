@@ -593,40 +593,6 @@ type PixChargeList struct {
 // bypassed (the tenant is derived from the authenticated caller, never client
 // input — threat H1/P1).
 
-// ConsentRequest is the input to register a recurring-debit (PIX Automático)
-// consent at the bank. Amount and window mirror the domain consent; the adapter
-// only transports them. IdempotencyKey, when present, is forwarded so the PSP
-// collapses retried/concurrent registrations into one consent.
-type ConsentRequest struct {
-	TenantID       string
-	ConsentID      string
-	DebtorTaxID    string
-	MaxAmountCents int64
-	Currency       string
-	Frequency      string
-	StartAt        time.Time
-	EndAt          time.Time // zero => open-ended
-	IdempotencyKey string
-}
-
-// ConsentResult is the bank's response to a consent operation.
-type ConsentResult struct {
-	ConsentID string
-	Status    string
-}
-
-// ConsentProvider is the output port for PIX Automático recurring-debit consents:
-// register, reconcile and cancel. Cancellation must be supported because a payer
-// can revoke authorization at any time.
-type ConsentProvider interface {
-	CreateConsent(ctx context.Context, tenantID string, req ConsentRequest) (ConsentResult, error)
-	// GetConsent reconciles the authoritative consent state from the bank (never
-	// trust a raw webhook — threat W3).
-	GetConsent(ctx context.Context, tenantID, consentID string) (ConsentResult, error)
-	// CancelConsent revokes a consent so no further debits can be originated.
-	CancelConsent(ctx context.Context, tenantID, consentID string) (ConsentResult, error)
-}
-
 // BoletoDiscountTier is the transport mirror of a boleto early-payment discount step
 // (roteiro grupo 3). Exactly one of Bps/FixedCents is set; DaysBeforeDue is the
 // minimum number of whole days before the due date the payment must occur for the
