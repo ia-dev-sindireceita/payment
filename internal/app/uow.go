@@ -15,6 +15,7 @@ type directRepo struct {
 	ports.PricingRepository
 	ports.LedgerRepository
 	ports.ProcessedEventStore
+	ports.AuditLog
 }
 
 // autocommitUoW runs fn against the repositories directly, with no surrounding
@@ -34,11 +35,19 @@ func resolveUoW(d Deps) ports.UnitOfWork {
 	if d.UoW != nil {
 		return d.UoW
 	}
+	a := d.Audit
+	if a == nil {
+		// Keep the autocommit fallback panic-free when a use-case appends audit
+		// through the unit of work but no audit log was wired (unit tests with
+		// per-port fakes); production wires a real one (footgun guarded elsewhere).
+		a = noopAudit{}
+	}
 	return autocommitUoW{repo: directRepo{
 		PaymentRepository:   d.Payments,
 		TenantRepository:    d.Tenants,
 		PricingRepository:   d.Pricing,
 		LedgerRepository:    d.Ledger,
 		ProcessedEventStore: d.Processed,
+		AuditLog:            a,
 	}}
 }
