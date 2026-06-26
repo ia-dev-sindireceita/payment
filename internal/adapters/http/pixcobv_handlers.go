@@ -27,6 +27,9 @@ type cobvRequest struct {
 	DiscountFixedCents int64          `json:"discount_fixed_cents"`
 	Devedor            *pixDevedorReq `json:"devedor"`
 	CreditorKey        string         `json:"creditor_key"`
+	// Bank optionally selects which configured bank handles this cobv (multi-bank,
+	// SIN-66022); empty keeps header/default routing, overrides X-Bank-Id (ADR-0007).
+	Bank string `json:"bank"`
 }
 
 // cobvView is the JSON representation of a cobv charge returned to the tenant. The
@@ -109,6 +112,11 @@ func (s *Server) handleCreatePixCobV(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or missing due_date (RFC3339)")
 		return
 	}
+	nr, okBank := s.rebindBank(w, r, req.Bank)
+	if !okBank {
+		return
+	}
+	r = nr
 
 	p, res, err := s.pixCobV.CreateDueCharge(r.Context(), toDueChargeInput(tenantID, idemKey, req, due))
 	if err != nil {

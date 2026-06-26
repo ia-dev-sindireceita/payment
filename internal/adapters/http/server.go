@@ -31,6 +31,10 @@ type Server struct {
 	adminAuth   AdminPrincipalAuthenticator
 	webhookAuth WebhookAuthenticator
 	csrf        CSRFGuard
+	// bankResolver resolves and validates which bank a tenant request routes to
+	// (multi-bank selector, SIN-66022). When nil the tenant plane runs single-bank:
+	// no selector is read and every request resolves to the default bank.
+	bankResolver *BankResolver
 }
 
 // Config wires a Server's dependencies. Console and UI back the HTML admin
@@ -69,6 +73,12 @@ type Config struct {
 	TenantAuth  TenantAuthenticator
 	AdminAuth   AdminPrincipalAuthenticator
 	WebhookAuth WebhookAuthenticator
+	// BankResolver resolves and validates the per-request bank selector for the
+	// tenant plane (multi-bank routing, SIN-66022). It is built from the wired bank
+	// registry and the credential store. When nil, the tenant plane runs single-bank
+	// (every request routes to the default bank) — used by tests that exercise a
+	// single provider directly.
+	BankResolver *BankResolver
 	// SecureCookies sets the Secure attribute on cookies this adapter issues
 	// (CSRF token; the admin-UI session cookie via Server.CSRF). Driven by config
 	// because TLS is terminated at a proxy — see config.Config.SecureCookies.
@@ -78,21 +88,22 @@ type Config struct {
 // NewServer builds a Server from its config.
 func NewServer(c Config) *Server {
 	return &Server{
-		charges:     c.Charges,
-		pix:         c.Pix,
-		pixCobV:     c.PixCobV,
-		checkout:    c.Checkout,
-		boleto:      c.Boleto,
-		dda:         c.DDA,
-		statement:   c.Statement,
-		admin:       c.Admin,
-		console:     c.Console,
-		ui:          c.UI,
-		webhooks:    c.Webhooks,
-		tenantAuth:  c.TenantAuth,
-		adminAuth:   c.AdminAuth,
-		webhookAuth: c.WebhookAuth,
-		csrf:        NewCSRFGuard(c.SecureCookies),
+		charges:      c.Charges,
+		pix:          c.Pix,
+		pixCobV:      c.PixCobV,
+		checkout:     c.Checkout,
+		boleto:       c.Boleto,
+		dda:          c.DDA,
+		statement:    c.Statement,
+		admin:        c.Admin,
+		console:      c.Console,
+		ui:           c.UI,
+		webhooks:     c.Webhooks,
+		tenantAuth:   c.TenantAuth,
+		adminAuth:    c.AdminAuth,
+		webhookAuth:  c.WebhookAuth,
+		csrf:         NewCSRFGuard(c.SecureCookies),
+		bankResolver: c.BankResolver,
 	}
 }
 
@@ -139,6 +150,14 @@ func (s *Server) Router() http.Handler {
 	// Tenant API (TB1) — authenticated, tenant-scoped, rate-limited.
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(tenantAuthMiddleware(s.tenantAuth))
+		// Multi-bank routing (SIN-66022): resolve and validate the per-request bank
+		// selector right after the tenant is authenticated, so the resolved bank is
+		// stamped on the context for the output-port routers. Runs before the limiter
+		// so an unknown/unconfigured explicit bank is rejected with the uniform
+		// not-found error. Omitted in single-bank deployments (nil resolver).
+		if s.bankResolver != nil {
+			r.Use(bankRouteMiddleware(s.bankResolver))
+		}
 		r.Use(tenantLimiter.middleware(tenantOrIPKey))
 		r.Post("/charges", s.handleCreateCharge)
 		r.Get("/charges/{id}", s.handleGetCharge)
