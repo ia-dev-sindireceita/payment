@@ -90,7 +90,22 @@ func run(logger *log.Logger) error {
 		}
 	}
 
-	return registerAll(context.Background(), provider, cfg.WebhookRefs, c6Creds, baseURL, logger)
+	ctx := context.Background()
+	var errs []error
+	if err := registerAll(ctx, provider, cfg.WebhookRefs, c6Creds, baseURL, logger); err != nil {
+		errs = append(errs, err)
+	}
+	// PIX Automático (recorrência) callbacks (SIN-66036): the two singleton
+	// recurrence webhooks (webhookrec/webhookcobr) point at the SAME opaque
+	// per-tenant channel as the PIX webhook — C6 distinguishes the streams by the
+	// service field in the notification body, not by URL. Registering them is keyed
+	// by the tenant (no chave), so registerRecurrenceAll only needs the ref→tenant
+	// map. Failures are aggregated with the PIX pass so one stream's gap does not
+	// hide the other's outcome.
+	if err := registerRecurrenceAll(ctx, provider, cfg.WebhookRefs, baseURL, logger); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // registerAll registers and confirms the webhook for every (tenantRef -> tenantID)
@@ -148,6 +163,63 @@ func registerAll(ctx context.Context, reg ports.PixWebhookRegistrar, refs map[st
 		return fmt.Errorf("%d of %d webhook registration(s) failed", failures, len(tenantRefs))
 	}
 	logger.Printf("all %d webhook(s) registered and confirmed", len(tenantRefs))
+	return nil
+}
+
+// registerRecurrenceAll registers and confirms the two singleton recurrence
+// callbacks (webhookrec, webhookcobr) for every (tenantRef -> tenantID) entry. Both
+// point at the same per-tenant channel URL (/webhooks/c6/{ref}); C6 routes by the
+// service field, not the URL. Unlike the PIX webhook these are NOT keyed by a chave
+// (singleton per recebedor), so no creditor-key lookup is needed. Per-tenant/-stream
+// failures are aggregated so one bad tenant or stream does not abort the rest; the
+// secret ref and full URL are never logged. Refs are processed in a stable order.
+func registerRecurrenceAll(ctx context.Context, reg ports.RecurrenceWebhookRegistrar, refs map[string]string, baseURL string, logger *log.Logger) error {
+	tenantRefs := make([]string, 0, len(refs))
+	for ref := range refs {
+		tenantRefs = append(tenantRefs, ref)
+	}
+	sort.Strings(tenantRefs)
+
+	type stream struct {
+		name     string
+		register func(ctx context.Context, tenantID, webhookURL string) error
+		confirm  func(ctx context.Context, tenantID string) (ports.WebhookRegistration, error)
+	}
+	streams := []stream{
+		{"webhookrec", reg.RegisterRecWebhook, reg.GetRecWebhook},
+		{"webhookcobr", reg.RegisterCobRWebhook, reg.GetCobRWebhook},
+	}
+
+	var failures int
+	for _, ref := range tenantRefs {
+		tenantID := refs[ref]
+		// The callback URL embeds the secret ref; built here but never logged.
+		webhookURL := baseURL + "/webhooks/c6/" + ref
+		for _, st := range streams {
+			if err := st.register(ctx, tenantID, webhookURL); err != nil {
+				logger.Printf("tenant=%s %s: FAILED to register: %v", tenantID, st.name, err)
+				failures++
+				continue
+			}
+			got, err := st.confirm(ctx, tenantID)
+			if err != nil {
+				logger.Printf("tenant=%s %s: registered but FAILED to confirm: %v", tenantID, st.name, err)
+				failures++
+				continue
+			}
+			if got.WebhookURL != webhookURL {
+				logger.Printf("tenant=%s %s: confirmation MISMATCH — registered URL differs from readback", tenantID, st.name)
+				failures++
+				continue
+			}
+			logger.Printf("tenant=%s %s: OK (registered + confirmed)", tenantID, st.name)
+		}
+	}
+
+	if failures > 0 {
+		return fmt.Errorf("%d recurrence webhook registration(s) failed", failures)
+	}
+	logger.Printf("all recurrence webhook(s) registered and confirmed for %d tenant(s)", len(tenantRefs))
 	return nil
 }
 

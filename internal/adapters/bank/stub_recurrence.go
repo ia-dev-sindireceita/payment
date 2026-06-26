@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/url"
+	"strings"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
@@ -17,10 +19,70 @@ import (
 
 // compile-time assertions that StubProvider satisfies the Recorrência ports.
 var (
-	_ ports.RecProvider      = (*StubProvider)(nil)
-	_ ports.SolicRecProvider = (*StubProvider)(nil)
-	_ ports.CobRProvider     = (*StubProvider)(nil)
+	_ ports.RecProvider                = (*StubProvider)(nil)
+	_ ports.SolicRecProvider           = (*StubProvider)(nil)
+	_ ports.CobRProvider               = (*StubProvider)(nil)
+	_ ports.RecurrenceWebhookRegistrar = (*StubProvider)(nil)
 )
+
+// stubHTTPSURL reports whether raw is an absolute https:// URL with a host,
+// mirroring the real adapter's boundary check (a recurrence callback MUST be HTTPS
+// so the secret per-tenant ref it embeds is never sent in plaintext).
+func stubHTTPSURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" && u.Host != ""
+}
+
+// RegisterRecWebhook records the singleton Rec-status callback for the tenant.
+// HTTPS-only and tenant-scoped (the credential is resolved first), idempotent (a
+// re-register replaces the URL).
+func (s *StubProvider) RegisterRecWebhook(ctx context.Context, tenantID, webhookURL string) error {
+	return s.registerRecurrenceWebhook(ctx, tenantID, webhookURL, s.recWebhooks)
+}
+
+// GetRecWebhook reads back the registered Rec callback; unregistered → ErrNotFound.
+func (s *StubProvider) GetRecWebhook(ctx context.Context, tenantID string) (ports.WebhookRegistration, error) {
+	return s.getRecurrenceWebhook(ctx, tenantID, s.recWebhooks)
+}
+
+// RegisterCobRWebhook records the singleton CobR callback for the tenant.
+func (s *StubProvider) RegisterCobRWebhook(ctx context.Context, tenantID, webhookURL string) error {
+	return s.registerRecurrenceWebhook(ctx, tenantID, webhookURL, s.cobrWebhooks)
+}
+
+// GetCobRWebhook reads back the registered CobR callback; unregistered → ErrNotFound.
+func (s *StubProvider) GetCobRWebhook(ctx context.Context, tenantID string) (ports.WebhookRegistration, error) {
+	return s.getRecurrenceWebhook(ctx, tenantID, s.cobrWebhooks)
+}
+
+func (s *StubProvider) registerRecurrenceWebhook(ctx context.Context, tenantID, webhookURL string, into map[string]ports.WebhookRegistration) error {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(tenantID) == "" || !stubHTTPSURL(webhookURL) {
+		return shared.ErrValidation
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	into[tenantID] = ports.WebhookRegistration{WebhookURL: webhookURL, CreatedAt: s.now()}
+	return nil
+}
+
+func (s *StubProvider) getRecurrenceWebhook(ctx context.Context, tenantID string, from map[string]ports.WebhookRegistration) (ports.WebhookRegistration, error) {
+	if _, err := s.creds.GetBankCredential(ctx, tenantID, s.bankID); err != nil {
+		return ports.WebhookRegistration{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reg, ok := from[tenantID]
+	if !ok {
+		return ports.WebhookRegistration{}, shared.ErrNotFound
+	}
+	return reg, nil
+}
 
 // stubRecID derives a deterministic BACEN-shaped id ("RN"/"SC" + 27 hex = 29
 // chars, matching [a-zA-Z0-9]{29}) from a stable seed so a repeat create is
