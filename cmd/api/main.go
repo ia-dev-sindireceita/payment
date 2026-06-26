@@ -85,6 +85,8 @@ func run() error {
 		Pricing:         store,
 		Ledger:          store,
 		Processed:       store,
+		Recs:            store,
+		CobRs:           store,
 		Bus:             inmemory.NewBus(),
 		Bank:            routers.Bank,
 		Pix:             routers.Pix,
