@@ -76,6 +76,13 @@ type Repository interface {
 	PricingRepository
 	LedgerRepository
 	ProcessedEventStore
+	// AuditLog is bundled into the unit of work so a privileged action and its
+	// audit record commit (or roll back) together: the append runs on the SAME
+	// transaction handle as the triggering write (SaveTenant, MarkProcessed),
+	// closing the forensic-gap window where the action persisted but its audit
+	// record did not (or vice-versa). The standalone Deps.Audit port remains for
+	// callers that append outside a transaction (SIN-66025 / SIN-66016).
+	AuditLog
 }
 
 // UnitOfWork runs fn inside one atomic transaction. Every write performed through

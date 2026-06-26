@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
-	auditlog "github.com/ia-dev-sindireceita/payment/internal/adapters/audit/inmemory"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/bank"
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/bank/c6"
 	httpadapter "github.com/ia-dev-sindireceita/payment/internal/adapters/http"
@@ -55,11 +54,12 @@ func run() error {
 
 	store := sqlite.NewStore(db)
 	creds := secret.NewStore(cfg.BankCreds)
-	// Append-only audit trail for privileged admin-plane actions. The in-memory
-	// log is the foundation default; swap for a persisted append-only adapter
-	// without touching the use-cases. Wiring it here is mandatory — AdminService
-	// degrades to a no-op log when Audit is nil, which must never happen in prod.
-	audit := auditlog.NewLog()
+	// Durable, append-only audit trail for privileged admin-plane and money-movement
+	// actions (SIN-66025): the SQLite Store implements ports.AuditLog, so entries
+	// survive a restart and — when appended through the unit of work — commit
+	// atomically with the triggering write. Wiring it here is mandatory: AdminService
+	// and WebhookService degrade to a no-op log when Audit is nil, which must never
+	// happen in prod.
 
 	// Bank provider: use the real C6 adapter when its endpoints are configured,
 	// otherwise fall back to the in-memory stub (local dev / tests). The C6
@@ -106,7 +106,7 @@ func run() error {
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
-		Audit:           audit,
+		Audit:           store,
 		Clock:           system.Clock{},
 		IDs:             system.IDProvider{},
 		// Transactional boundary for the multi-write use-cases (charge creation,

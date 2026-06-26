@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
@@ -26,6 +27,7 @@ type Store struct {
 	pricing   map[string]billing.EndpointPricing // keyed by tenantID+"\x00"+endpoint
 	ledger    []billing.LedgerEntry
 	processed map[string]struct{} // keyed by tenantID+"\x00"+eventKey
+	audit     []audit.Entry       // append-only audit trail (mirrors audit_log)
 }
 
 // NewStore returns an empty in-memory store.
@@ -44,6 +46,7 @@ var (
 	_ ports.PricingRepository   = (*Store)(nil)
 	_ ports.LedgerRepository    = (*Store)(nil)
 	_ ports.ProcessedEventStore = (*Store)(nil)
+	_ ports.AuditLog            = (*Store)(nil)
 	_ ports.Repository          = (*Store)(nil)
 	_ ports.UnitOfWork          = (*Store)(nil)
 )
@@ -195,6 +198,24 @@ func (s *Store) LedgerLen() int {
 	return len(s.ledger)
 }
 
+// Append records an audit entry (append-only). Mirrors the SQLite adapter: the
+// entry is durable and never updated or removed.
+func (s *Store) Append(ctx context.Context, e audit.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.appendAudit(e)
+}
+
+// AuditEntries returns a copy of the recorded audit entries in append order. A
+// copy is returned so callers can never mutate the trail (append-only integrity).
+func (s *Store) AuditEntries() []audit.Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]audit.Entry, len(s.audit))
+	copy(out, s.audit)
+	return out
+}
+
 // --- Unit of work ---
 
 // WithinTx runs fn inside a single atomic transaction. The whole store is locked
@@ -223,6 +244,7 @@ type snapshot struct {
 	pricing   map[string]billing.EndpointPricing
 	ledger    []billing.LedgerEntry
 	processed map[string]struct{}
+	audit     []audit.Entry
 }
 
 func (s *Store) snapshot() snapshot {
@@ -244,7 +266,9 @@ func (s *Store) snapshot() snapshot {
 	}
 	ledger := make([]billing.LedgerEntry, len(s.ledger))
 	copy(ledger, s.ledger)
-	return snapshot{tenants: tenants, payments: payments, pricing: pricing, ledger: ledger, processed: processed}
+	auditCopy := make([]audit.Entry, len(s.audit))
+	copy(auditCopy, s.audit)
+	return snapshot{tenants: tenants, payments: payments, pricing: pricing, ledger: ledger, processed: processed, audit: auditCopy}
 }
 
 func (s *Store) restore(snap snapshot) {
@@ -253,6 +277,7 @@ func (s *Store) restore(snap snapshot) {
 	s.pricing = snap.pricing
 	s.ledger = snap.ledger
 	s.processed = snap.processed
+	s.audit = snap.audit
 }
 
 // --- Lock-free core (callers must hold s.mu) ---
@@ -335,6 +360,11 @@ func (s *Store) markProcessed(tenantID, eventKey string) (bool, error) {
 	return true, nil
 }
 
+func (s *Store) appendAudit(e audit.Entry) error {
+	s.audit = append(s.audit, e)
+	return nil
+}
+
 // txView is the tenant-scoped ports.Repository handed to a WithinTx callback. It
 // delegates to the lock-free core; the surrounding WithinTx holds s.mu.
 type txView struct{ s *Store }
@@ -379,4 +409,10 @@ func (v txView) AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) er
 
 func (v txView) MarkProcessed(ctx context.Context, tenantID, eventKey string) (bool, error) {
 	return v.s.markProcessed(tenantID, eventKey)
+}
+
+// Append records an audit entry within the unit of work; it is rolled back with
+// the rest of the transaction (the audit slice is part of the snapshot).
+func (v txView) Append(ctx context.Context, e audit.Entry) error {
+	return v.s.appendAudit(e)
 }
