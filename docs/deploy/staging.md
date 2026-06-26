@@ -187,9 +187,22 @@ PAYMENT_C6_TOKEN_URL=https://REPLACE-c6-token
 # Do NOT put a placeholder value here — empty is the working config (SIN-65917).
 PAYMENT_C6_SCOPE=
 
-# Per-tenant bank credentials: "tenant:client_id:secret,..." (client_id is
-# cross-checked against the webhook body). Real values from the secret manager.
-PAYMENT_BANK_CREDS=REPLACE-tenantId:REPLACE-c6-client:REPLACE-c6-secret
+# Per-tenant, per-bank credentials. CANONICAL form is 4-field
+# "tenant:bank:client_id:secret,..." (the bank slug — e.g. `c6` — sits BEFORE the
+# client_id; client_id is cross-checked against the webhook body). Real values
+# from the secret manager. The secret is the greedy ':'-tolerant tail, so a secret
+# that itself contains ':' is preserved verbatim.
+#
+# ⚠️ MIGRATION (SIN-66015 / ADR-0007): the legacy 3-field form
+# "tenant:client_id:secret" is still accepted and defaults the bank to `c6`, BUT a
+# legacy secret that contains a ':' is AMBIGUOUS — it parses as the 4-field form
+# (the client_id is read as the bank slug). That entry fails CLOSED (orphan slot ⇒
+# no token minted ⇒ no leak), but silently. ALWAYS write the explicit 4-field form
+# with `c6` for C6 tenants so there is no ambiguity:
+#   PAYMENT_BANK_CREDS=REPLACE-tenantId:c6:REPLACE-c6-client:REPLACE-c6-secret
+# Verify after start that the startup log lists exactly the (tenant, bank) pairs
+# you expect (see §9) — an unexpected pair means a misparse to fix before traffic.
+PAYMENT_BANK_CREDS=REPLACE-tenantId:c6:REPLACE-c6-client:REPLACE-c6-secret
 
 # Per-tenant PIX creditor key (chave do recebedor): "tenant:creditorKey,...".
 # SEPARATE var from PAYMENT_BANK_CREDS (a PIX key may contain ':'; split is on the
@@ -223,6 +236,21 @@ sudo systemctl start payment-api
 sudo systemctl status payment-api --no-pager
 curl -fsS http://127.0.0.1:8080/healthz   # expect {"status":"ok","version":...,"commit":...}
 ```
+
+**Confirm the loaded bank credentials (SIN-66015).** On startup the service logs
+one `loaded bank credentials` line at info level listing the non-secret
+`(tenant, bank)` pairs it parsed (only the tenant id and bank slug — never the
+client_id, secret, or creditor key). Confirm it matches what you configured:
+
+```bash
+sudo journalctl -u payment-api --no-pager | grep "loaded bank credentials" | tail -1
+# expect e.g. count=1 ... tenant_bank_pairs="[REPLACE-tenantId/c6]"
+```
+
+If a pair you did NOT configure appears (e.g. a "bank" that is actually a
+client_id), a legacy colon-bearing secret misparsed — fix the entry to the
+explicit 4-field `tenant:c6:client:secret` form (see §8) and restart before
+routing traffic. `count=0` means no credentials were parsed at all.
 
 From here, pushes to upstream `main` that pass `CI` auto-deploy via `cd-stg.yml`,
 or trigger a manual deploy from the Actions tab (`workflow_dispatch`).

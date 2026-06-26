@@ -7,6 +7,7 @@ package config
 import (
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +65,9 @@ type C6Config struct {
 
 // FromEnv builds a Config from environment variables, applying safe defaults.
 func FromEnv() Config {
+	logger := slog.Default()
+	bankCreds := mergeCreditorKeys(parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS"), logger), os.Getenv("PAYMENT_BANK_CREDITOR_KEYS"), logger)
+	logLoadedBankCreds(bankCreds, logger)
 	return Config{
 		HTTPAddr:       getenv("PAYMENT_HTTP_ADDR", ":8080"),
 		DBPath:         getenv("PAYMENT_DB_PATH", "payment.db"),
@@ -71,7 +75,7 @@ func FromEnv() Config {
 		AdminTokens:    splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
 		OperatorTokens: splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
 		WebhookRefs:    parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
-		BankCreds:      mergeCreditorKeys(parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS"), slog.Default()), os.Getenv("PAYMENT_BANK_CREDITOR_KEYS"), slog.Default()),
+		BankCreds:      bankCreds,
 		RabbitURL:      os.Getenv("PAYMENT_RABBIT_URL"),
 		SecureCookies:  getenvBool("PAYMENT_SECURE_COOKIES", true),
 		C6: C6Config{
@@ -140,6 +144,32 @@ func parseKV(s string) map[string]string {
 // one bank without one overwriting another (ADR-0007). The NUL separator can
 // appear in neither a tenant id nor a bank slug, so distinct pairs never collide.
 func bankCredKey(tenant, bank string) string { return tenant + "\x00" + bank }
+
+// logLoadedBankCreds emits, at info level, the list of (tenant, bank) pairs that
+// were successfully loaded into the credential map. ONLY the non-secret routing
+// identifiers (tenant id and bank slug) are logged — NEVER the clientID, secret,
+// or creditor key (threat C1/C4). The pairs are sorted for a stable, diffable
+// startup line so an operator can confirm at a glance that the expected
+// (tenant, bank) slots were parsed. This surfaces a silent misparse of an
+// ambiguous colon-bearing legacy secret (SIN-66015/SIN-66021): an unexpected
+// orphan pair — e.g. one whose "bank" is what used to be the clientID — shows up
+// in the startup line instead of failing opaquely later at the PSP. The count is
+// logged separately so an empty map (no credentials configured) is still visible.
+func logLoadedBankCreds(creds map[string]ports.BankCredential, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	pairs := make([]string, 0, len(creds))
+	for _, c := range creds {
+		// "tenant/bank" — both are non-secret routing identifiers. We surface ONLY
+		// TenantID and BankID; the clientID, secret and creditor key never appear.
+		pairs = append(pairs, c.TenantID+"/"+c.BankID)
+	}
+	sort.Strings(pairs)
+	logger.Info("loaded bank credentials",
+		slog.Int("count", len(creds)),
+		slog.Any("tenant_bank_pairs", pairs))
+}
 
 // parseBankCreds parses the PAYMENT_BANK_CREDS list into per-(tenant, bank)
 // credentials. Two entry shapes are accepted (ADR-0007 / SIN-66015):
