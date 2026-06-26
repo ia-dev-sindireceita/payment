@@ -61,6 +61,13 @@ type C6Config struct {
 	// (threat C1); only the path comes from the environment.
 	ClientCertPath string
 	ClientKeyPath  string
+	// RecJWKSURL is the absolute https URL of C6's JWKS used to verify the JWS-signed
+	// PIX Automático (Recorrência) reads (rec/solicrec/cobr GETs, Accept:
+	// application/jose). When empty those reads fail secure (ErrUnavailable) — the
+	// recurrence read path stays disabled rather than trusting an unverified mandate
+	// document, the correct interim until F4 go-live (SIN-66061). It is a URL, never
+	// a secret: only public keys are served from it.
+	RecJWKSURL string
 }
 
 // FromEnv builds a Config from environment variables, applying safe defaults.
@@ -85,6 +92,7 @@ func FromEnv() Config {
 			Timeout:        getenvDuration("PAYMENT_C6_TIMEOUT", 15*time.Second),
 			ClientCertPath: os.Getenv("PAYMENT_C6_CLIENT_CERT"),
 			ClientKeyPath:  os.Getenv("PAYMENT_C6_CLIENT_KEY"),
+			RecJWKSURL:     os.Getenv("PAYMENT_C6_REC_JWKS_URL"),
 		},
 	}
 }
