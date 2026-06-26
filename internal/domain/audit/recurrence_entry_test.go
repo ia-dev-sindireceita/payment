@@ -50,6 +50,53 @@ func TestNewRecurrenceTransitionEntry(t *testing.T) {
 	}
 }
 
+func TestNewCobROriginationEntry(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1700000000, 0).UTC()
+
+	e, err := audit.NewCobROriginationEntry("  ev-1 ", " op-2 ", " ten-3 ", "  tx-9  ", at)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if e.Action() != audit.ActionCobRCreated {
+		t.Errorf("action = %q, want %q", e.Action(), audit.ActionCobRCreated)
+	}
+	if e.ID() != "ev-1" || e.OperatorID() != "op-2" || e.TenantID() != "ten-3" {
+		t.Errorf("fields not trimmed: %+v", e)
+	}
+	// The subject charge txid is carried in the TxID field.
+	if e.TxID() != "tx-9" {
+		t.Errorf("txid subject = %q, want tx-9", e.TxID())
+	}
+	// A CobR origination carries no money-mismatch fields and no bank slug.
+	if e.ExpectedCents() != 0 || e.ReceivedCents() != 0 || e.BankID() != "" {
+		t.Errorf("unexpected non-zero money/bank fields: %+v", e)
+	}
+}
+
+func TestNewCobROriginationEntryRejects(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1700000000, 0).UTC()
+
+	tests := []struct {
+		name              string
+		id, operator, ten string
+		txID              string
+	}{
+		{"empty id", "  ", "op", "ten", "tx"},
+		{"empty tenant", "ev", "op", " ", "tx"},
+		{"empty txid", "ev", "op", "ten", "  "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := audit.NewCobROriginationEntry(tc.id, tc.operator, tc.ten, tc.txID, at)
+			if !errors.Is(err, shared.ErrValidation) {
+				t.Fatalf("want validation error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestNewRecurrenceTransitionEntryRejects(t *testing.T) {
 	t.Parallel()
 	at := time.Unix(1700000000, 0).UTC()
