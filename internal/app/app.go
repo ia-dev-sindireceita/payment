@@ -19,8 +19,15 @@ type Deps struct {
 	Pricing   ports.PricingRepository
 	Ledger    ports.LedgerRepository
 	Processed ports.ProcessedEventStore
-	Bus       ports.MessageBus
-	Bank      ports.BankProvider
+	// Recs / CobRs are the PIX Automático (recorrência) durable repositories
+	// (SIN-66037). They are bundled into the transactional Repository so a mandate
+	// status transition and its audit entry commit atomically. Optional in unit
+	// tests using per-port fakes; production wires the storage adapter as UoW (which
+	// implements them), so the autocommit fallback rarely uses these directly.
+	Recs  ports.RecRepository
+	CobRs ports.CobRRepository
+	Bus   ports.MessageBus
+	Bank  ports.BankProvider
 	// Pix is the immediate-PIX-charge port (cobrança imediata). It is segregated
 	// from Bank (ISP): PixService depends only on it. In production it is the C6
 	// provider itself (the raw PixProvider, NOT the settlement wrapper); in stub mode

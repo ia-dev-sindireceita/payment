@@ -14,6 +14,7 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/recurrence"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 )
 
@@ -66,17 +67,42 @@ type LedgerRepository interface {
 	AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) error
 }
 
+// RecRepository persists PIX Automático recurring-debit mandates (recurrence.Rec).
+// Every read is tenant-scoped — the tenant comes from the authenticated credential,
+// never from client input (threat P1 IDOR). Save is an upsert keyed by idRec so a
+// reconciled status transition (Rec.Transition) is persisted by re-saving the
+// aggregate; pairing the save with its audit entry inside one WithinTx makes the
+// transition and its forensic record atomic.
+type RecRepository interface {
+	SaveRec(ctx context.Context, r *recurrence.Rec) error
+	FindRecByID(ctx context.Context, tenantID, idRec string) (*recurrence.Rec, error)
+}
+
+// CobRRepository persists the recurring charge instances (recurrence.CobR) of a
+// mandate's cycle. Tenant-scoped like RecRepository; Save is an upsert keyed by
+// the charge txid (the anti-double-bill anchor). The cycle-listing read
+// (ListCobRByRec) is kept off this port — like ListLedgerEntries — so the write
+// surface bundled into the transactional Repository stays minimal and runs on a
+// single-row tx handle; the concrete store exposes the listing for the cycle view.
+type CobRRepository interface {
+	SaveCobR(ctx context.Context, c *recurrence.CobR) error
+	FindCobRByTxID(ctx context.Context, tenantID, txID string) (*recurrence.CobR, error)
+}
+
 // Repository is the tenant-scoped persistence surface that can take part in a
 // single unit of work. It bundles the individual repository ports so a use-case
 // can perform several writes that must commit or roll back together — the
 // transactional boundary financial integrity depends on (no payment without its
-// ledger entry, no event marked processed without its settlement).
+// ledger entry, no event marked processed without its settlement, no recurrence
+// transition without its audit entry).
 type Repository interface {
 	PaymentRepository
 	TenantRepository
 	PricingRepository
 	LedgerRepository
 	ProcessedEventStore
+	RecRepository
+	CobRRepository
 	// AuditLog is bundled into the unit of work so a privileged action and its
 	// audit record commit (or roll back) together: the append runs on the SAME
 	// transaction handle as the triggering write (SaveTenant, MarkProcessed),

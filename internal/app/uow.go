@@ -15,6 +15,8 @@ type directRepo struct {
 	ports.PricingRepository
 	ports.LedgerRepository
 	ports.ProcessedEventStore
+	ports.RecRepository
+	ports.CobRRepository
 	ports.AuditLog
 }
 
@@ -48,6 +50,8 @@ func resolveUoW(d Deps) ports.UnitOfWork {
 		PricingRepository:   d.Pricing,
 		LedgerRepository:    d.Ledger,
 		ProcessedEventStore: d.Processed,
+		RecRepository:       d.Recs,
+		CobRRepository:      d.CobRs,
 		AuditLog:            a,
 	}}
 }

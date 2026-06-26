@@ -14,6 +14,7 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/recurrence"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
@@ -26,8 +27,10 @@ type Store struct {
 	payments  map[string]*payment.Payment        // keyed by tenantID+"\x00"+id
 	pricing   map[string]billing.EndpointPricing // keyed by tenantID+"\x00"+endpoint
 	ledger    []billing.LedgerEntry
-	processed map[string]struct{} // keyed by tenantID+"\x00"+eventKey
-	audit     []audit.Entry       // append-only audit trail (mirrors audit_log)
+	processed map[string]struct{}         // keyed by tenantID+"\x00"+eventKey
+	audit     []audit.Entry               // append-only audit trail (mirrors audit_log)
+	recs      map[string]*recurrence.Rec  // keyed by tenantID+"\x00"+idRec
+	cobrs     map[string]*recurrence.CobR // keyed by tenantID+"\x00"+txID
 }
 
 // NewStore returns an empty in-memory store.
@@ -37,6 +40,8 @@ func NewStore() *Store {
 		payments:  make(map[string]*payment.Payment),
 		pricing:   make(map[string]billing.EndpointPricing),
 		processed: make(map[string]struct{}),
+		recs:      make(map[string]*recurrence.Rec),
+		cobrs:     make(map[string]*recurrence.CobR),
 	}
 }
 
@@ -46,6 +51,8 @@ var (
 	_ ports.PricingRepository   = (*Store)(nil)
 	_ ports.LedgerRepository    = (*Store)(nil)
 	_ ports.ProcessedEventStore = (*Store)(nil)
+	_ ports.RecRepository       = (*Store)(nil)
+	_ ports.CobRRepository      = (*Store)(nil)
 	_ ports.AuditLog            = (*Store)(nil)
 	_ ports.Repository          = (*Store)(nil)
 	_ ports.UnitOfWork          = (*Store)(nil)
@@ -245,6 +252,8 @@ type snapshot struct {
 	ledger    []billing.LedgerEntry
 	processed map[string]struct{}
 	audit     []audit.Entry
+	recs      map[string]*recurrence.Rec
+	cobrs     map[string]*recurrence.CobR
 }
 
 func (s *Store) snapshot() snapshot {
@@ -268,7 +277,15 @@ func (s *Store) snapshot() snapshot {
 	copy(ledger, s.ledger)
 	auditCopy := make([]audit.Entry, len(s.audit))
 	copy(auditCopy, s.audit)
-	return snapshot{tenants: tenants, payments: payments, pricing: pricing, ledger: ledger, processed: processed, audit: auditCopy}
+	recs := make(map[string]*recurrence.Rec, len(s.recs))
+	for k, v := range s.recs {
+		recs[k] = v
+	}
+	cobrs := make(map[string]*recurrence.CobR, len(s.cobrs))
+	for k, v := range s.cobrs {
+		cobrs[k] = v
+	}
+	return snapshot{tenants: tenants, payments: payments, pricing: pricing, ledger: ledger, processed: processed, audit: auditCopy, recs: recs, cobrs: cobrs}
 }
 
 func (s *Store) restore(snap snapshot) {
@@ -278,6 +295,8 @@ func (s *Store) restore(snap snapshot) {
 	s.ledger = snap.ledger
 	s.processed = snap.processed
 	s.audit = snap.audit
+	s.recs = snap.recs
+	s.cobrs = snap.cobrs
 }
 
 // --- Lock-free core (callers must hold s.mu) ---
