@@ -6,6 +6,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
@@ -71,6 +72,22 @@ func (s *AdminService) recordAudit(ctx context.Context, action audit.Action, ten
 	return nil
 }
 
+// recordCredentialAudit appends the audit entry for a bank credential write. It
+// is the credential-specific sibling of recordAudit: it carries the non-secret
+// bankID so the trail records which bank's credential was set, while still
+// deriving the operator server-side and never recording the secret/client id. The
+// append is fail-closed (an error surfaces rather than dropping the record).
+func (s *AdminService) recordCredentialAudit(ctx context.Context, tenantID, bankID string) error {
+	e, err := audit.NewCredentialSetEntry(s.ids.NewID(), OperatorIDFromContext(ctx), tenantID, bankID, s.clock.Now())
+	if err != nil {
+		return fmt.Errorf("build audit entry: %w", err)
+	}
+	if err := s.audit.Append(ctx, e); err != nil {
+		return fmt.Errorf("append audit entry: %w", err)
+	}
+	return nil
+}
+
 // CreateTenant provisions a new tenant and returns it.
 func (s *AdminService) CreateTenant(ctx context.Context, name string) (*tenant.Tenant, error) {
 	t, err := tenant.New(s.ids.NewID(), name, s.clock.Now())
@@ -106,20 +123,26 @@ func (s *AdminService) SetEndpointPrice(ctx context.Context, tenantID, endpoint 
 }
 
 // SetBankCredential stores a tenant's bank (PSP) credential via the secret-store
-// write port. The target tenant must exist (defense-in-depth alongside the
-// boundary RBAC + tenant-scope checks). The secret is passed straight through to
-// the writer: it never enters domain state, and on failure the returned error
-// wraps only sentinel/validation context — never the secret value (threat
-// C1/C4). The caller (admin handler) supplies tenantID explicitly; admin crosses
-// tenants by design but every credential write names exactly one tenant.
-func (s *AdminService) SetBankCredential(ctx context.Context, tenantID, clientID, secret string) error {
+// write port, keyed by the (tenantID, bank) pair (ADR-0007 / SIN-66015). The
+// target tenant must exist (defense-in-depth alongside the boundary RBAC +
+// tenant-scope checks) and bank must name a supported bank (deny-by-default): an
+// empty bank resolves to the default BankIDC6 (retro-compat) and an unknown slug
+// is rejected as a validation error before any write. The secret is passed
+// straight through to the writer: it never enters domain state, and on failure
+// the returned error wraps only sentinel/validation context — never the secret
+// value (threat C1/C4). The caller (admin handler) supplies tenantID explicitly;
+// admin crosses tenants by design but every credential write names exactly one
+// (tenant, bank).
+func (s *AdminService) SetBankCredential(ctx context.Context, tenantID, bank, clientID, secret string) error {
+	bank = ports.NormalizeBankID(bank)
+	if !ports.IsKnownBankID(bank) {
+		// Reject an unknown bank without echoing any input back (deny-by-default).
+		return shared.NewValidationError("bank", "unknown bank")
+	}
 	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
 		return fmt.Errorf("resolve tenant: %w", err)
 	}
-	// The admin write path is single-bank for now: it persists under the default
-	// bank (BankIDC6), preserving current behaviour. A per-bank selector on this
-	// path is the routing workstream (SIN-66022), not this schema change.
-	if err := s.credWriter.SetBankCredential(ctx, tenantID, ports.BankIDC6, clientID, secret); err != nil {
+	if err := s.credWriter.SetBankCredential(ctx, tenantID, bank, clientID, secret); err != nil {
 		// Wrap with a non-sensitive context only; never include the secret.
 		return fmt.Errorf("set bank credential: %w", err)
 	}
@@ -128,9 +151,10 @@ func (s *AdminService) SetBankCredential(ctx context.Context, tenantID, clientID
 	// bearer expires (token-revocation lag, ADR-0003). Best-effort and local; the
 	// write has already committed and a missing cache entry is a no-op.
 	s.credEvictor.InvalidateToken(tenantID)
-	// Audit records who set a credential for which tenant — never the secret or
-	// even the client id (the entry carries only who/what/tenant/when).
-	if err := s.recordAudit(ctx, audit.ActionSetBankCredential, tenantID); err != nil {
+	// Audit records who set a credential for which tenant AND which bank — the
+	// bank id is a non-secret routing slug; the secret and client id are NEVER
+	// recorded (threat C1/C4).
+	if err := s.recordCredentialAudit(ctx, tenantID, bank); err != nil {
 		return err
 	}
 	return nil
