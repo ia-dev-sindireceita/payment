@@ -61,33 +61,23 @@ func run() error {
 	// and WebhookService degrade to a no-op log when Audit is nil, which must never
 	// happen in prod.
 
-	// Bank provider: use the real C6 adapter when its endpoints are configured,
-	// otherwise fall back to the in-memory stub (local dev / tests). The C6
-	// adapter rejects non-HTTPS endpoints, so a misconfigured URL fails startup
-	// rather than silently downgrading the transport.
-	bankProvider, pixProvider, err := newBankProvider(cfg, creds)
+	// Bank registry (multi-bank, SIN-66022): one ProviderSet per wired bank — the
+	// real C6 adapter when its endpoints are configured, otherwise the in-memory stub
+	// (local dev / tests). The C6 adapter rejects non-HTTPS endpoints, so a
+	// misconfigured URL fails startup rather than silently downgrading the transport.
+	registry, err := newBankRegistry(cfg, creds)
 	if err != nil {
 		return err
 	}
-	// Credential-cache invalidator (ADR-0003): the C6 provider implements it and
-	// the settlement wrapper forwards it; the stub does not implement it, so this
-	// assertion yields nil and the admin services fall back to a no-op evictor.
-	credInvalidator, _ := bankProvider.(ports.CredentialInvalidator)
-	// The raw provider (c6p in production, the stub in stub mode) also satisfies the
-	// segregated checkout port; the settlement wrapper does not, so derive it from
-	// pixProvider (the raw provider) rather than bankProvider.
-	checkoutProvider, _ := pixProvider.(ports.CheckoutProvider)
-	// The raw provider also satisfies the segregated boleto port (BolePix grupos 1–6).
-	boletoProvider, _ := pixProvider.(ports.BoletoProvider)
-	// The raw provider also satisfies the segregated cobv port (PIX cobrança com
-	// vencimento, roteiro 7.5–7.8), kept apart from the immediate Pix port (ISP).
-	cobvProvider, _ := pixProvider.(ports.PixDueChargeProvider)
-	// The raw provider also satisfies the segregated DDA port (agendamento de
-	// pagamentos, roteiro grupo 8), kept apart from the other bank ports (ISP).
-	ddaProvider, _ := pixProvider.(ports.DDAProvider)
-	// The raw provider also satisfies the segregated statement port (extrato, roteiro
-	// grupo 13), kept apart from the other bank ports (ISP).
-	statementProvider, _ := pixProvider.(ports.StatementProvider)
+	// The per-port routers dispatch each request to the bank resolved at the HTTP
+	// boundary (carried on the context). The application services depend on these,
+	// not on a single bank instance, so adding a bank is a wiring change only.
+	routers := bank.NewRouters(registry)
+	// Credential-cache invalidator (ADR-0003): fans a tenant's token-cache eviction
+	// out to every wired bank that caches credential state (the C6 settlement wrapper
+	// forwards InvalidateToken; the stub caches nothing). Nil when no bank caches
+	// anything, so the admin services fall back to a no-op evictor.
+	credInvalidator := registry.CredentialInvalidator()
 
 	deps := app.Deps{
 		Payments:        store,
@@ -96,13 +86,13 @@ func run() error {
 		Ledger:          store,
 		Processed:       store,
 		Bus:             inmemory.NewBus(),
-		Bank:            bankProvider,
-		Pix:             pixProvider,
-		PixDueCharge:    cobvProvider,
-		Checkout:        checkoutProvider,
-		Boleto:          boletoProvider,
-		DDA:             ddaProvider,
-		Statement:       statementProvider,
+		Bank:            routers.Bank,
+		Pix:             routers.Pix,
+		PixDueCharge:    routers.PixDueCharge,
+		Checkout:        routers.Checkout,
+		Boleto:          routers.Boleto,
+		DDA:             routers.DDA,
+		Statement:       routers.Statement,
 		Credentials:     creds,
 		CredWriter:      creds,
 		CredInvalidator: credInvalidator,
@@ -165,20 +155,25 @@ func run() error {
 		IDs:             system.IDProvider{},
 	})
 	srv := httpadapter.NewServer(httpadapter.Config{
-		Charges:       app.NewChargeService(deps),
-		Pix:           app.NewPixService(deps),
-		PixCobV:       app.NewPixDueChargeService(deps),
-		Checkout:      app.NewCheckoutService(deps),
-		Boleto:        app.NewBoletoService(deps),
-		DDA:           app.NewDDAService(deps),
-		Statement:     app.NewStatementService(deps),
-		Admin:         app.NewAdminService(deps),
-		Console:       console,
-		UI:            ui,
-		Webhooks:      app.NewWebhookService(deps),
-		TenantAuth:    auth,
-		AdminAuth:     auth,
-		WebhookAuth:   auth,
+		Charges:     app.NewChargeService(deps),
+		Pix:         app.NewPixService(deps),
+		PixCobV:     app.NewPixDueChargeService(deps),
+		Checkout:    app.NewCheckoutService(deps),
+		Boleto:      app.NewBoletoService(deps),
+		DDA:         app.NewDDAService(deps),
+		Statement:   app.NewStatementService(deps),
+		Admin:       app.NewAdminService(deps),
+		Console:     console,
+		UI:          ui,
+		Webhooks:    app.NewWebhookService(deps),
+		TenantAuth:  auth,
+		AdminAuth:   auth,
+		WebhookAuth: auth,
+		// Multi-bank selector (SIN-66022): resolve+validate the per-request bank
+		// against the wired registry and the tenant's configured credentials
+		// (deny-by-default, no oracle). The tenant plane reads X-Bank-Id / the DTO
+		// `bank` field and routes accordingly.
+		BankResolver:  httpadapter.NewBankResolver(registry.Banks(), creds),
 		SecureCookies: cfg.SecureCookies,
 	})
 
@@ -208,33 +203,27 @@ func run() error {
 	return httpServer.Shutdown(shutdownCtx)
 }
 
-// newBankProvider selects the bank adapter. When the C6 base URL is configured it
-// builds the real C6 provider (OAuth2 + HTTPS transport + error mapping);
-// otherwise it returns the in-memory stub so local dev and tests still boot.
+// newBankRegistry builds the multi-bank registry (SIN-66022): one ProviderSet per
+// wired bank. Today the platform integrates a single bank, C6 — the real adapter
+// when its endpoints are configured (OAuth2 + HTTPS transport + error mapping),
+// otherwise the in-memory stub so local dev and tests still boot. Adding a second
+// bank is a Register call here; nothing downstream changes (the services depend on
+// the routers, not on a bank instance).
 //
 // For C6 the settlement reconcile read is routed through the BACEN-verified PIX
 // immediate-charge read (GetImmediateCharge / GET …/v1/pix/{txid}), NOT the
 // speculative generic GET /charges/{txid} (SIN-64780 routing decision, CTO on
-// SIN-64791). The C6 provider satisfies both BankProvider and PixProvider, so it
-// is wrapped in PixSettlementProvider: charge creation stays on the generic port
-// while the settlement reconcile read resolves through the verified PIX shape.
-//
-// The C6 provider owns the per-tenant OAuth2 token cache and implements
-// ports.CredentialInvalidator; the PixSettlementProvider wrapper forwards that
-// capability, so run() recovers the invalidator with a single type assertion on
-// the returned provider (the stub holds no cache and does not implement it, which
-// degrades to a no-op in the admin services — ADR-0003).
-// It returns the generic BankProvider (charge creation + settlement reconcile via
-// the PIX-verified read) AND the raw PixProvider for the immediate-PIX-charge
-// use-case (PixService). In stub mode both are the same in-memory StubProvider; for
-// C6 the BankProvider is the settlement wrapper while the PixProvider is the raw C6
-// provider (PixService must speak the BACEN PIX shape directly, not through the
-// generic settlement translation).
-func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.BankProvider, ports.PixProvider, error) {
+// SIN-64791). The C6 provider satisfies both BankProvider and PixProvider, so it is
+// wrapped in PixSettlementProvider for the generic Bank port (charge creation +
+// settlement reconcile via the verified PIX shape) while the raw provider backs the
+// immediate-PIX-charge port (PixService must speak the BACEN PIX shape directly).
+func newBankRegistry(cfg config.Config, creds ports.CredentialStore) (*bank.Registry, error) {
+	reg := bank.NewRegistry()
 	if cfg.C6.BaseURL == "" {
 		log.Print("api: PAYMENT_C6_BASE_URL not set — using in-memory bank stub")
 		stub := bank.NewStubProvider(creds)
-		return stub, stub, nil
+		reg.Register(ports.BankIDC6, buildProviderSet(stub, stub))
+		return reg, nil
 	}
 	c6cfg := c6.Config{
 		BaseURL:  cfg.C6.BaseURL,
@@ -250,14 +239,46 @@ func newBankProvider(cfg config.Config, creds ports.CredentialStore) (ports.Bank
 	if cfg.C6.ClientCertPath != "" || cfg.C6.ClientKeyPath != "" {
 		httpc, err := c6.MTLSHTTPClient(cfg.C6.ClientCertPath, cfg.C6.ClientKeyPath, cfg.C6.Timeout)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		c6cfg.HTTPClient = httpc
 		log.Print("api: C6 mTLS client certificate loaded")
 	}
 	c6p, err := c6.New(c6cfg, creds)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return bank.NewPixSettlementProvider(c6p, c6p), c6p, nil
+	reg.Register(ports.BankIDC6, buildProviderSet(bank.NewPixSettlementProvider(c6p, c6p), c6p))
+	return reg, nil
+}
+
+// buildProviderSet assembles one bank's ProviderSet from its generic BankProvider
+// (charge creation + settlement reconcile) and its raw PixProvider. The segregated
+// product ports (cobv, checkout, boleto, DDA, statement) are derived from the raw
+// provider — the same instance implements them all in both the C6 and stub cases —
+// while the credential-cache invalidator is derived from the generic provider (the
+// C6 settlement wrapper forwards InvalidateToken; the stub implements neither, so
+// its set carries nil and the admin services fall back to a no-op evictor, ADR-0003).
+// A port the bank does not implement is left nil and the router fails closed for it.
+func buildProviderSet(generic ports.BankProvider, raw ports.PixProvider) bank.ProviderSet {
+	set := bank.ProviderSet{Bank: generic, Pix: raw}
+	if v, ok := raw.(ports.PixDueChargeProvider); ok {
+		set.PixDueCharge = v
+	}
+	if v, ok := raw.(ports.CheckoutProvider); ok {
+		set.Checkout = v
+	}
+	if v, ok := raw.(ports.BoletoProvider); ok {
+		set.Boleto = v
+	}
+	if v, ok := raw.(ports.DDAProvider); ok {
+		set.DDA = v
+	}
+	if v, ok := raw.(ports.StatementProvider); ok {
+		set.Statement = v
+	}
+	if v, ok := generic.(ports.CredentialInvalidator); ok {
+		set.CredInvalidator = v
+	}
+	return set
 }

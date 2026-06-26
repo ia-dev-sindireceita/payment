@@ -40,6 +40,11 @@ type createChargeRequest struct {
 	Endpoint    string `json:"endpoint"`
 	AmountCents int64  `json:"amount_cents"`
 	Currency    string `json:"currency"`
+	// Bank optionally selects which configured bank handles this charge (multi-bank,
+	// SIN-66022). Empty keeps the header/default routing. It overrides the X-Bank-Id
+	// header when both are present (the body field is the canonical write selector,
+	// ADR-0007).
+	Bank string `json:"bank"`
 }
 
 type paymentView struct {
@@ -75,6 +80,11 @@ func (s *Server) handleCreateCharge(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	nr, ok := s.rebindBank(w, r, req.Bank)
+	if !ok {
+		return
+	}
+	r = nr
 	p, err := s.charges.CreateCharge(r.Context(), app.CreateChargeInput{
 		TenantID:       tenantID,
 		Endpoint:       req.Endpoint,

@@ -53,6 +53,9 @@ type createBoletoRequest struct {
 	MonthlyInterestBps int64               `json:"monthly_interest_bps"`
 	Discounts          []boletoDiscountReq `json:"discounts"`
 	Payer              boletoPayerReq      `json:"payer"`
+	// Bank optionally selects which configured bank registers this boleto (multi-bank,
+	// SIN-66022); empty keeps header/default routing, overrides X-Bank-Id (ADR-0007).
+	Bank string `json:"bank"`
 }
 
 // toPayerInput maps the nested payer request block to the use-case input.
@@ -168,6 +171,11 @@ func (s *Server) handleCreateBoleto(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid or missing due_date (RFC3339)")
 		return
 	}
+	nr, okBank := s.rebindBank(w, r, req.Bank)
+	if !okBank {
+		return
+	}
+	r = nr
 
 	in := app.RegisterBoletoInput{
 		TenantID:           tenantID,
