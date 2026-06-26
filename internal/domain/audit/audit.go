@@ -52,6 +52,15 @@ const (
 	ActionRecRejected  Action = "recurrence.rejected"
 	ActionRecExpired   Action = "recurrence.expired"
 	ActionRecCancelled Action = "recurrence.cancelled"
+
+	// ActionCobRCreated records the origination of one recurring charge instance
+	// (CobR) against an approved mandate (PIX Automático F4, SIN-66039). Like the
+	// Rec transitions it reuses the durable audit_log: the entry's TxID() carries
+	// the charge txid (its anti-double-bill anchor) and, paired with the SaveCobR in
+	// the same unit of work, makes the charge and its forensic record commit
+	// atomically. No secret is involved — it records only who/what/which-charge/
+	// tenant/when.
+	ActionCobRCreated Action = "recurrence.cobr.created"
 )
 
 // recurrenceActionByStatus maps a recurrence.RecStatus string to the audit Action
@@ -75,7 +84,7 @@ func (a Action) valid() bool {
 	case ActionCreateTenant, ActionSetEndpointPrice, ActionSetBankCredential,
 		ActionSuspendTenant, ActionActivateTenant, ActionSettlementAmountMismatch,
 		ActionRecCreated, ActionRecApproved, ActionRecRejected, ActionRecExpired,
-		ActionRecCancelled:
+		ActionRecCancelled, ActionCobRCreated:
 		return true
 	default:
 		return false
@@ -234,6 +243,37 @@ func NewRecurrenceTransitionEntry(id, operatorID, tenantID, idRec, toStatus stri
 		tenantID:   tenantID,
 		at:         at,
 		txID:       idRec,
+	}, nil
+}
+
+// NewCobROriginationEntry builds the audit record for originating one recurring
+// charge instance (CobR) against an approved mandate (PIX Automático F4,
+// SIN-66039). The subject txID is the charge's anti-double-bill anchor, carried in
+// the existing tx_id column (no schema change — it reuses the durable mechanism
+// from SIN-66016/66025). It records only who/what/which-charge/tenant/when and
+// carries no secret by construction. Invariants: a non-empty id, tenant and txID.
+// When emitted inside the unit of work that persisted the charge (the bundled
+// ports.Repository), the audit append and the SaveCobR commit atomically.
+func NewCobROriginationEntry(id, operatorID, tenantID, txID string, at time.Time) (Entry, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Entry{}, shared.NewValidationError("id", "audit entry id is required")
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return Entry{}, shared.NewValidationError("tenant_id", "tenant id is required")
+	}
+	txID = strings.TrimSpace(txID)
+	if txID == "" {
+		return Entry{}, shared.NewValidationError("tx_id", "tx id is required")
+	}
+	return Entry{
+		id:         id,
+		operatorID: strings.TrimSpace(operatorID),
+		action:     ActionCobRCreated,
+		tenantID:   tenantID,
+		at:         at,
+		txID:       txID,
 	}, nil
 }
 
