@@ -135,31 +135,66 @@ func parseKV(s string) map[string]string {
 	return m
 }
 
-// parseBankCreds parses "tenant:clientID:secret,..." into per-tenant credentials.
+// bankCredKey builds the composite map key for a (tenant, bank) pair, mirroring
+// the secret store's keying so a single tenant can hold credentials at more than
+// one bank without one overwriting another (ADR-0007). The NUL separator can
+// appear in neither a tenant id nor a bank slug, so distinct pairs never collide.
+func bankCredKey(tenant, bank string) string { return tenant + "\x00" + bank }
+
+// parseBankCreds parses the PAYMENT_BANK_CREDS list into per-(tenant, bank)
+// credentials. Two entry shapes are accepted (ADR-0007 / SIN-66015):
 //
-// Each entry is split on the first two ':' only (strings.SplitN with n=3), so a
-// secret that itself contains ':' is preserved verbatim in the final field — it
-// is NOT truncated. Entries that are structurally malformed (wrong field count,
-// or an empty tenant/clientID/secret) are skipped and logged at warn level so an
-// operator can spot a misconfigured PAYMENT_BANK_CREDS instead of debugging an
-// opaque auth failure at the PSP. To avoid leaking material, neither the raw
-// entry nor the secret is ever logged; only the non-sensitive tenant_id and the
-// entry position are included to aid diagnosis.
+//   - 4-field "tenant:bank:clientID:secret" — the multi-bank form; the bank slug
+//     sits BEFORE the clientID.
+//   - 3-field "tenant:clientID:secret" — the legacy single-bank form, which maps
+//     to the default bank "c6" (ports.BankIDC6), preserving current behaviour.
+//
+// The secret is ALWAYS the greedy ':'-tolerant tail (the last field of a SplitN),
+// so a secret that itself contains ':' is preserved verbatim — it is NOT
+// truncated. The number of leading colon-free fields (3 vs 4) selects the shape.
+//
+// AMBIGUITY (deliberate, documented): a legacy 3-field entry whose secret itself
+// contains a ':' is indistinguishable from a 4-field entry, so it would be read as
+// the new form (bank = what was the clientID). Such legacy colon-bearing secrets
+// MUST migrate to the explicit 4-field form "tenant:c6:clientID:secret". This is
+// the cost of folding the bank dimension into the existing variable; it is flagged
+// for SecurityEngineer review (SIN-66021). Bank slugs and client ids never contain
+// ':', so only a colon-in-secret legacy entry is affected.
+//
+// Entries that are structurally malformed (too few fields, or an empty
+// tenant/clientID/secret) are skipped and logged at warn level so an operator can
+// spot a misconfigured PAYMENT_BANK_CREDS instead of debugging an opaque auth
+// failure at the PSP. To avoid leaking material, neither the raw entry nor the
+// secret is ever logged; only the non-sensitive tenant_id/bank_id and the entry
+// position are included to aid diagnosis.
 func parseBankCreds(s string, logger *slog.Logger) map[string]ports.BankCredential {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	m := make(map[string]ports.BankCredential)
 	for i, item := range splitNonEmpty(s) {
-		parts := strings.SplitN(item, ":", 3)
-		if len(parts) != 3 {
-			logger.Warn("skipping malformed bank credential: expected tenant:clientID:secret",
+		// SplitN n=4 keeps the secret as a greedy tail. 3 leading fields => legacy
+		// (bank defaults to c6); 4 => the bank slug is field 2.
+		parts := strings.SplitN(item, ":", 4)
+		var tenant, bank, clientID, secret string
+		switch len(parts) {
+		case 3:
+			tenant, clientID, secret = parts[0], parts[1], parts[2]
+			bank = ports.BankIDC6
+		case 4:
+			tenant, bank, clientID, secret = parts[0], parts[1], parts[2], parts[3]
+		default:
+			logger.Warn("skipping malformed bank credential: expected tenant:clientID:secret or tenant:bank:clientID:secret",
 				slog.Int("entry_index", i), slog.Int("field_count", len(parts)))
 			continue
 		}
-		tenant := strings.TrimSpace(parts[0])
-		clientID := strings.TrimSpace(parts[1])
-		secret := strings.TrimSpace(parts[2])
+		tenant = strings.TrimSpace(tenant)
+		bank = strings.TrimSpace(bank)
+		clientID = strings.TrimSpace(clientID)
+		secret = strings.TrimSpace(secret)
+		if bank == "" {
+			bank = ports.BankIDC6
+		}
 		if tenant == "" {
 			logger.Warn("skipping bank credential with empty tenant",
 				slog.Int("entry_index", i))
@@ -167,11 +202,12 @@ func parseBankCreds(s string, logger *slog.Logger) map[string]ports.BankCredenti
 		}
 		if clientID == "" || secret == "" {
 			logger.Warn("skipping bank credential with empty client_id or secret",
-				slog.String("tenant_id", tenant))
+				slog.String("tenant_id", tenant), slog.String("bank_id", bank))
 			continue
 		}
-		m[tenant] = ports.BankCredential{
+		m[bankCredKey(tenant, bank)] = ports.BankCredential{
 			TenantID: tenant,
+			BankID:   bank,
 			ClientID: clientID,
 			Secret:   secret,
 		}
@@ -179,22 +215,28 @@ func parseBankCreds(s string, logger *slog.Logger) map[string]ports.BankCredenti
 	return m
 }
 
-// mergeCreditorKeys folds the per-tenant PIX creditor keys parsed from
+// mergeCreditorKeys folds the per-(tenant, bank) PIX creditor keys parsed from
 // PAYMENT_BANK_CREDITOR_KEYS into the BankCredential map produced by
 // parseBankCreds. The creditor key (chave do recebedor) is carried in a SEPARATE
 // env var — not appended to the PAYMENT_BANK_CREDS tuple — on purpose: that tuple
-// keeps the OAuth2 secret as a greedy ':'-tolerant tail (parseBankCreds, SplitN
-// n=3), so there is no unambiguous slot to add a 4th field after the secret
-// without reinterpreting an existing ':'-bearing secret. A parallel var sidesteps
-// that ambiguity and keeps the secret-parsing contract (and its tests) intact
-// (ADR-0004 / SIN-65862).
+// keeps the OAuth2 secret as a greedy ':'-tolerant tail, so there is no
+// unambiguous slot to add a field after the secret without reinterpreting an
+// existing ':'-bearing secret (ADR-0004 / SIN-65862).
 //
-// Format: "tenant:creditorKey,tenant2:creditorKey2". A PIX key (email, phone,
-// CPF/CNPJ or EVP UUID) never contains ':', so each entry splits cleanly on the
-// first ':' (SplitN n=2). Entries that are malformed, or that reference a tenant
-// with no bank credential, are skipped and logged at warn level — the routing-
-// sensitive key value itself is NEVER logged, only the non-sensitive tenant_id
-// and entry position (threat C1/C4).
+// Two entry shapes are accepted (ADR-0007):
+//
+//   - 3-field "tenant:bank:creditorKey" — the multi-bank form.
+//   - 2-field "tenant:creditorKey" — the legacy form, which targets the default
+//     bank "c6" (ports.BankIDC6), preserving current behaviour.
+//
+// A PIX key (email, phone, CPF/CNPJ or EVP UUID) and a bank slug never contain
+// ':', so the field count (2 vs 3) selects the shape unambiguously — unlike the
+// secret tuple, there is no colon-in-value ambiguity here. The key is folded into
+// the credential at the SAME (tenant, bank) pair: a creditor key for a pair with
+// no bank credential is skipped (no half-credential). Entries that are malformed,
+// or that reference a pair with no credential, are skipped and logged at warn
+// level — the routing-sensitive key value itself is NEVER logged, only the
+// non-sensitive tenant_id/bank_id and entry position (threat C1/C4).
 func mergeCreditorKeys(creds map[string]ports.BankCredential, s string, logger *slog.Logger) map[string]ports.BankCredential {
 	if logger == nil {
 		logger = slog.Default()
@@ -203,30 +245,44 @@ func mergeCreditorKeys(creds map[string]ports.BankCredential, s string, logger *
 		creds = make(map[string]ports.BankCredential)
 	}
 	for i, item := range splitNonEmpty(s) {
-		parts := strings.SplitN(item, ":", 2)
-		if len(parts) != 2 {
-			logger.Warn("skipping malformed bank creditor key: expected tenant:creditorKey",
+		// A creditor key never contains ':'. 2 fields => legacy (bank defaults to
+		// c6); 3 => the bank slug is field 2.
+		parts := strings.SplitN(item, ":", 3)
+		var tenant, bank, key string
+		switch len(parts) {
+		case 2:
+			tenant, key = parts[0], parts[1]
+			bank = ports.BankIDC6
+		case 3:
+			tenant, bank, key = parts[0], parts[1], parts[2]
+		default:
+			logger.Warn("skipping malformed bank creditor key: expected tenant:creditorKey or tenant:bank:creditorKey",
 				slog.Int("entry_index", i), slog.Int("field_count", len(parts)))
 			continue
 		}
-		tenant := strings.TrimSpace(parts[0])
-		key := strings.TrimSpace(parts[1])
+		tenant = strings.TrimSpace(tenant)
+		bank = strings.TrimSpace(bank)
+		key = strings.TrimSpace(key)
+		if bank == "" {
+			bank = ports.BankIDC6
+		}
 		if tenant == "" || key == "" {
 			logger.Warn("skipping bank creditor key with empty tenant or key",
 				slog.Int("entry_index", i))
 			continue
 		}
-		cred, ok := creds[tenant]
+		ck := bankCredKey(tenant, bank)
+		cred, ok := creds[ck]
 		if !ok {
 			// A creditor key without a matching bank credential cannot route a
 			// charge (the OAuth2 identity is missing); skip rather than synthesize a
 			// half-credential.
-			logger.Warn("skipping bank creditor key for tenant with no bank credential",
-				slog.String("tenant_id", tenant))
+			logger.Warn("skipping bank creditor key for tenant/bank with no bank credential",
+				slog.String("tenant_id", tenant), slog.String("bank_id", bank))
 			continue
 		}
 		cred.CreditorKey = key
-		creds[tenant] = cred
+		creds[ck] = cred
 	}
 	return creds
 }

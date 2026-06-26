@@ -152,7 +152,7 @@ func TestConsoleSetBankCredential(t *testing.T) {
 	if err := svc.SetBankCredential(ctx, "t1", "client-1", "s3cr3t"); err != nil {
 		t.Fatalf("set credential: %v", err)
 	}
-	got, err := creds.GetBankCredential(ctx, "t1")
+	got, err := creds.GetBankCredential(ctx, "t1", ports.BankIDC6)
 	if err != nil || got.ClientID != "client-1" || got.Secret != "s3cr3t" {
 		t.Fatalf("stored credential = %+v, %v", got, err)
 	}

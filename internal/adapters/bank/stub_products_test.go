@@ -13,7 +13,7 @@ import (
 // tenant and returns ErrNotFound for any other.
 type stubCreds struct{ known string }
 
-func (s stubCreds) GetBankCredential(_ context.Context, tenantID string) (ports.BankCredential, error) {
+func (s stubCreds) GetBankCredential(_ context.Context, tenantID string, _ string) (ports.BankCredential, error) {
 	if tenantID != s.known {
 		return ports.BankCredential{}, shared.ErrNotFound
 	}

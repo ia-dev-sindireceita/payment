@@ -11,7 +11,7 @@ import (
 
 type noopCreds struct{}
 
-func (noopCreds) GetBankCredential(context.Context, string) (ports.BankCredential, error) {
+func (noopCreds) GetBankCredential(context.Context, string, string) (ports.BankCredential, error) {
 	return ports.BankCredential{}, nil
 }
 

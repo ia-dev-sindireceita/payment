@@ -212,7 +212,10 @@ func (s *ConsoleService) SetBankCredential(ctx context.Context, tenantID, client
 	if _, err := s.tenants.FindTenantByID(ctx, strings.TrimSpace(tenantID)); err != nil {
 		return fmt.Errorf("resolve tenant: %w", err)
 	}
-	if err := s.credWriter.SetBankCredential(ctx, tenantID, clientID, secret); err != nil {
+	// Single-bank write path: persists under the default bank (BankIDC6),
+	// preserving current behaviour. A per-bank selector in the console is the
+	// routing/UX workstream (SIN-66022 / SIN-66017), not this schema change.
+	if err := s.credWriter.SetBankCredential(ctx, tenantID, ports.BankIDC6, clientID, secret); err != nil {
 		// Wrap with non-sensitive context only; never include the secret.
 		return fmt.Errorf("set bank credential: %w", err)
 	}
