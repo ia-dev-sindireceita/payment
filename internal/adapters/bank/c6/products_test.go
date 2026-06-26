@@ -130,14 +130,16 @@ func newProductServer(t *testing.T) *productServer {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"boleto_id":"bol_1","txid":"tx_1","status":"REGISTERED","qr_code":"pix-emv","barcode":"123","amount_cents":2000,"fine_bps":150,"monthly_interest_bps":80}`))
 	})
-	mux.HandleFunc("POST /checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/checkouts/", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
 		if ps.checkout != nil {
 			ps.checkout(w, r)
 			return
 		}
+		// Real C6 create (201) response is {id, url} — no status/amount echoed.
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"session_id":"sess_1","status":"OPEN","redirect_url":"https://pay.c6/sess_1","amount_cents":1500}`))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"chk_1","url":"https://checkout.c6bank.info/chk_1"}`))
 	})
 
 	// Real BACEN cobv wire (SIN-65860): calendario.dataDeVencimento/validadeApos-
@@ -432,27 +434,45 @@ func TestCreateCheckoutSessionSuccess(t *testing.T) {
 	p := ps.provider(t, oneTenant("t1", "client-1", "secret-1"))
 
 	res, err := p.CreateCheckoutSession(context.Background(), "t1", ports.CheckoutRequest{
-		TenantID: "t1", SessionID: "sess_1", Currency: "BRL",
+		TenantID: "t1", SessionID: "sess_1", Currency: "BRL", CardType: "credit",
 		Items:     []ports.CheckoutItem{{Description: "a", AmountCents: 1000}, {Description: "b", AmountCents: 500}},
 		ExpiresAt: time.Unix(1_800_000_000, 0),
 	})
 	if err != nil {
 		t.Fatalf("CreateCheckoutSession: %v", err)
 	}
-	if res.SessionID != "sess_1" || res.Status != "OPEN" || res.RedirectURL != "https://pay.c6/sess_1" || res.AmountCents != 1500 {
+	// Create maps the real {id,url} response: id->SessionID, url->RedirectURL, a fresh
+	// checkout is CREATED, and AmountCents echoes the authorized total we sent.
+	if res.SessionID != "chk_1" || res.Status != "CREATED" || res.RedirectURL != "https://checkout.c6bank.info/chk_1" || res.AmountCents != 1500 {
 		t.Fatalf("unexpected result: %+v", res)
 	}
 	if ps.idemKey() != "sess_1" {
 		t.Fatalf("idempotency key should fall back to session id, got %q", ps.idemKey())
 	}
+	// Real wire: a single decimal amount in reais (items summed, never cents) +
+	// payment.card{type,installments}; there is no items[] array.
 	var sent struct {
-		Items []json.RawMessage `json:"items"`
+		Amount  json.RawMessage   `json:"amount"`
+		Items   []json.RawMessage `json:"items"`
+		Payment struct {
+			Card struct {
+				Type         string `json:"type"`
+				Installments int    `json:"installments"`
+				Authenticate string `json:"authenticate"`
+			} `json:"card"`
+		} `json:"payment"`
 	}
 	if err := json.Unmarshal(ps.body(), &sent); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if len(sent.Items) != 2 {
-		t.Fatalf("checkout request should carry 2 items, got %d", len(sent.Items))
+	if len(sent.Items) != 0 {
+		t.Fatalf("real contract has no items[], got %d", len(sent.Items))
+	}
+	if string(sent.Amount) != "15.00" {
+		t.Fatalf("amount must be decimal reais 15.00 (1500 cents summed), got %s", sent.Amount)
+	}
+	if sent.Payment.Card.Type != "CREDIT" || sent.Payment.Card.Installments != 1 || sent.Payment.Card.Authenticate != "NOT_REQUIRED" {
+		t.Fatalf("unexpected payment.card: %+v", sent.Payment.Card)
 	}
 }
 
@@ -465,8 +485,8 @@ func TestCreateCheckoutSessionErrorMapping(t *testing.T) {
 	}
 	p := ps.provider(t, oneTenant("t1", "c", "s"))
 	if _, err := p.CreateCheckoutSession(context.Background(), "t1", ports.CheckoutRequest{
-		TenantID: "t1", SessionID: "s", Currency: "BRL",
-		Items:     []ports.CheckoutItem{{Description: "a", AmountCents: 1}},
+		TenantID: "t1", SessionID: "s", Currency: "BRL", CardType: "credit",
+		Items:     []ports.CheckoutItem{{Description: "a", AmountCents: 600}},
 		ExpiresAt: time.Unix(1, 0),
 	}); !errors.Is(err, shared.ErrValidation) {
 		t.Fatalf("422 should map to ErrValidation, got %v", err)
@@ -478,8 +498,8 @@ func TestCheckoutMissingCredential(t *testing.T) {
 	ps := newProductServer(t)
 	p := ps.provider(t, &fakeCreds{creds: map[string]ports.BankCredential{}})
 	if _, err := p.CreateCheckoutSession(context.Background(), "unknown", ports.CheckoutRequest{
-		TenantID: "unknown", SessionID: "s", Currency: "BRL",
-		Items:     []ports.CheckoutItem{{Description: "a", AmountCents: 1}},
+		TenantID: "unknown", SessionID: "s", Currency: "BRL", CardType: "credit",
+		Items:     []ports.CheckoutItem{{Description: "a", AmountCents: 600}},
 		ExpiresAt: time.Unix(1, 0),
 	}); !errors.Is(err, shared.ErrNotFound) {
 		t.Fatalf("missing credential should propagate ErrNotFound, got %v", err)
@@ -510,15 +530,16 @@ func TestCreateCheckoutSessionRejectsUntrustedRedirectURL(t *testing.T) {
 			ps := newProductServer(t)
 			ps.checkout = func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
 				body, _ := json.Marshal(checkoutResponseBody{
-					SessionID: "sess_1", Status: "OPEN", RedirectURL: tc.redirect, AmountCents: 1500,
+					ID: "chk_1", Status: "CREATED", URL: tc.redirect, Amount: 1500,
 				})
 				_, _ = w.Write(body)
 			}
 			p := ps.provider(t, oneTenant("t1", "c", "s"))
 
 			res, err := p.CreateCheckoutSession(context.Background(), "t1", ports.CheckoutRequest{
-				TenantID: "t1", SessionID: "sess_1", Currency: "BRL",
+				TenantID: "t1", SessionID: "sess_1", Currency: "BRL", CardType: "credit",
 				Items:     []ports.CheckoutItem{{Description: "a", AmountCents: 1500}},
 				ExpiresAt: time.Unix(1_800_000_000, 0),
 			})
