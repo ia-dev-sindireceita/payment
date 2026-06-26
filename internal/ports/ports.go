@@ -167,6 +167,33 @@ func NormalizeBankID(bankID string) string {
 	return bankID
 }
 
+// CanonicalBankID canonicalises a request- or wiring-influenced bank slug to its
+// store/registry key form and fails closed on anything non-canonical. It lowercases
+// and trims surrounding space, then reports ok=false for an empty result or a slug
+// carrying NUL or any other control char (< 0x20 or 0x7f). Unlike NormalizeBankID it
+// applies NO retro-compat default — an empty selector is reported as not-ok so the
+// caller treats it as "no explicit bank", never as a valid slug.
+//
+// It is the single, shared canonicaliser for the strict slug-key boundaries: the
+// HTTP per-request bank selector and the provider Registry key. The credential store
+// keys on tenantID + "\x00" + bankID, so a NUL- or control-char-bearing slug must be
+// refused BEFORE it can become a key fragment and forge/collide a composite key
+// (SIN-66040 / SIN-66056, ADR-0007). Keep this distinct from NormalizeBankID, which
+// applies the admin write-path default and relies on the IsKnownBankID allow-list to
+// reject unknown slugs.
+func CanonicalBankID(bankID string) (string, bool) {
+	bankID = strings.ToLower(strings.TrimSpace(bankID))
+	if bankID == "" {
+		return "", false
+	}
+	for i := 0; i < len(bankID); i++ {
+		if c := bankID[i]; c < 0x20 || c == 0x7f {
+			return "", false
+		}
+	}
+	return bankID, true
+}
+
 // IsKnownBankID reports whether bankID names a bank the platform supports. Pass a
 // value already run through NormalizeBankID. It is the boundary guard for the
 // admin credential-write path: an unknown bank MUST be rejected as a validation

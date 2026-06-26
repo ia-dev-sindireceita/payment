@@ -1,6 +1,8 @@
 package bank
 
 import (
+	"fmt"
+
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
 
@@ -39,23 +41,48 @@ func NewRegistry() *Registry {
 }
 
 // Register adds (or replaces) the ProviderSet wired for bankID. Called only during
-// startup wiring.
-func (r *Registry) Register(bankID string, set ProviderSet) {
-	r.sets[bankID] = set
+// startup wiring. The slug MUST already be in canonical form — exactly what
+// ports.CanonicalBankID returns: lowercase, trimmed, non-empty, no NUL or other
+// control char. A non-canonical slug (uppercase, surrounding space, empty, or a
+// control char) is REJECTED with an error rather than silently fixed or inserted as
+// a poisoned key. Today every registered slug is a canonical lowercase constant
+// (ports.BankIDC6), so this is secure-by-default defense-in-depth (SIN-66056): the
+// write boundary refuses non-canonical input outright, so the registry key space can
+// never hold a slug that the canonicalised Get/Has lookups would fail to match (or,
+// worse, a NUL-bearing key that could collide a composite credential key).
+func (r *Registry) Register(bankID string, set ProviderSet) error {
+	id, ok := ports.CanonicalBankID(bankID)
+	if !ok || id != bankID {
+		return fmt.Errorf("bank registry: refusing to register non-canonical bank slug %q (canonical form is %q)", bankID, id)
+	}
+	r.sets[id] = set
+	return nil
 }
 
 // Get returns the ProviderSet wired for bankID and whether one exists. A false
 // second result means the bank has no wired adapter — the caller MUST fail closed.
+// The lookup key is canonicalised the same way Register canonicalises it, so a bank
+// resolves only by its canonical form and a non-canonical slug (empty / control char)
+// is reported as not-found rather than ever matching a key.
 func (r *Registry) Get(bankID string) (ProviderSet, bool) {
-	s, ok := r.sets[bankID]
+	id, ok := ports.CanonicalBankID(bankID)
+	if !ok {
+		return ProviderSet{}, false
+	}
+	s, ok := r.sets[id]
 	return s, ok
 }
 
 // Has reports whether bankID names a wired bank. It is the allow-list the HTTP
 // selector validates an explicit bank selector against (a requested bank that is
-// not wired is rejected with the uniform not-found error — no existence oracle).
+// not wired is rejected with the uniform not-found error — no existence oracle). It
+// canonicalises the slug like Get, so membership is decided on the canonical form.
 func (r *Registry) Has(bankID string) bool {
-	_, ok := r.sets[bankID]
+	id, ok := ports.CanonicalBankID(bankID)
+	if !ok {
+		return false
+	}
+	_, ok = r.sets[id]
 	return ok
 }
 
