@@ -26,6 +26,7 @@ type consoleFixture struct {
 	handler http.Handler
 	store   *persistence.Store
 	creds   *secret.Store
+	certs   *secret.CertStore
 }
 
 // newConsoleFixture builds a server wired with the HTML console over a real
@@ -35,11 +36,13 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	t.Helper()
 	store := persistence.NewStore()
 	creds := secret.NewStore(map[string]ports.BankCredential{})
+	certs := secret.NewCertStore()
 	if err := store.SaveTenant(context.Background(), tenant.Rehydrate("t1", "Acme", true, time.Unix(100, 0).UTC())); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	console := app.NewConsoleService(app.ConsoleDeps{
 		Tenants: store, Pricing: store, Ledger: store, CredWriter: creds, CredReader: creds,
+		CertWriter: certs, CertReader: certs,
 		Clock: fixedClock{}, IDs: &seqIDs{},
 	})
 	ui, err := adminweb.New()
@@ -54,7 +57,7 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Console: console, UI: ui, AdminAuth: auth, TenantAuth: auth, WebhookAuth: auth,
 	})
-	return &consoleFixture{handler: srv.Router(), store: store, creds: creds}
+	return &consoleFixture{handler: srv.Router(), store: store, creds: creds, certs: certs}
 }
 
 type fixedClock struct{}

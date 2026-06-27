@@ -269,6 +269,9 @@ func (s *Server) Router() http.Handler {
 				r.Post("/tenants/{id}/credentials", s.consoleSetCredential)
 				r.Post("/tenants/{id}/banks", s.consoleAddBank)
 				r.Post("/tenants/{id}/banks/{bankId}/credential", s.consoleSetBankCredential)
+				// Per-bank mTLS certificate upload/rotation (multipart, write-only key;
+				// SIN-66088). RBAC + CSRF inherited from this admin mutation group.
+				r.Post("/tenants/{id}/banks/{bankId}/certificate", s.consoleSetBankCertificate)
 				// Creditor PIX key write — bankless per the binding port-shape decision
 				// (SIN-66017 / ADR-0008); writes the tenant's default-bank credential.
 				r.Post("/tenants/{id}/creditor-key", s.consoleSetCreditorKey)

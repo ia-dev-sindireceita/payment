@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"strconv"
@@ -412,6 +413,120 @@ func (s *Server) consoleSetBankCredential(w http.ResponseWriter, r *http.Request
 		return
 	}
 	card(http.StatusOK, info, map[string]string{}, map[string]string{}, true)
+}
+
+// --- Bank mTLS certificate (write-only key) ---
+
+// maxCertUploadBytes caps the multipart certificate upload. A PEM cert + key pair
+// is a few KiB; 256 KiB is generous while bounding memory from an oversize upload
+// (threat H3). Exceeding it yields a 413 with an inline message, not a 500.
+const maxCertUploadBytes = 256 << 10
+
+// consoleSetBankCertificate handles the per-bank mTLS certificate upload/rotation
+// (SIN-66088). It is a multipart form (two PEM file fields, cert_pem + key_pem) and
+// swaps only the certificate card back (outerHTML #cert-card) plus an out-of-band
+// refresh of the detail header badge and a toast. The private key is write-only:
+// it is uploaded, validated + key-matched server-side, stored in the vault, and
+// NEVER echoed, logged or re-rendered (threat C1/C4). RBAC (RoleAdmin) and CSRF are
+// inherited from the console mutation group. Admin-only.
+func (s *Server) consoleSetBankCertificate(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	bankID := chi.URLParam(r, "bankId")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	tv := adminweb.ToTenantView(t)
+	// Validate the bank slug up front so an unknown bank 404s rather than rendering
+	// a card for a bank that can never present a client certificate.
+	if _, err := s.console.GetBank(r.Context(), tv.ID, bankID); err != nil {
+		s.consoleError(w, err)
+		return
+	}
+
+	// reread re-projects the bank so the card reflects current state (the existing
+	// certificate, if any) on every render — success or error.
+	reread := func() app.BankInfo {
+		info, _ := s.console.GetBank(r.Context(), tv.ID, bankID)
+		return info
+	}
+	card := func(status int, info app.BankInfo, errs map[string]string) {
+		s.ui.Partial(w, status, "cert_card", adminweb.BankDetailView{
+			Base:   s.consoleBase(r, info.Slug, "tenants"),
+			Tenant: tv,
+			Bank:   adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0],
+			Form:   map[string]string{},
+			Errors: errs,
+		})
+	}
+
+	// Bound the upload and parse the multipart body. An oversize body surfaces as a
+	// 413 with an inline message; any other parse failure is a generic 400-class
+	// inline error (never a 500).
+	r.Body = http.MaxBytesReader(w, r.Body, maxCertUploadBytes)
+	if err := r.ParseMultipartForm(maxCertUploadBytes); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			card(http.StatusRequestEntityTooLarge, reread(), map[string]string{"form": "arquivo muito grande (máx. 256 KiB)"})
+			return
+		}
+		card(http.StatusBadRequest, reread(), map[string]string{"form": "envio inválido"})
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+
+	certPEM, certOK := readUploadField(r, "cert_pem")
+	keyPEM, keyOK := readUploadField(r, "key_pem")
+	if !certOK || strings.TrimSpace(certPEM) == "" {
+		card(http.StatusUnprocessableEntity, reread(), map[string]string{"cert_pem": "selecione o arquivo do certificado (PEM)"})
+		return
+	}
+	if !keyOK || strings.TrimSpace(keyPEM) == "" {
+		card(http.StatusUnprocessableEntity, reread(), map[string]string{"key_pem": "selecione o arquivo da chave privada (PEM)"})
+		return
+	}
+
+	if _, err := s.console.SetBankCertificate(r.Context(), tv.ID, bankID, certPEM, keyPEM); err != nil {
+		// Map the named validation error to the field it concerns; never echo the key.
+		card(http.StatusUnprocessableEntity, reread(), fieldErrors(err, "cert_pem", "key_pem"))
+		return
+	}
+	// Success: swap the card (now showing the new metadata), refresh the header
+	// badge out-of-band, and toast. The key never appears in any of these.
+	info := reread()
+	row := adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0]
+	s.ui.Partials(w, http.StatusOK,
+		adminweb.OOBPart{Name: "cert_card", Data: adminweb.BankDetailView{
+			Base:      s.consoleBase(r, info.Slug, "tenants"),
+			Tenant:    tv,
+			Bank:      row,
+			Form:      map[string]string{},
+			Errors:    map[string]string{},
+			CertSaved: true,
+		}},
+		adminweb.OOBPart{Name: "cert_status_oob", Data: row},
+		adminweb.OOBPart{Name: "toast_oob", Data: adminweb.ToastData{Kind: "success", Message: "Certificado salvo."}})
+}
+
+// readUploadField reads an uploaded PEM file field into a string, bounded by the
+// upload cap. A missing field returns ("", false) so the handler can render a
+// precise inline error. The key never transits any log on this path.
+func readUploadField(r *http.Request, field string) (string, bool) {
+	f, _, err := r.FormFile(field)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, maxCertUploadBytes))
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 // --- Pricing ---

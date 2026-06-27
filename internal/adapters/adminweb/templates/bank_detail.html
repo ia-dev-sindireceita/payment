@@ -3,7 +3,7 @@
 <p class="breadcrumb"><a href="/console/tenants/{{.ID}}" hx-get="/console/tenants/{{.ID}}" hx-target="#main" hx-push-url="true">‹ {{.Name}}</a> / <a href="/console/tenants/{{.ID}}/banks" hx-get="/console/tenants/{{.ID}}/banks" hx-target="#main" hx-push-url="true">Bancos</a> / {{$.Bank.DisplayName}}</p>
 {{end}}
 <div class="topbar">
-  <div><h1>{{.Bank.DisplayName}} <span id="tenant-status">{{template "status_badge" .Tenant}}</span></h1>
+  <div><h1>{{.Bank.DisplayName}} <span id="tenant-status">{{template "status_badge" .Tenant}}</span> <span id="cert-status">{{template "cert_status_badge" .Bank.Cert}}</span></h1>
   <p class="muted">apelido <code>{{.Bank.Slug}}</code></p></div>
 </div>
 
@@ -15,6 +15,8 @@
 </nav>
 
 {{template "cred_card" .}}
+
+{{template "cert_card" .}}
 
 {{template "creditor_card" .}}
 {{end}}

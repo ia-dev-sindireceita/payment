@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/bankcert"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
@@ -32,9 +33,17 @@ type ConsoleService struct {
 	creditorWrite ports.CreditorKeyWriter
 	credReader    ports.CredentialStore
 	credEvictor   ports.CredentialInvalidator
-	audit         ports.AuditLog
-	clock         ports.Clock
-	ids           ports.IDProvider
+	// certWriter / certReader are the per-(tenant,bank) mTLS certificate vault ports
+	// (SIN-66087 / SIN-66088). The console uses them ONLY to store an uploaded
+	// cert/key pair (write-only key) and to project a stored certificate's PUBLIC
+	// metadata into the bank screens — the private key is never read back (threat
+	// C1/C4). Both are optional: a nil reader degrades to "no bank reports a
+	// certificate"; a nil writer disables the upload path (the screens still render).
+	certWriter ports.BankCertificateWriter
+	certReader ports.BankCertificateReader
+	audit      ports.AuditLog
+	clock      ports.Clock
+	ids        ports.IDProvider
 }
 
 // TenantStore is the tenant capability the console needs: the foundation's
@@ -75,6 +84,14 @@ type ConsoleDeps struct {
 	// privilege): the console grants the creditor-key capability independently of the
 	// secret-rotation capability (SIN-66092 / ADR-0008).
 	CreditorWriter ports.CreditorKeyWriter
+	// CertWriter / CertReader are the per-(tenant,bank) mTLS certificate vault
+	// (SIN-66087). CertWriter stores the validated cert/key pair (write-only key);
+	// CertReader projects only the stored certificate's public metadata into the
+	// bank screens (badges, validity window, fingerprint) — never the key. Both are
+	// optional: nil CertReader degrades to "no certificate configured" and nil
+	// CertWriter disables the upload use-case (the screen still renders read-only).
+	CertWriter ports.BankCertificateWriter
+	CertReader ports.BankCertificateReader
 	// CredInvalidator evicts cached state keyed on a tenant's credential (the C6
 	// OAuth2 token cache) right after a credential write, closing the
 	// token-revocation lag (ADR-0003). Optional: nil degrades to a no-op.
@@ -106,6 +123,8 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 		credWriter:    d.CredWriter,
 		creditorWrite: d.CreditorWriter,
 		credReader:    d.CredReader,
+		certWriter:    d.CertWriter,
+		certReader:    d.CertReader,
 		credEvictor:   ci,
 		audit:         a,
 		clock:         d.Clock,
@@ -267,11 +286,82 @@ func (s *ConsoleService) SetBankCredential(ctx context.Context, tenantID, client
 // carries the secret: CredentialSet answers "is a credential configured?" and
 // ClientID / CreditorKey are non-secret identity fields echoed back for operator
 // recognition (the secret is fetched at use time and never rendered, threat C1).
+// Cert is the per-bank mTLS certificate's PUBLIC metadata (nil when none is
+// configured); it never carries the private key (threat C1/C4).
 type BankInfo struct {
 	Slug          string
 	CredentialSet bool
 	ClientID      string
 	CreditorKey   string
+	Cert          *BankCertInfo
+}
+
+// CertStatus is the lifecycle band of a stored mTLS certificate relative to the
+// service clock, driving the expiry badge on the bank screens.
+type CertStatus string
+
+const (
+	// CertStatusValid is in its validity window with more than the warning margin
+	// of life left.
+	CertStatusValid CertStatus = "valid"
+	// CertStatusExpiringSoon is still valid but expires within certExpiryWarningWindow.
+	CertStatusExpiringSoon CertStatus = "expiring_soon"
+	// CertStatusExpired is past its NotAfter (the live transport would be rejected).
+	CertStatusExpired CertStatus = "expired"
+	// CertStatusNotYetValid is pre-provisioned: its NotBefore is in the future
+	// (an operator staged the next rotation cert; SIN-66087 accepts these).
+	CertStatusNotYetValid CertStatus = "not_yet_valid"
+)
+
+// certExpiryWarningWindow is how close to NotAfter a certificate flips to the
+// "expiring soon" warning band (plan §7: warning ≤ 30 days).
+const certExpiryWarningWindow = 30 * 24 * time.Hour
+
+// BankCertInfo is the console projection of one bank's mTLS certificate. It is
+// PUBLIC metadata only — the private key never reaches this struct (threat
+// C1/C4). Status and DaysToExpiry are computed against the service clock at read
+// time so the UI can badge a valid / expiring / expired / pre-provisioned cert
+// without re-deriving the policy in the template.
+type BankCertInfo struct {
+	SubjectCN         string
+	Issuer            string
+	SerialNumber      string
+	FingerprintSHA256 string
+	NotBefore         time.Time
+	NotAfter          time.Time
+	Status            CertStatus
+	// DaysToExpiry is the (ceil) number of days until NotAfter; it is negative once
+	// the certificate has expired. The UI shows its magnitude in the badge.
+	DaysToExpiry int
+}
+
+// certStatusFor classifies a certificate's validity window against now and
+// returns the days remaining until NotAfter (negative once expired). The bands
+// are deny-leaning: a cert exactly at or past NotAfter is Expired, and one whose
+// NotBefore is still in the future is NotYetValid (pre-provisioned rotation).
+func certStatusFor(notBefore, notAfter, now time.Time) (CertStatus, int) {
+	days := ceilDays(notAfter.Sub(now))
+	switch {
+	case now.Before(notBefore):
+		return CertStatusNotYetValid, days
+	case !now.Before(notAfter):
+		return CertStatusExpired, days
+	case notAfter.Sub(now) <= certExpiryWarningWindow:
+		return CertStatusExpiringSoon, days
+	default:
+		return CertStatusValid, days
+	}
+}
+
+// ceilDays rounds a duration up to whole days (so "12 hours left" reads as
+// "1 day"). A non-positive duration (already expired) floors toward zero or
+// negative so the badge can show how long ago it lapsed.
+func ceilDays(d time.Duration) int {
+	const day = 24 * time.Hour
+	if d <= 0 {
+		return int(d / day)
+	}
+	return int((d + day - time.Nanosecond) / day)
 }
 
 // lookupBank reads the (tenantID, bankID) credential and reports whether one is
@@ -280,20 +370,41 @@ type BankInfo struct {
 // configured". Any other store error propagates so the screen 500s honestly.
 func (s *ConsoleService) lookupBank(ctx context.Context, tenantID, bankID string) (BankInfo, error) {
 	info := BankInfo{Slug: bankID}
-	if s.credReader == nil {
-		return info, nil
-	}
-	c, err := s.credReader.GetBankCredential(ctx, tenantID, bankID)
-	if err != nil {
-		if errors.Is(err, shared.ErrNotFound) {
-			return info, nil
+	if s.credReader != nil {
+		c, err := s.credReader.GetBankCredential(ctx, tenantID, bankID)
+		switch {
+		case err == nil:
+			// Project only non-secret identity fields. The secret stays in the store.
+			info.CredentialSet = true
+			info.ClientID = c.ClientID
+			info.CreditorKey = c.CreditorKey
+		case errors.Is(err, shared.ErrNotFound):
+			// Unconfigured bank: the "pendente" state, not an error.
+		default:
+			return BankInfo{}, fmt.Errorf("read bank credential: %w", err)
 		}
-		return BankInfo{}, fmt.Errorf("read bank credential: %w", err)
 	}
-	// Project only non-secret identity fields. The secret stays in the store.
-	info.CredentialSet = true
-	info.ClientID = c.ClientID
-	info.CreditorKey = c.CreditorKey
+	if s.certReader != nil {
+		meta, err := s.certReader.GetBankCertificateMeta(ctx, tenantID, bankID)
+		switch {
+		case err == nil:
+			st, days := certStatusFor(meta.NotBefore, meta.NotAfter, s.clock.Now())
+			info.Cert = &BankCertInfo{
+				SubjectCN:         meta.SubjectCN,
+				Issuer:            meta.Issuer,
+				SerialNumber:      meta.SerialNumber,
+				FingerprintSHA256: meta.FingerprintSHA256,
+				NotBefore:         meta.NotBefore,
+				NotAfter:          meta.NotAfter,
+				Status:            st,
+				DaysToExpiry:      days,
+			}
+		case errors.Is(err, shared.ErrNotFound):
+			// No certificate configured for this bank yet — leave Cert nil.
+		default:
+			return BankInfo{}, fmt.Errorf("read bank certificate: %w", err)
+		}
+	}
 	return info, nil
 }
 
@@ -411,6 +522,70 @@ func (s *ConsoleService) SetCreditorKey(ctx context.Context, tenantID, creditorK
 		return fmt.Errorf("append audit entry: %w", err)
 	}
 	return nil
+}
+
+// SetBankCertificate validates and stores a tenant's per-bank mTLS client
+// certificate from the console upload (SIN-66088), mirroring the admin-plane
+// AdminService.SetBankCertificate contract (SIN-66087). The bank slug is
+// validated against the closed allow-list (deny-by-default; empty → default c6)
+// and the tenant must exist. The PEM pair is parsed and key-matched BEFORE the
+// vault, and a certificate already expired at upload (NotAfter ≤ now) is rejected
+// — all as named validation errors (HTTP 400/422), never a 500; a not-yet-valid
+// cert is accepted so an operator can pre-provision the next rotation. The private
+// key transits straight to the writer: beyond the transient BankCertificate it
+// never enters domain state, logs, errors or any rendered response (threat
+// C1/C4). On success only the public metadata is returned, the cached OAuth token
+// is evicted (a rotation takes effect without the TTL lag, ADR-0003), and the
+// write is audited by who/tenant/bank/fingerprint — never the key.
+func (s *ConsoleService) SetBankCertificate(ctx context.Context, tenantID, bankID, certPEM, keyPEM string) (ports.BankCertificateMeta, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return ports.BankCertificateMeta{}, fmt.Errorf("resolve tenant: %w", err)
+	}
+	slug := ports.NormalizeBankID(bankID)
+	if !ports.IsKnownBankID(slug) {
+		return ports.BankCertificateMeta{}, shared.NewValidationError("bank", "banco não suportado")
+	}
+	// Parse + key-pair match BEFORE the vault: bad material never reaches storage
+	// and the caller gets a precise validation error, not a 500 (plan §7.1 c/d).
+	cert, err := bankcert.Parse(certPEM, keyPEM)
+	if err != nil {
+		return ports.BankCertificateMeta{}, err
+	}
+	if cert.NotAfter.Before(s.clock.Now()) {
+		return ports.BankCertificateMeta{}, shared.NewValidationError("cert_pem", "certificado já expirado")
+	}
+	if err := s.certWriter.SetBankCertificate(ctx, ports.BankCertificate{
+		TenantID: tenantID,
+		BankID:   slug,
+		CertPEM:  certPEM,
+		KeyPEM:   keyPEM,
+	}); err != nil {
+		// Wrap with non-sensitive context only; never include key material.
+		return ports.BankCertificateMeta{}, fmt.Errorf("set bank certificate: %w", err)
+	}
+	// Evict any cached transport/token state keyed on the tenant credential so the
+	// certificate rotation takes effect without waiting out a cache TTL (ADR-0003).
+	s.credEvictor.InvalidateToken(tenantID)
+	// Audit the provisioning with who/tenant/bank/fingerprint (never the key).
+	// Fail-closed: a forensic-record error surfaces rather than dropping the trail.
+	e, err := audit.NewCertificateSetEntry(s.ids.NewID(), OperatorIDFromContext(ctx), tenantID, slug, cert.FingerprintSHA256, s.clock.Now())
+	if err != nil {
+		return ports.BankCertificateMeta{}, fmt.Errorf("build audit entry: %w", err)
+	}
+	if err := s.audit.Append(ctx, e); err != nil {
+		return ports.BankCertificateMeta{}, fmt.Errorf("append audit entry: %w", err)
+	}
+	return ports.BankCertificateMeta{
+		TenantID:          tenantID,
+		BankID:            slug,
+		SubjectCN:         cert.SubjectCN,
+		Issuer:            cert.Issuer,
+		SerialNumber:      cert.SerialNumber,
+		FingerprintSHA256: cert.FingerprintSHA256,
+		NotBefore:         cert.NotBefore,
+		NotAfter:          cert.NotAfter,
+	}, nil
 }
 
 // --- Pricing ---
