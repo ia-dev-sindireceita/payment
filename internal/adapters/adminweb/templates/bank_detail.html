@@ -16,12 +16,5 @@
 
 {{template "cred_card" .}}
 
-<div class="card">
-  <h2>Chave PIX do recebedor</h2>
-  <dl class="dl">
-    <dt>Chave registrada</dt>
-    <dd>{{if .Bank.CreditorKeySet}}<code>{{.Bank.CreditorKey}}</code>{{else}}<span class="muted">— não configurada</span>{{end}}</dd>
-  </dl>
-  <p class="help">A chave do recebedor fixa o destino dos fundos do tenant. Não é um segredo. A edição pela console será habilitada em uma próxima entrega (depende do port de escrita da chave).</p>
-</div>
+{{template "creditor_card" .}}
 {{end}}

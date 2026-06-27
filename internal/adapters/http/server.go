@@ -268,6 +268,9 @@ func (s *Server) Router() http.Handler {
 				r.Post("/tenants/{id}/credentials", s.consoleSetCredential)
 				r.Post("/tenants/{id}/banks", s.consoleAddBank)
 				r.Post("/tenants/{id}/banks/{bankId}/credential", s.consoleSetBankCredential)
+				// Creditor PIX key write — bankless per the binding port-shape decision
+				// (SIN-66017 / ADR-0008); writes the tenant's default-bank credential.
+				r.Post("/tenants/{id}/creditor-key", s.consoleSetCreditorKey)
 				r.Post("/tenants/{id}/pricing", s.consoleSetPrice)
 			})
 		})

@@ -17,6 +17,7 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/app"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
+	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
 
 // console_handlers.go is the server-rendered HTMX admin console (SIN-64727). It
@@ -302,12 +303,70 @@ func (s *Server) consoleBankDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.ui.Page(w, r, "bank_detail", http.StatusOK, adminweb.BankDetailView{
-		Base:   s.consoleBase(r, info.Slug, "tenants"),
-		Tenant: tv,
-		Bank:   adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0],
-		Form:   map[string]string{},
-		Errors: map[string]string{},
+		Base:             s.consoleBase(r, info.Slug, "tenants"),
+		Tenant:           tv,
+		Bank:             adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0],
+		Form:             map[string]string{},
+		Errors:           map[string]string{},
+		CreditorEditable: info.Slug == ports.BankIDC6,
 	})
+}
+
+// consoleSetCreditorKey records the tenant's PIX creditor key (chave do
+// recebedor) and replies with a card-only HTMX swap (hx-target=#creditor-card):
+// only the creditor card re-renders. The write targets the tenant's default-bank
+// credential (BankIDC6) — the binding bankless write path (SIN-66017 / ADR-0008);
+// the card is rendered editable only on that bank's detail page. RBAC (RoleAdmin)
+// and CSRF are inherited from the console mutation group — not re-implemented. The
+// key is routing-sensitive and never echoed back into the form.
+func (s *Server) consoleSetCreditorKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	tv := adminweb.ToTenantView(t)
+	card := func(status int, info app.BankInfo, errs map[string]string, saved bool) {
+		s.ui.Partial(w, status, "creditor_card", adminweb.BankDetailView{
+			Base:             s.consoleBase(r, info.Slug, "tenants"),
+			Tenant:           tv,
+			Bank:             adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0],
+			Form:             map[string]string{},
+			Errors:           errs,
+			CreditorSaved:    saved,
+			CreditorEditable: true,
+		})
+	}
+	key := strings.TrimSpace(r.PostFormValue("creditor_key"))
+	if err := s.console.SetCreditorKey(r.Context(), tv.ID, key); err != nil {
+		// Re-read so the card reflects current state; never echo the key value.
+		info, gerr := s.console.GetBank(r.Context(), tv.ID, ports.BankIDC6)
+		if gerr != nil {
+			s.consoleError(w, gerr)
+			return
+		}
+		card(http.StatusUnprocessableEntity, info, creditorErrors(err), false)
+		return
+	}
+	info, err := s.console.GetBank(r.Context(), tv.ID, ports.BankIDC6)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	card(http.StatusOK, info, map[string]string{}, true)
+}
+
+// creditorErrors maps a creditor-key write failure to the card's inline errors,
+// never leaking the key. A missing bank credential (ErrNotFound) is a
+// user-actionable precondition — a creditor key needs a bank identity first — so
+// it surfaces as a form banner rather than 404-ing the card; an invalid key shape
+// surfaces inline on the field.
+func creditorErrors(err error) map[string]string {
+	if errors.Is(err, shared.ErrNotFound) {
+		return map[string]string{"form": "configure a credencial bancária do tenant antes de definir a chave do recebedor"}
+	}
+	return fieldErrors(err, "creditor_key")
 }
 
 // consoleSetBankCredential writes a tenant's credential for a specific bank and

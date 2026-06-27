@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
@@ -24,14 +25,16 @@ import (
 // the concrete sqlite/inmemory stores satisfy them, but the console declares
 // exactly the capabilities it uses and nothing more.
 type ConsoleService struct {
-	tenants     TenantStore
-	pricing     PricingStore
-	ledger      LedgerReader
-	credWriter  ports.CredentialWriter
-	credReader  ports.CredentialStore
-	credEvictor ports.CredentialInvalidator
-	clock       ports.Clock
-	ids         ports.IDProvider
+	tenants       TenantStore
+	pricing       PricingStore
+	ledger        LedgerReader
+	credWriter    ports.CredentialWriter
+	creditorWrite ports.CreditorKeyWriter
+	credReader    ports.CredentialStore
+	credEvictor   ports.CredentialInvalidator
+	audit         ports.AuditLog
+	clock         ports.Clock
+	ids           ports.IDProvider
 }
 
 // TenantStore is the tenant capability the console needs: the foundation's
@@ -67,12 +70,21 @@ type ConsoleDeps struct {
 	// never projected into a view (threat C1/C4). Optional: nil degrades to "no bank
 	// reports a credential" (the screens still render, every bank shows — pendente).
 	CredReader ports.CredentialStore
+	// CreditorWriter is the fund-routing write path for a tenant's PIX creditor key
+	// (chave do recebedor). It is intentionally separate from CredWriter (ISP, least
+	// privilege): the console grants the creditor-key capability independently of the
+	// secret-rotation capability (SIN-66092 / ADR-0008).
+	CreditorWriter ports.CreditorKeyWriter
 	// CredInvalidator evicts cached state keyed on a tenant's credential (the C6
 	// OAuth2 token cache) right after a credential write, closing the
 	// token-revocation lag (ADR-0003). Optional: nil degrades to a no-op.
 	CredInvalidator ports.CredentialInvalidator
-	Clock           ports.Clock
-	IDs             ports.IDProvider
+	// Audit is the append-only trail every privileged console mutation is recorded
+	// to with the acting operator (OWASP A09). Optional: nil degrades to a no-op so
+	// wiring-light tests keep working, but production MUST wire a real audit log.
+	Audit ports.AuditLog
+	Clock ports.Clock
+	IDs   ports.IDProvider
 }
 
 // NewConsoleService wires a ConsoleService from its dependencies. A nil
@@ -83,15 +95,21 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 	if ci == nil {
 		ci = noopCredInvalidator{}
 	}
+	a := d.Audit
+	if a == nil {
+		a = noopAudit{}
+	}
 	return &ConsoleService{
-		tenants:     d.Tenants,
-		pricing:     d.Pricing,
-		ledger:      d.Ledger,
-		credWriter:  d.CredWriter,
-		credReader:  d.CredReader,
-		credEvictor: ci,
-		clock:       d.Clock,
-		ids:         d.IDs,
+		tenants:       d.Tenants,
+		pricing:       d.Pricing,
+		ledger:        d.Ledger,
+		credWriter:    d.CredWriter,
+		creditorWrite: d.CreditorWriter,
+		credReader:    d.CredReader,
+		credEvictor:   ci,
+		audit:         a,
+		clock:         d.Clock,
+		ids:           d.IDs,
 	}
 }
 
@@ -360,6 +378,38 @@ func (s *ConsoleService) SetBankCredentialFor(ctx context.Context, tenantID, ban
 		return fmt.Errorf("set bank credential: %w", err)
 	}
 	s.credEvictor.InvalidateToken(tenantID)
+	return nil
+}
+
+// SetCreditorKey records a tenant's PIX creditor key (chave do recebedor) via the
+// fund-routing write port, then audits the change with the acting operator. The
+// target tenant must exist (defense-in-depth alongside the boundary RBAC). The
+// key targets the tenant's default-bank credential (BankIDC6, the single
+// allow-listed bank) per the binding port-shape decision (SIN-66017 / ADR-0008):
+// no bank dimension on this write path. The key is routing-sensitive, not a
+// secret: the adapter validates its PIX shape and preserves the credential's
+// secret/client id (read-modify-write), and the error path never echoes the value
+// (threat C1/C4). No OAuth token-cache eviction is performed — the creditor key is
+// not part of the OAuth identity, so a cached bearer stays valid (ADR-0003).
+func (s *ConsoleService) SetCreditorKey(ctx context.Context, tenantID, creditorKey string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return fmt.Errorf("resolve tenant: %w", err)
+	}
+	if err := s.creditorWrite.SetCreditorKey(ctx, tenantID, strings.TrimSpace(creditorKey)); err != nil {
+		// Wrap with non-sensitive context only; never include the key value.
+		return fmt.Errorf("set creditor key: %w", err)
+	}
+	// Audit the fund-routing change with who/which-tenant/which-bank (the default
+	// bank the creditor key is registered under) — never the key value. Fail-closed:
+	// a forensic-record error surfaces rather than silently dropping the trail.
+	e, err := audit.NewCreditorKeySetEntry(s.ids.NewID(), OperatorIDFromContext(ctx), tenantID, ports.BankIDC6, s.clock.Now())
+	if err != nil {
+		return fmt.Errorf("build audit entry: %w", err)
+	}
+	if err := s.audit.Append(ctx, e); err != nil {
+		return fmt.Errorf("append audit entry: %w", err)
+	}
 	return nil
 }
 
