@@ -66,6 +66,14 @@ const (
 	// atomically. No secret is involved — it records only who/what/which-charge/
 	// tenant/when.
 	ActionCobRCreated Action = "recurrence.cobr.created"
+
+	// ActionSetBankCertificate records a write of a tenant's per-bank mTLS client
+	// certificate (SIN-66087). Like ActionSetBankCredential it names the tenant, the
+	// operator and the non-secret bankID; additionally it carries the certificate's
+	// SHA-256 fingerprint (a PUBLIC identifier) in the tx_id column so the trail
+	// records WHICH certificate was provisioned and distinguishes a cert rotation
+	// from an OAuth secret write. It NEVER records the private key (threat C1/C4).
+	ActionSetBankCertificate Action = "certificate.set"
 )
 
 // recurrenceActionByStatus maps a recurrence.RecStatus string to the audit Action
@@ -89,7 +97,8 @@ func (a Action) valid() bool {
 	case ActionCreateTenant, ActionSetEndpointPrice, ActionSetBankCredential,
 		ActionSetCreditorKey, ActionSuspendTenant, ActionActivateTenant,
 		ActionSettlementAmountMismatch, ActionRecCreated, ActionRecApproved,
-		ActionRecRejected, ActionRecExpired, ActionRecCancelled, ActionCobRCreated:
+		ActionRecRejected, ActionRecExpired, ActionRecCancelled, ActionCobRCreated,
+		ActionSetBankCertificate:
 		return true
 	default:
 		return false
@@ -202,6 +211,43 @@ func NewCreditorKeySetEntry(id, operatorID, tenantID, bankID string, at time.Tim
 		action:     ActionSetCreditorKey,
 		tenantID:   tenantID,
 		at:         at,
+		bankID:     bankID,
+	}, nil
+}
+
+// NewCertificateSetEntry builds the audit record for a per-bank mTLS certificate
+// write (ActionSetBankCertificate, SIN-66087). Beyond who/what/tenant/when it
+// carries the non-secret bankID and the certificate's SHA-256 fingerprint (a
+// public identifier) in the tx_id column, so the trail records WHICH certificate
+// was provisioned for the (tenant, bank) pair. It NEVER records the private key by
+// construction — it has no such parameter (threat C1/C4). Invariants: a non-empty
+// id, tenant, bankID and fingerprint; the admin service normalizes an empty
+// selector to the default bank before calling, so a blank bankID is a programming
+// error.
+func NewCertificateSetEntry(id, operatorID, tenantID, bankID, fingerprint string, at time.Time) (Entry, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Entry{}, shared.NewValidationError("id", "audit entry id is required")
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return Entry{}, shared.NewValidationError("tenant_id", "tenant id is required")
+	}
+	bankID = strings.TrimSpace(bankID)
+	if bankID == "" {
+		return Entry{}, shared.NewValidationError("bank_id", "bank id is required")
+	}
+	fingerprint = strings.TrimSpace(fingerprint)
+	if fingerprint == "" {
+		return Entry{}, shared.NewValidationError("fingerprint", "certificate fingerprint is required")
+	}
+	return Entry{
+		id:         id,
+		operatorID: strings.TrimSpace(operatorID),
+		action:     ActionSetBankCertificate,
+		tenantID:   tenantID,
+		at:         at,
+		txID:       fingerprint,
 		bankID:     bankID,
 	}, nil
 }
