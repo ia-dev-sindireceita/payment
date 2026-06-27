@@ -1,6 +1,7 @@
 package adminweb
 
 import (
+	"net/url"
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/app"
@@ -124,17 +125,27 @@ type ConsumptionRow struct {
 // TotalReais renders the row total in Brazilian currency.
 func (r ConsumptionRow) TotalReais() string { return reais(r.TotalCents) }
 
-// ConsumptionView backs the read-only consumption-audit screen.
+// ConsumptionView backs the read-only consumption-audit screen. StartDate and
+// EndDate are the active filter window in ISO form (YYYY-MM-DD) — they back the
+// date inputs and the CSV export link so the export mirrors what is on screen.
 type ConsumptionView struct {
 	Base
 	Tenant     TenantView
 	Rows       []ConsumptionRow
 	TotalCalls int
 	TotalCents int64
+	StartDate  string
+	EndDate    string
 }
 
 // TotalReais renders the grand total in Brazilian currency.
 func (v ConsumptionView) TotalReais() string { return reais(v.TotalCents) }
+
+// CSVHref is the same-origin export link for the current tenant and filter
+// window (CSP-friendly: a plain GET to a whitelisted route, no inline handler).
+func (v ConsumptionView) CSVHref() string {
+	return "/console/tenants/" + url.PathEscape(v.Tenant.ID) + "/consumption.csv?start_date=" + url.QueryEscape(v.StartDate) + "&end_date=" + url.QueryEscape(v.EndDate)
+}
 
 // ToConsumptionView projects a domain consumption report for rendering.
 func ToConsumptionView(t TenantView, rep app.ConsumptionReport) ConsumptionView {

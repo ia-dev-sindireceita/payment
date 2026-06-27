@@ -254,6 +254,8 @@ func (s *Server) Router() http.Handler {
 				r.Get("/tenants/{id}/credentials", s.consoleCredentialsForm)
 				r.Get("/tenants/{id}/pricing", s.consolePricing)
 				r.Get("/tenants/{id}/consumption", s.consoleConsumption)
+				r.Get("/tenants/{id}/consumption/rows", s.consoleConsumptionRows)
+				r.Get("/tenants/{id}/consumption.csv", s.consoleConsumptionCSV)
 			})
 
 			r.Group(func(r chi.Router) {

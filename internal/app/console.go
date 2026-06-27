@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
@@ -83,6 +84,12 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 		ids:         d.IDs,
 	}
 }
+
+// Now returns the service's notion of the current time from the injected clock.
+// The console's read side uses it to default the consumption date window, so the
+// default tracks the same clock the rest of the use-cases stamp events with
+// (deterministic under a fixed test clock).
+func (s *ConsoleService) Now() time.Time { return s.clock.Now() }
 
 // --- Tenants ---
 
@@ -276,11 +283,38 @@ type ConsumptionReport struct {
 	TotalCents int64
 }
 
-// Consumption builds the per-endpoint consumption report for a tenant from its
-// ledger. The ledger is authoritative for billing, so the audit is a pure
-// aggregation of recorded events — never a value derived from mutable state. The
-// tenant must exist so the screen 404s cleanly.
+// ConsumptionRange bounds a consumption report by ledger-entry time. The window
+// is half-open [Start, End): an entry is counted when its time is not before
+// Start and strictly before End. A zero value on either side is unbounded on
+// that side, so the zero ConsumptionRange selects every entry.
+type ConsumptionRange struct {
+	Start time.Time
+	End   time.Time
+}
+
+// includes reports whether t falls inside the (possibly unbounded) window.
+func (rng ConsumptionRange) includes(t time.Time) bool {
+	if !rng.Start.IsZero() && t.Before(rng.Start) {
+		return false
+	}
+	if !rng.End.IsZero() && !t.Before(rng.End) {
+		return false
+	}
+	return true
+}
+
+// Consumption builds the per-endpoint consumption report for a tenant over all
+// recorded ledger entries. See ConsumptionInRange for the time-bounded variant.
 func (s *ConsoleService) Consumption(ctx context.Context, tenantID string) (ConsumptionReport, error) {
+	return s.ConsumptionInRange(ctx, tenantID, ConsumptionRange{})
+}
+
+// ConsumptionInRange builds the per-endpoint consumption report for a tenant from
+// its ledger, counting only entries whose time falls inside rng. The ledger is
+// authoritative for billing, so the audit is a pure aggregation of recorded
+// events — never a value derived from mutable state. The tenant must exist so
+// the screen 404s cleanly.
+func (s *ConsoleService) ConsumptionInRange(ctx context.Context, tenantID string, rng ConsumptionRange) (ConsumptionReport, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
 		return ConsumptionReport{}, fmt.Errorf("resolve tenant: %w", err)
@@ -292,6 +326,9 @@ func (s *ConsoleService) Consumption(ctx context.Context, tenantID string) (Cons
 	byEndpoint := make(map[string]*ConsumptionLine)
 	rep := ConsumptionReport{TenantID: tenantID}
 	for _, e := range entries {
+		if !rng.includes(e.At()) {
+			continue
+		}
 		line, ok := byEndpoint[e.Endpoint()]
 		if !ok {
 			line = &ConsumptionLine{Endpoint: e.Endpoint()}

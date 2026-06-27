@@ -28,6 +28,21 @@
 {{- end -}}
 {{end}}
 
+{{define "consumption_rows"}}
+<table class="data">
+  <caption class="sr-only">Consumo por endpoint para {{.Tenant.Name}}</caption>
+  <thead><tr><th scope="col">Endpoint</th><th scope="col">Chamadas</th><th scope="col">Total</th></tr></thead>
+  <tbody>
+  {{- if .Rows -}}
+  {{range .Rows}}<tr><td><code>{{.Endpoint}}</code></td><td>{{.Calls}}</td><td>{{.TotalReais}}</td></tr>{{end}}
+  {{- else -}}
+  <tr class="empty-row"><td colspan="3"><div class="empty"><p class="muted">Sem consumo registrado neste período.</p></div></td></tr>
+  {{- end -}}
+  </tbody>
+  {{if .Rows}}<tfoot><tr><th scope="row">Total</th><td>{{.TotalCalls}}</td><td>{{.TotalReais}}</td></tr></tfoot>{{end}}
+</table>
+{{end}}
+
 {{define "toast_oob"}}
 <div id="toasts" hx-swap-oob="afterbegin">
   <div class="toast toast--{{.Kind}}" role="status">{{.Message}}</div>

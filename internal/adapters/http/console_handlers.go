@@ -2,11 +2,14 @@ package http
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
+	"fmt"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -263,6 +266,38 @@ func (s *Server) consoleSetPrice(w http.ResponseWriter, r *http.Request) {
 
 // --- Consumption audit (read-only) ---
 
+// consumptionDateLayout is the ISO date form the <input type="date"> controls and
+// the CSV link speak (YYYY-MM-DD).
+const consumptionDateLayout = "2006-01-02"
+
+// parseConsumptionRange reads the start_date/end_date query params, defaulting to
+// the last 30 days when absent. The returned strings echo the effective window
+// back into the form and CSV link. The range is half-open [start, end+1day) so
+// the end date is inclusive of its whole day. A malformed date yields
+// ErrValidation (mapped to 400 at the boundary), never a silent default.
+func parseConsumptionRange(r *http.Request, now time.Time) (app.ConsumptionRange, string, string, error) {
+	now = now.UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	start, end := today.AddDate(0, 0, -30), today
+	q := r.URL.Query()
+	if v := strings.TrimSpace(q.Get("start_date")); v != "" {
+		p, err := time.ParseInLocation(consumptionDateLayout, v, time.UTC)
+		if err != nil {
+			return app.ConsumptionRange{}, "", "", shared.NewValidationError("start_date", "data inicial inválida")
+		}
+		start = p
+	}
+	if v := strings.TrimSpace(q.Get("end_date")); v != "" {
+		p, err := time.ParseInLocation(consumptionDateLayout, v, time.UTC)
+		if err != nil {
+			return app.ConsumptionRange{}, "", "", shared.NewValidationError("end_date", "data final inválida")
+		}
+		end = p
+	}
+	rng := app.ConsumptionRange{Start: start, End: end.AddDate(0, 0, 1)}
+	return rng, start.Format(consumptionDateLayout), end.Format(consumptionDateLayout), nil
+}
+
 func (s *Server) consoleConsumption(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	t, err := s.console.GetTenant(r.Context(), id)
@@ -270,14 +305,84 @@ func (s *Server) consoleConsumption(w http.ResponseWriter, r *http.Request) {
 		s.consoleError(w, err)
 		return
 	}
-	rep, err := s.console.Consumption(r.Context(), id)
+	rng, startStr, endStr, err := parseConsumptionRange(r, s.console.Now())
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	rep, err := s.console.ConsumptionInRange(r.Context(), id, rng)
 	if err != nil {
 		s.consoleError(w, err)
 		return
 	}
 	view := adminweb.ToConsumptionView(adminweb.ToTenantView(t), rep)
+	view.StartDate, view.EndDate = startStr, endStr
 	view.Base = s.consoleBase(r, "Consumo", "tenants")
 	s.ui.Page(w, r, "consumption", http.StatusOK, view)
+}
+
+// consoleConsumptionRows renders just the consumption table for a date-range
+// filter swap (hx-target="#consumption-rows"), mirroring consoleTenantRows. The
+// tenant is resolved by ConsumptionInRange, so an unknown id still 404s cleanly.
+func (s *Server) consoleConsumptionRows(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	rng, startStr, endStr, err := parseConsumptionRange(r, s.console.Now())
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	rep, err := s.console.ConsumptionInRange(r.Context(), id, rng)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	view := adminweb.ToConsumptionView(adminweb.ToTenantView(t), rep)
+	view.StartDate, view.EndDate = startStr, endStr
+	s.ui.Partial(w, http.StatusOK, "consumption_rows", view)
+}
+
+// consoleConsumptionCSV exports the per-endpoint consumption for the active
+// window as a CSV download. It is a read-only, same-origin GET (CSP-friendly);
+// money is emitted in both integer centavos (exact) and a locale-neutral decimal.
+func (s *Server) consoleConsumptionCSV(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	rng, startStr, endStr, err := parseConsumptionRange(r, s.console.Now())
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	rep, err := s.console.ConsumptionInRange(r.Context(), id, rng)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// startStr/endStr are validated YYYY-MM-DD, so the filename carries no
+	// user-controlled bytes (no header-injection surface).
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"consumo-%s-a-%s.csv\"", startStr, endStr))
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"endpoint", "chamadas", "total_centavos", "total_reais"})
+	for _, l := range rep.Lines {
+		_ = cw.Write([]string{l.Endpoint, strconv.Itoa(l.Calls), strconv.FormatInt(l.TotalCents, 10), centsDecimal(l.TotalCents)})
+	}
+	_ = cw.Write([]string{"TOTAL", strconv.Itoa(rep.TotalCalls), strconv.FormatInt(rep.TotalCents, 10), centsDecimal(rep.TotalCents)})
+	cw.Flush()
+}
+
+// centsDecimal renders integer centavos as a locale-neutral decimal string
+// (e.g. 250 -> "2.50") suitable for spreadsheet import.
+func centsDecimal(cents int64) string {
+	neg := ""
+	if cents < 0 {
+		neg, cents = "-", -cents
+	}
+	return fmt.Sprintf("%s%d.%02d", neg, cents/100, cents%100)
 }
 
 // --- helpers ---
