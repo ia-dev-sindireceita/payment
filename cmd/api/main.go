@@ -54,6 +54,12 @@ func run() error {
 
 	store := sqlite.NewStore(db)
 	creds := secret.NewStore(cfg.BankCreds)
+	// Per-(tenant,bank) mTLS certificate vault (SIN-66087): the admin console writes
+	// the cert/key here as write-only material with public metadata exposed. It is
+	// in-memory like the OAuth credential store today; an encrypted-at-rest backing
+	// is a separable follow-up. The live C6 mTLS transport still loads from the
+	// runbook §8 disk path until the transport-swap follow-up lands.
+	certs := secret.NewCertStore()
 	// Durable, append-only audit trail for privileged admin-plane and money-movement
 	// actions (SIN-66025): the SQLite Store implements ports.AuditLog, so entries
 	// survive a restart and — when appended through the unit of work — commit
@@ -106,6 +112,7 @@ func run() error {
 		CobRReader:      cobrReader,
 		Credentials:     creds,
 		CredWriter:      creds,
+		CertWriter:      certs,
 		CredInvalidator: credInvalidator,
 		Audit:           store,
 		Clock:           system.Clock{},
