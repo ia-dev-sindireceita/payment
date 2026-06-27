@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +293,114 @@ func TestConsoleConsumptionScreen(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "POST /v1/charges") || !strings.Contains(body, "R$ 2,50") {
 		t.Fatalf("consumption body unexpected: %s", body)
+	}
+}
+
+// seedLedger appends one ledger entry stamped at the given Unix second.
+func seedLedger(t *testing.T, f *consoleFixture, id, endpoint string, cents, atUnix int64) {
+	t.Helper()
+	e, err := billing.NewLedgerEntry("e-"+endpoint+"-"+strconv.FormatInt(atUnix, 10), "t1", endpoint, "ref", cents, time.Unix(atUnix, 0).UTC())
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	if err := f.store.AppendLedgerEntry(context.Background(), e); err != nil {
+		t.Fatalf("append ledger: %v", err)
+	}
+}
+
+// TestConsoleConsumptionDefaultWindow asserts the screen defaults to the last 30
+// days relative to the service clock (fixedClock → Unix(1000)): an entry inside
+// the window renders, one well outside it does not.
+func TestConsoleConsumptionDefaultWindow(t *testing.T) {
+	t.Parallel()
+	f := newConsoleFixture(t)
+	seedLedger(t, f, "t1", "POST /v1/inside", 250, 500)        // within default 30d window
+	seedLedger(t, f, "t1", "POST /v1/outside", 999, 5_000_000) // ~58 days after epoch, outside
+
+	rec := consoleGet(t, f.handler, "/console/tenants/t1/consumption", adminToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("consumption = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "POST /v1/inside") {
+		t.Fatalf("default window dropped in-window entry: %s", body)
+	}
+	if strings.Contains(body, "POST /v1/outside") {
+		t.Fatalf("default window leaked out-of-window entry: %s", body)
+	}
+	// The CSV link and date inputs are present (polish controls).
+	if !strings.Contains(body, "/consumption.csv?") || !strings.Contains(body, `name="start_date"`) {
+		t.Fatalf("missing range controls / csv link: %s", body)
+	}
+}
+
+// TestConsoleConsumptionRowsFilter drives the partial-swap endpoint with an
+// explicit range and asserts only in-range entries come back.
+func TestConsoleConsumptionRowsFilter(t *testing.T) {
+	t.Parallel()
+	f := newConsoleFixture(t)
+	seedLedger(t, f, "t1", "POST /v1/early", 100, 50)
+	seedLedger(t, f, "t1", "POST /v1/late", 200, 900)
+
+	rec := consoleGet(t, f.handler, "/console/tenants/t1/consumption/rows?start_date=1969-12-31&end_date=1970-01-01", adminToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rows = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Both entries fall on 1970-01-01 (Unix 50 and 900), so both are in range.
+	if !strings.Contains(body, "POST /v1/early") || !strings.Contains(body, "POST /v1/late") {
+		t.Fatalf("rows missing entries: %s", body)
+	}
+	// A window before the epoch day excludes everything → empty-state copy.
+	empty := consoleGet(t, f.handler, "/console/tenants/t1/consumption/rows?start_date=1969-01-01&end_date=1969-01-02", adminToken)
+	if empty.Code != http.StatusOK || !strings.Contains(empty.Body.String(), "Sem consumo registrado") {
+		t.Fatalf("expected empty window, got %d: %s", empty.Code, empty.Body.String())
+	}
+	// Unknown tenant 404s.
+	if miss := consoleGet(t, f.handler, "/console/tenants/missing/consumption/rows", adminToken); miss.Code != http.StatusNotFound {
+		t.Fatalf("rows missing tenant = %d", miss.Code)
+	}
+}
+
+// TestConsoleConsumptionCSV asserts the export is a same-origin CSV download with
+// a header row, one line per endpoint and a totals row.
+func TestConsoleConsumptionCSV(t *testing.T) {
+	t.Parallel()
+	f := newConsoleFixture(t)
+	seedLedger(t, f, "t1", "POST /v1/charges", 250, 500)
+	seedLedger(t, f, "t1", "POST /v1/charges", 250, 600)
+
+	rec := consoleGet(t, f.handler, "/console/tenants/t1/consumption.csv", adminToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("csv = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Fatalf("csv content-type = %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, ".csv") {
+		t.Fatalf("csv content-disposition = %q", cd)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"endpoint,chamadas,total_centavos,total_reais", "POST /v1/charges,2,500,5.00", "TOTAL,2,500,5.00"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("csv missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+// TestConsoleConsumptionBadDate asserts a malformed date is rejected at the
+// boundary (400) rather than silently falling back to a default window.
+func TestConsoleConsumptionBadDate(t *testing.T) {
+	t.Parallel()
+	f := newConsoleFixture(t)
+	for _, path := range []string{
+		"/console/tenants/t1/consumption?start_date=nope",
+		"/console/tenants/t1/consumption/rows?end_date=2026-13-40",
+		"/console/tenants/t1/consumption.csv?start_date=99-99-99",
+	} {
+		if rec := consoleGet(t, f.handler, path, adminToken); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400", path, rec.Code)
+		}
 	}
 }
 
