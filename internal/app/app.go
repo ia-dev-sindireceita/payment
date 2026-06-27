@@ -72,6 +72,12 @@ type Deps struct {
 	// Kept separate from Credentials (the reader) so each service depends only on
 	// the capability it needs.
 	CredWriter ports.CredentialWriter
+	// CertWriter is the admin-plane write path for per-(tenant,bank) mTLS client
+	// certificates (SIN-66087). Kept separate from CredWriter (a different secret
+	// aggregate) so the AdminService depends only on the capability it needs. When
+	// nil, the certificate write use-case is unavailable (the endpoint is only wired
+	// when a store is provided).
+	CertWriter ports.BankCertificateWriter
 	// CredInvalidator evicts cached state keyed on a tenant's credential (the C6
 	// OAuth2 token cache) right after a credential write, closing the
 	// token-revocation lag (ADR-0003). Optional: when nil the admin services use a

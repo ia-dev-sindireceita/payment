@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -201,6 +202,66 @@ func (s *Server) handleSetBankCredential(w http.ResponseWriter, r *http.Request)
 	}
 	// Echo only non-secret fields so the secret never leaves the secret store.
 	writeJSON(w, http.StatusOK, bankCredentialView{TenantID: tenantID, Bank: bank, ClientID: req.ClientID, Status: "ok"})
+}
+
+// setBankCertificateRequest carries a tenant's per-bank mTLS client certificate
+// (SIN-66087). cert_pem is the PUBLIC leaf certificate; key_pem is its private key
+// and is write-only — accepted here, validated server-side, forwarded to the vault,
+// and NEVER read back, logged or echoed in any response (threat C1/C4). The bank
+// slug selects the bank (ADR-0007); optional, defaults to BankIDC6.
+type setBankCertificateRequest struct {
+	Bank    string `json:"bank"`
+	CertPEM string `json:"cert_pem"`
+	KeyPEM  string `json:"key_pem"`
+}
+
+// bankCertificateView confirms a certificate write with ONLY the public metadata
+// of the certificate — never the private key. Timestamps are RFC3339 UTC so the
+// UI can render the validity window and badge a not-yet-valid/expiring cert.
+type bankCertificateView struct {
+	TenantID          string `json:"tenant_id"`
+	Bank              string `json:"bank"`
+	SubjectCN         string `json:"subject_cn"`
+	Issuer            string `json:"issuer"`
+	SerialNumber      string `json:"serial_number"`
+	FingerprintSHA256 string `json:"fingerprint_sha256"`
+	NotBefore         string `json:"not_before"`
+	NotAfter          string `json:"not_after"`
+	Status            string `json:"status"`
+}
+
+func (s *Server) handleSetBankCertificate(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantID")
+	var req setBankCertificateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	// Boundary validation (deny-by-default): normalize the optional bank slug and
+	// reject an unknown bank with a 400 before reaching the use-case. The
+	// AdminService re-validates (defense-in-depth); both layers resolve "" to c6.
+	bank := ports.NormalizeBankID(req.Bank)
+	if !ports.IsKnownBankID(bank) {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	meta, err := s.admin.SetBankCertificate(r.Context(), tenantID, bank, req.CertPEM, req.KeyPEM)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	// Echo only the public certificate metadata; the private key never leaves the
+	// vault and is never serialized into a response.
+	writeJSON(w, http.StatusOK, bankCertificateView{
+		TenantID:          meta.TenantID,
+		Bank:              meta.BankID,
+		SubjectCN:         meta.SubjectCN,
+		Issuer:            meta.Issuer,
+		SerialNumber:      meta.SerialNumber,
+		FingerprintSHA256: meta.FingerprintSHA256,
+		NotBefore:         meta.NotBefore.UTC().Format(time.RFC3339),
+		NotAfter:          meta.NotAfter.UTC().Format(time.RFC3339),
+		Status:            "ok",
+	})
 }
 
 // --- C6 bank webhook ---

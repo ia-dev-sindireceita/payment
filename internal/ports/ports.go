@@ -365,6 +365,81 @@ type CredentialInvalidator interface {
 	InvalidateToken(tenantID string)
 }
 
+// BankCertificate is the per-(tenant,bank) mTLS client certificate material an
+// admin uploads through the console (SIN-66087). CertPEM is the PUBLIC leaf
+// certificate; KeyPEM is its private key and is a SECRET: write-only, held only
+// transiently on the write path, and NEVER returned, logged or audited. Both
+// String() and LogValue() redact KeyPEM so the key can never leak through
+// %v/%s/%+v formatting or structured logging (threat C1/C4), mirroring
+// BankCredential. An empty BankID is stored under the default BankIDC6 (retro-compat).
+type BankCertificate struct {
+	TenantID string
+	BankID   string
+	CertPEM  string // public leaf certificate (PEM)
+	KeyPEM   string // SECRET private key (PEM) — write-only, transient
+}
+
+// String redacts the private key so a certificate value can never leak it through
+// %v/%s/%+v formatting in logs or errors (defense-in-depth, threat C1/C4). The
+// public certificate is reported only as present/absent, never inlined.
+func (c BankCertificate) String() string {
+	return fmt.Sprintf("BankCertificate{TenantID:%s BankID:%s CertPEM:%s KeyPEM:[REDACTED]}", c.TenantID, c.BankID, certPresence(c.CertPEM))
+}
+
+// LogValue redacts the private key under structured logging, even when the value
+// is logged as an attribute (threat C1/C4), mirroring BankCredential.
+func (c BankCertificate) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("tenant_id", c.TenantID),
+		slog.String("bank_id", c.BankID),
+		slog.String("cert_pem", certPresence(c.CertPEM)),
+		slog.String("key_pem", "[REDACTED]"),
+	)
+}
+
+// certPresence reports whether the public certificate is present without inlining
+// it, keeping log/error lines compact and uniform (the cert is public, but a PEM
+// block does not belong in a log line).
+func certPresence(certPEM string) string {
+	if certPEM == "" {
+		return "[absent]"
+	}
+	return "[present]"
+}
+
+// BankCertificateMeta is the PUBLIC, non-secret metadata of a stored certificate.
+// It is what the admin UI displays and what the write endpoint echoes back; it
+// carries NO private-key material by construction.
+type BankCertificateMeta struct {
+	TenantID          string
+	BankID            string
+	SubjectCN         string
+	Issuer            string
+	SerialNumber      string
+	FingerprintSHA256 string
+	NotBefore         time.Time
+	NotAfter          time.Time
+}
+
+// BankCertificateWriter is the admin-plane write path for a per-(tenant,bank) mTLS
+// certificate. Kept separate from the reader (ISP) so a use-case depends only on
+// the capability it needs. The private key transits straight to the store: beyond
+// the transient BankCertificate it MUST NOT enter domain state, logs, errors or
+// URLs (threat C1/C4). The use-case parses and validates the material BEFORE
+// calling; an empty BankID is stored under the default BankIDC6 (retro-compat).
+type BankCertificateWriter interface {
+	SetBankCertificate(ctx context.Context, cert BankCertificate) error
+}
+
+// BankCertificateReader returns ONLY the public metadata of a stored certificate,
+// never the private key. The tenantID always comes from the authenticated caller
+// (never client input); bankID is a non-secret selector. A missing (tenantID,
+// bankID) pair returns ErrNotFound (deny-by-default). An empty bankID resolves to
+// the default BankIDC6 (retro-compat).
+type BankCertificateReader interface {
+	GetBankCertificateMeta(ctx context.Context, tenantID, bankID string) (BankCertificateMeta, error)
+}
+
 // ChargeRequest is the input to create a charge at the bank.
 type ChargeRequest struct {
 	TenantID    string
