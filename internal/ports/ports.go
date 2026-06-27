@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -228,6 +229,21 @@ func CanonicalBankID(bankID string) (string, bool) {
 func IsKnownBankID(bankID string) bool {
 	_, ok := knownBankIDs[bankID]
 	return ok
+}
+
+// KnownBankIDs returns the closed allow-list of supported bank slugs, sorted for
+// deterministic rendering. It is the read side of the same allow-list IsKnownBankID
+// guards: the admin console enumerates it to show, per tenant, which supported
+// banks have a credential configured (✓) and which are still pending (—), and to
+// populate the closed add-bank selector. The returned slice is a fresh copy, so a
+// caller can never mutate the allow-list (ADR-0007 deny-by-default).
+func KnownBankIDs() []string {
+	out := make([]string, 0, len(knownBankIDs))
+	for id := range knownBankIDs {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // BankCredential is a tenant's bank (PSP) credential reference, keyed inside the

@@ -49,6 +49,74 @@
 </div>
 {{end}}
 
+{{/* cred_status_badge maps a credential-presence bool to a badge. Never the value
+     — only whether a credential is configured (✓) or pending (—). Data is a bool. */}}
+{{define "cred_status_badge"}}
+{{- if . -}}
+<span class="badge badge--success"><span class="dot" aria-hidden="true"></span>configurada</span>
+{{- else -}}
+<span class="badge badge--warning"><span class="dot" aria-hidden="true"></span>pendente</span>
+{{- end -}}
+{{end}}
+
+{{/* bank_row renders one bank in the list table. Data is a BankRow. */}}
+{{define "bank_row"}}
+<tr id="bank-{{.Slug}}">
+  <td><a class="row-link" href="/console/tenants/{{.TenantID}}/banks/{{.Slug}}"
+         hx-get="/console/tenants/{{.TenantID}}/banks/{{.Slug}}" hx-target="#main" hx-push-url="true">{{.DisplayName}}</a></td>
+  <td><code>{{.Slug}}</code></td>
+  <td>{{template "cred_status_badge" .CredentialSet}}</td>
+  <td>{{template "status_badge" .}}</td>
+</tr>
+{{end}}
+
+{{/* bank_rows renders the bank list body or its empty state. Data is a BankListView. */}}
+{{define "bank_rows"}}
+{{- if .Banks -}}
+{{- range .Banks}}{{template "bank_row" .}}{{end -}}
+{{- else -}}
+<tr class="empty-row"><td colspan="4">
+  <div class="empty"><h2>Nenhum banco configurado</h2><p class="muted">Adicione o primeiro banco para o tenant começar a transacionar.</p></div>
+</td></tr>
+{{- end -}}
+{{end}}
+
+{{/* cred_card renders the write-only credential card. Data is a BankDetailView.
+     Posts to itself and swaps only #cred-card (outerHTML), so saving a credential
+     never disturbs the rest of the detail screen. The secret is never re-rendered. */}}
+{{define "cred_card"}}
+<form id="cred-card" class="form card" method="post"
+      action="/console/tenants/{{.Tenant.ID}}/banks/{{.Bank.Slug}}/credential"
+      hx-post="/console/tenants/{{.Tenant.ID}}/banks/{{.Bank.Slug}}/credential"
+      hx-target="#cred-card" hx-swap="outerHTML"
+      {{if .Bank.CredentialSet}}hx-confirm="Substituir a credencial atual do {{.Bank.DisplayName}}? As chamadas em andamento passam a usar a credencial nova a partir de agora."{{end}}>
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <h2>Credencial de API — {{.Bank.DisplayName}} {{template "cred_status_badge" .Bank.CredentialSet}}</h2>
+  {{if .CredSaved}}<div class="banner banner--success" role="status">Credencial salva. O segredo foi gravado no cofre e não é exibido novamente.</div>{{end}}
+  {{if .Errors.form}}<div class="banner banner--danger" role="alert">{{.Errors.form}}</div>{{end}}
+
+  <p class="muted">O segredo é gravado uma única vez no cofre (write-only). Esta tela nunca reexibe um segredo já configurado.</p>
+
+  <div class="field{{if .Errors.client_id}} has-error{{end}}">
+    <label for="f-client">Client ID *</label>
+    <input id="f-client" name="client_id" value="{{.Form.client_id}}" required maxlength="200" autocomplete="off"
+           {{if .Errors.client_id}}aria-invalid="true" aria-describedby="e-client"{{end}}>
+    {{if .Errors.client_id}}<span class="error" id="e-client" role="alert">{{.Errors.client_id}}</span>{{end}}
+  </div>
+
+  <div class="field{{if .Errors.secret}} has-error{{end}}">
+    <label for="f-secret">Secret *</label>
+    <input id="f-secret" name="secret" type="password" required autocomplete="off"
+           {{if .Errors.secret}}aria-invalid="true" aria-describedby="e-secret"{{else}}aria-describedby="h-secret"{{end}}>
+    {{if .Errors.secret}}<span class="error" id="e-secret" role="alert">{{.Errors.secret}}</span>{{else}}<span class="help" id="h-secret">Não é armazenado em texto na aplicação; vai direto ao cofre.</span>{{end}}
+  </div>
+
+  <div class="form-actions">
+    <button class="btn btn--primary" type="submit">Salvar credencial</button>
+  </div>
+</form>
+{{end}}
+
 {{define "status_header_oob"}}
 <span id="tenant-status" hx-swap-oob="true">{{template "status_badge" .}}</span>
 <span id="tenant-status-action" hx-swap-oob="true">{{template "status_action" .}}</span>

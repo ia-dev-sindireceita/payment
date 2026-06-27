@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
@@ -26,6 +28,7 @@ type ConsoleService struct {
 	pricing     PricingStore
 	ledger      LedgerReader
 	credWriter  ports.CredentialWriter
+	credReader  ports.CredentialStore
 	credEvictor ports.CredentialInvalidator
 	clock       ports.Clock
 	ids         ports.IDProvider
@@ -58,6 +61,12 @@ type ConsoleDeps struct {
 	Pricing    PricingStore
 	Ledger     LedgerReader
 	CredWriter ports.CredentialWriter
+	// CredReader is the read side of the credential store. The console uses it ONLY
+	// to answer "does this (tenant, bank) have a credential configured?" and to echo
+	// back the non-secret ClientID / CreditorKey on the bank screens — the secret is
+	// never projected into a view (threat C1/C4). Optional: nil degrades to "no bank
+	// reports a credential" (the screens still render, every bank shows — pendente).
+	CredReader ports.CredentialStore
 	// CredInvalidator evicts cached state keyed on a tenant's credential (the C6
 	// OAuth2 token cache) right after a credential write, closing the
 	// token-revocation lag (ADR-0003). Optional: nil degrades to a no-op.
@@ -79,6 +88,7 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 		pricing:     d.Pricing,
 		ledger:      d.Ledger,
 		credWriter:  d.CredWriter,
+		credReader:  d.CredReader,
 		credEvictor: ci,
 		clock:       d.Clock,
 		ids:         d.IDs,
@@ -230,6 +240,126 @@ func (s *ConsoleService) SetBankCredential(ctx context.Context, tenantID, client
 	// rotation/revocation takes effect immediately instead of after the cached
 	// bearer expires (token-revocation lag, ADR-0003). Best-effort and local.
 	s.credEvictor.InvalidateToken(strings.TrimSpace(tenantID))
+	return nil
+}
+
+// --- Banks (multi-bank console, SIN-66017 / SIN-66086) ---
+
+// BankInfo is the console projection of one bank within a tenant. It never
+// carries the secret: CredentialSet answers "is a credential configured?" and
+// ClientID / CreditorKey are non-secret identity fields echoed back for operator
+// recognition (the secret is fetched at use time and never rendered, threat C1).
+type BankInfo struct {
+	Slug          string
+	CredentialSet bool
+	ClientID      string
+	CreditorKey   string
+}
+
+// lookupBank reads the (tenantID, bankID) credential and reports whether one is
+// configured. A missing credential (ErrNotFound) is not an error — it is the
+// "pendente" state. A nil reader (optional dependency) degrades to "not
+// configured". Any other store error propagates so the screen 500s honestly.
+func (s *ConsoleService) lookupBank(ctx context.Context, tenantID, bankID string) (BankInfo, error) {
+	info := BankInfo{Slug: bankID}
+	if s.credReader == nil {
+		return info, nil
+	}
+	c, err := s.credReader.GetBankCredential(ctx, tenantID, bankID)
+	if err != nil {
+		if errors.Is(err, shared.ErrNotFound) {
+			return info, nil
+		}
+		return BankInfo{}, fmt.Errorf("read bank credential: %w", err)
+	}
+	// Project only non-secret identity fields. The secret stays in the store.
+	info.CredentialSet = true
+	info.ClientID = c.ClientID
+	info.CreditorKey = c.CreditorKey
+	return info, nil
+}
+
+// ListBanks returns the tenant's configured banks (those with a credential),
+// ordered deterministically by slug. The set of candidate banks is the platform's
+// closed allow-list (ports.KnownBankIDs) — there is no per-tenant bank registry,
+// so "the banks this tenant uses" is "the supported banks this tenant has a
+// credential for". A brand-new tenant returns an empty slice (the empty state).
+// The tenant must exist so the screen 404s cleanly.
+func (s *ConsoleService) ListBanks(ctx context.Context, tenantID string) ([]BankInfo, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return nil, fmt.Errorf("resolve tenant: %w", err)
+	}
+	out := make([]BankInfo, 0, len(ports.KnownBankIDs()))
+	for _, slug := range ports.KnownBankIDs() {
+		info, err := s.lookupBank(ctx, tenantID, slug)
+		if err != nil {
+			return nil, err
+		}
+		if info.CredentialSet {
+			out = append(out, info)
+		}
+	}
+	return out, nil
+}
+
+// AddableBankSlugs returns the supported bank slugs the tenant has NOT configured
+// yet, ordered by slug — the closed allow-list for the add-bank selector. When it
+// is empty every supported bank is already configured (the selector is disabled).
+func (s *ConsoleService) AddableBankSlugs(ctx context.Context, tenantID string) ([]string, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return nil, fmt.Errorf("resolve tenant: %w", err)
+	}
+	out := make([]string, 0, len(ports.KnownBankIDs()))
+	for _, slug := range ports.KnownBankIDs() {
+		info, err := s.lookupBank(ctx, tenantID, slug)
+		if err != nil {
+			return nil, err
+		}
+		if !info.CredentialSet {
+			out = append(out, slug)
+		}
+	}
+	return out, nil
+}
+
+// GetBank returns one bank's console projection for the detail screen. The bank
+// slug must be a supported bank (deny-by-default allow-list) — an unknown slug is
+// shared.ErrNotFound so the screen 404s rather than rendering a bank that can
+// never route a charge. The tenant must exist.
+func (s *ConsoleService) GetBank(ctx context.Context, tenantID, bankID string) (BankInfo, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return BankInfo{}, fmt.Errorf("resolve tenant: %w", err)
+	}
+	slug := ports.NormalizeBankID(bankID)
+	if !ports.IsKnownBankID(slug) {
+		return BankInfo{}, fmt.Errorf("unknown bank %q: %w", bankID, shared.ErrNotFound)
+	}
+	return s.lookupBank(ctx, tenantID, slug)
+}
+
+// SetBankCredentialFor stores a tenant's credential for an explicit bank (the
+// per-bank console write path, mirroring the admin PUT bank-credential contract
+// of SIN-66023). The bank slug is validated against the closed allow-list
+// (deny-by-default): an unknown slug is a validation error and the input is never
+// echoed (threat C1/C4). The secret transits straight to the writer — it never
+// enters domain state, logs, errors or any rendered response. The cached OAuth2
+// token minted under the prior credential is evicted immediately (ADR-0003).
+func (s *ConsoleService) SetBankCredentialFor(ctx context.Context, tenantID, bankID, clientID, secret string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return fmt.Errorf("resolve tenant: %w", err)
+	}
+	slug := ports.NormalizeBankID(bankID)
+	if !ports.IsKnownBankID(slug) {
+		return shared.NewValidationError("bank", "banco não suportado")
+	}
+	if err := s.credWriter.SetBankCredential(ctx, tenantID, slug, clientID, secret); err != nil {
+		return fmt.Errorf("set bank credential: %w", err)
+	}
+	s.credEvictor.InvalidateToken(tenantID)
 	return nil
 }
 

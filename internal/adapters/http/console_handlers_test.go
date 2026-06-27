@@ -39,7 +39,7 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 		t.Fatalf("seed: %v", err)
 	}
 	console := app.NewConsoleService(app.ConsoleDeps{
-		Tenants: store, Pricing: store, Ledger: store, CredWriter: creds,
+		Tenants: store, Pricing: store, Ledger: store, CredWriter: creds, CredReader: creds,
 		Clock: fixedClock{}, IDs: &seqIDs{},
 	})
 	ui, err := adminweb.New()

@@ -205,6 +205,156 @@ func (s *Server) consoleSetCredential(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Banks (multi-bank console, SIN-66017 / SIN-66086) ---
+
+// consoleBankList renders the tenant's bank list: the configured banks plus the
+// closed add-bank selector (supported banks not yet configured). Reads admit
+// Operator+Admin (RBAC at the boundary). No secret is ever projected.
+func (s *Server) consoleBankList(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	view, err := s.bankListView(r, t)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	s.ui.Page(w, r, "banks", http.StatusOK, view)
+}
+
+// bankListView assembles the bank list view-model for a tenant (configured banks
+// + addable selector), reused by the list render and the add-bank re-render.
+func (s *Server) bankListView(r *http.Request, t *tenant.Tenant) (adminweb.BankListView, error) {
+	tv := adminweb.ToTenantView(t)
+	banks, err := s.console.ListBanks(r.Context(), tv.ID)
+	if err != nil {
+		return adminweb.BankListView{}, err
+	}
+	addable, err := s.console.AddableBankSlugs(r.Context(), tv.ID)
+	if err != nil {
+		return adminweb.BankListView{}, err
+	}
+	return adminweb.BankListView{
+		Base:    s.consoleBase(r, "Bancos", "tenants"),
+		Tenant:  tv,
+		Banks:   adminweb.ToBankRows(tv.ID, banks, tv.Active),
+		Addable: adminweb.ToBankTypeOptions(addable),
+		Form:    map[string]string{},
+		Errors:  map[string]string{},
+	}, nil
+}
+
+// consoleAddBank handles the add-bank form. The bank slug is validated against the
+// closed allow-list; since there is no per-tenant bank registry, "adding" a bank
+// navigates the operator to that bank's detail to configure its credential (the
+// bank materialises in the list once a credential is saved). Admin-only.
+func (s *Server) consoleAddBank(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	tv := adminweb.ToTenantView(t)
+	slug := strings.TrimSpace(r.PostFormValue("bank_type"))
+	info, err := s.console.GetBank(r.Context(), tv.ID, slug)
+	if err != nil {
+		// Unknown/unsupported slug (closed selector backstop): re-render the list
+		// with an inline error; never echo an unsupported value into a row.
+		view, vErr := s.bankListView(r, t)
+		if vErr != nil {
+			s.consoleError(w, vErr)
+			return
+		}
+		view.Errors = map[string]string{"bank_type": "banco não suportado"}
+		s.ui.Page(w, r, "banks", http.StatusUnprocessableEntity, view)
+		return
+	}
+	// Navigate to the bank detail to configure the credential, with a toast.
+	s.ui.BodyWithOOB(w, http.StatusOK, "bank_detail",
+		adminweb.BankDetailView{
+			Base:   s.consoleBase(r, info.Slug, "tenants"),
+			Tenant: tv,
+			Bank:   adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0],
+			Form:   map[string]string{},
+			Errors: map[string]string{},
+		},
+		adminweb.OOBPart{Name: "toast_oob", Data: adminweb.ToastData{Kind: "success", Message: "Banco adicionado. Configure a credencial para ativá-lo."}})
+}
+
+// consoleBankDetail renders one bank's detail (credential + creditor-key cards).
+// An unknown bank slug 404s (deny-by-default). Reads admit Operator+Admin.
+func (s *Server) consoleBankDetail(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	bankID := chi.URLParam(r, "bankId")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	tv := adminweb.ToTenantView(t)
+	info, err := s.console.GetBank(r.Context(), tv.ID, bankID)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	s.ui.Page(w, r, "bank_detail", http.StatusOK, adminweb.BankDetailView{
+		Base:   s.consoleBase(r, info.Slug, "tenants"),
+		Tenant: tv,
+		Bank:   adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0],
+		Form:   map[string]string{},
+		Errors: map[string]string{},
+	})
+}
+
+// consoleSetBankCredential writes a tenant's credential for a specific bank and
+// swaps only the credential card back (outerHTML #cred-card). The secret is never
+// echoed; only the non-secret client_id is re-shown on a validation error.
+// Admin-only.
+func (s *Server) consoleSetBankCredential(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	bankID := chi.URLParam(r, "bankId")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	tv := adminweb.ToTenantView(t)
+	// Validate the bank slug up front so an unknown bank 404s rather than rendering
+	// a card for a bank that can never route a charge.
+	if _, err := s.console.GetBank(r.Context(), tv.ID, bankID); err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	clientID := strings.TrimSpace(r.PostFormValue("client_id"))
+	secret := r.PostFormValue("secret")
+	card := func(status int, info app.BankInfo, form, errs map[string]string, saved bool) {
+		s.ui.Partial(w, status, "cred_card", adminweb.BankDetailView{
+			Base:      s.consoleBase(r, info.Slug, "tenants"),
+			Tenant:    tv,
+			Bank:      adminweb.ToBankRows(tv.ID, []app.BankInfo{info}, tv.Active)[0],
+			Form:      form,
+			Errors:    errs,
+			CredSaved: saved,
+		})
+	}
+	if err := s.console.SetBankCredentialFor(r.Context(), tv.ID, bankID, clientID, secret); err != nil {
+		// Re-read so the card reflects the current (pre-write) state; echo only client_id.
+		info, _ := s.console.GetBank(r.Context(), tv.ID, bankID)
+		card(http.StatusUnprocessableEntity, info, map[string]string{"client_id": clientID}, fieldErrors(err, "client_id", "secret", "bank"), false)
+		return
+	}
+	info, err := s.console.GetBank(r.Context(), tv.ID, bankID)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	card(http.StatusOK, info, map[string]string{}, map[string]string{}, true)
+}
+
 // --- Pricing ---
 
 func (s *Server) consolePricing(w http.ResponseWriter, r *http.Request) {

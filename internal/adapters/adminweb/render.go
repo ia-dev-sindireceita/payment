@@ -31,6 +31,8 @@ var screenFiles = map[string]string{
 	"tenant_new":    "templates/tenant_new.html",
 	"tenant_detail": "templates/tenant_detail.html",
 	"credentials":   "templates/credentials.html",
+	"banks":         "templates/banks.html",
+	"bank_detail":   "templates/bank_detail.html",
 	"pricing":       "templates/pricing.html",
 	"consumption":   "templates/consumption.html",
 }
