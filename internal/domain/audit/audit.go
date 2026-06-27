@@ -28,6 +28,11 @@ const (
 	// ActionSetBankCredential records a write of a tenant's bank (PSP) credential.
 	// The audit entry names the tenant and operator only — never the secret.
 	ActionSetBankCredential Action = "credential.set"
+	// ActionSetCreditorKey records a write of a tenant's registered PIX creditor key
+	// (chave do recebedor). It is a fund-routing change and so MUST be attributable
+	// (OWASP A09); the entry names who/which-tenant/which-bank only — never the key
+	// value (the key is routing-sensitive; threat C1/C4).
+	ActionSetCreditorKey Action = "credential.creditor_key.set"
 	// ActionSuspendTenant records suspension of a tenant (reserved for when the
 	// lifecycle operation exists).
 	ActionSuspendTenant Action = "tenant.suspend"
@@ -82,9 +87,9 @@ var recurrenceActionByStatus = map[string]Action{
 func (a Action) valid() bool {
 	switch a {
 	case ActionCreateTenant, ActionSetEndpointPrice, ActionSetBankCredential,
-		ActionSuspendTenant, ActionActivateTenant, ActionSettlementAmountMismatch,
-		ActionRecCreated, ActionRecApproved, ActionRecRejected, ActionRecExpired,
-		ActionRecCancelled, ActionCobRCreated:
+		ActionSetCreditorKey, ActionSuspendTenant, ActionActivateTenant,
+		ActionSettlementAmountMismatch, ActionRecCreated, ActionRecApproved,
+		ActionRecRejected, ActionRecExpired, ActionRecCancelled, ActionCobRCreated:
 		return true
 	default:
 		return false
@@ -164,6 +169,37 @@ func NewCredentialSetEntry(id, operatorID, tenantID, bankID string, at time.Time
 		id:         id,
 		operatorID: strings.TrimSpace(operatorID),
 		action:     ActionSetBankCredential,
+		tenantID:   tenantID,
+		at:         at,
+		bankID:     bankID,
+	}, nil
+}
+
+// NewCreditorKeySetEntry builds the audit record for a PIX creditor-key write
+// (ActionSetCreditorKey). It is the sibling of NewCredentialSetEntry: beyond
+// who/what/tenant/when it carries the non-secret bankID so the trail records WHICH
+// bank's creditor key the tenant pointed its funds at. It NEVER records the key
+// value by construction — it has no such parameter (the key is routing-sensitive;
+// threat C1/C4). Invariants: a non-empty id, tenant and bankID (the console
+// resolves the default bank before calling, so a blank bankID is a programming
+// error).
+func NewCreditorKeySetEntry(id, operatorID, tenantID, bankID string, at time.Time) (Entry, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Entry{}, shared.NewValidationError("id", "audit entry id is required")
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return Entry{}, shared.NewValidationError("tenant_id", "tenant id is required")
+	}
+	bankID = strings.TrimSpace(bankID)
+	if bankID == "" {
+		return Entry{}, shared.NewValidationError("bank_id", "bank id is required")
+	}
+	return Entry{
+		id:         id,
+		operatorID: strings.TrimSpace(operatorID),
+		action:     ActionSetCreditorKey,
 		tenantID:   tenantID,
 		at:         at,
 		bankID:     bankID,

@@ -322,6 +322,30 @@ type CredentialWriter interface {
 	SetBankCredential(ctx context.Context, tenantID, bankID, clientID, secret string) error
 }
 
+// CreditorKeyWriter is the admin-plane write path for a tenant's registered PIX
+// creditor key (chave do recebedor). It is kept deliberately separate from
+// CredentialWriter so the secret-rotation capability and the fund-routing
+// capability are granted independently (ISP, least privilege): the credential
+// writer rotates the OAuth secret, this writer points the tenant's funds at a PIX
+// key. The creditor key is NOT a secret — it is the account's public PIX
+// identifier — but it IS routing-sensitive (OWASP A01 confused-deputy; ADR-0004,
+// SIN-65862), so a use-case that only needs to set the key never gains the power
+// to rotate the secret and vice versa. The key belongs to the tenant's
+// BankCredential aggregate (default bank BankIDC6, the single allow-listed bank);
+// the adapter resolves it read-modify-write so a creditor-key write never clobbers
+// the secret/client id (ADR-0008).
+type CreditorKeyWriter interface {
+	// SetCreditorKey records the tenant's PIX creditor key (chave do recebedor) on
+	// the tenant's existing bank credential. The adapter MUST preserve the
+	// credential's secret and client id (read-modify-write). A tenant with no
+	// existing credential is rejected (ErrNotFound): a creditor key without a bank
+	// identity is meaningless and a half-credential invites the confused-deputy gap.
+	// Empty tenantID/creditorKey and a creditorKey that is not a syntactically valid
+	// PIX key are rejected as a validation error WITHOUT echoing the value (the key
+	// is routing-sensitive; threat C1/C4).
+	SetCreditorKey(ctx context.Context, tenantID, creditorKey string) error
+}
+
 // CredentialInvalidator is the optional hook the admin plane invokes right after
 // a tenant's bank credential is (re)written, so an adapter that caches state
 // keyed on that credential — notably the C6 OAuth2 client_credentials token

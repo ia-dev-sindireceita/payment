@@ -204,13 +204,19 @@ func (v BankListView) CanAdd() bool { return len(v.Addable) > 0 }
 
 // BankDetailView backs the bank detail screen (bank_detail.html): one bank's
 // credential card (write-only) and creditor-key card. It never carries the secret.
+// CreditorSaved drives the creditor-key card's success banner; CreditorEditable is
+// true only for the default bank (BankIDC6), the single bank the bankless
+// creditor-key write path targets (SIN-66092 / ADR-0008) — other banks render the
+// key read-only. The current key (read display) comes from Bank.CreditorKey.
 type BankDetailView struct {
 	Base
-	Tenant    TenantView
-	Bank      BankRow
-	Form      map[string]string
-	Errors    map[string]string
-	CredSaved bool
+	Tenant           TenantView
+	Bank             BankRow
+	Form             map[string]string
+	Errors           map[string]string
+	CredSaved        bool
+	CreditorSaved    bool
+	CreditorEditable bool
 }
 
 // ConsumptionRow is one endpoint's aggregated usage in the consumption screen.

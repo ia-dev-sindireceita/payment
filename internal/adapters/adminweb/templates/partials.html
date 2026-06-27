@@ -133,3 +133,45 @@
   hx-confirm="Reativar {{.Name}}? As chamadas de API do tenant voltam a ser aceitas.">Reativar</button>
 {{- end -}}
 {{end}}
+
+{{define "creditor_card"}}
+{{if .CreditorEditable}}
+<form id="creditor-card" class="form card" method="post"
+      action="/console/tenants/{{.Tenant.ID}}/creditor-key"
+      hx-post="/console/tenants/{{.Tenant.ID}}/creditor-key"
+      hx-target="#creditor-card" hx-swap="outerHTML"
+      {{if .Bank.CreditorKeySet}}hx-confirm="Substituir a chave do recebedor atual? As novas cobranças PIX passam a ser registradas sob a chave nova."{{end}}>
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <h2>Chave PIX do recebedor</h2>
+  {{if .CreditorSaved}}<div class="banner banner--success" role="status">Chave do recebedor salva. Novas cobranças PIX serão registradas sob esta chave.</div>{{end}}
+  {{if .Errors.form}}<div class="banner banner--danger" role="alert">{{.Errors.form}}</div>{{end}}
+
+  <dl class="dl">
+    <dt>Chave registrada</dt>
+    <dd>{{if .Bank.CreditorKeySet}}<code>{{.Bank.CreditorKey}}</code>{{else}}<span class="muted">— não configurada</span>{{end}}</dd>
+  </dl>
+  <p class="muted">A chave do recebedor fixa o destino dos fundos do tenant. Não é um segredo, mas é sensível ao roteamento.</p>
+
+  <div class="field{{if .Errors.creditor_key}} has-error{{end}}">
+    <label for="f-creditor">Nova chave PIX *</label>
+    <input id="f-creditor" name="creditor_key" required maxlength="140" autocomplete="off" inputmode="text"
+           placeholder="EVP, e-mail, telefone (+55…) ou CPF/CNPJ"
+           {{if .Errors.creditor_key}}aria-invalid="true" aria-describedby="e-creditor"{{else}}aria-describedby="h-creditor"{{end}}>
+    {{if .Errors.creditor_key}}<span class="error" id="e-creditor" role="alert">{{.Errors.creditor_key}}</span>{{else}}<span class="help" id="h-creditor">EVP/UUID, e-mail, telefone E.164 ou CPF/CNPJ (somente dígitos).</span>{{end}}
+  </div>
+
+  <div class="form-actions">
+    <button class="btn btn--primary" type="submit">Salvar chave</button>
+  </div>
+</form>
+{{else}}
+<div id="creditor-card" class="card">
+  <h2>Chave PIX do recebedor</h2>
+  <dl class="dl">
+    <dt>Chave registrada</dt>
+    <dd>{{if .Bank.CreditorKeySet}}<code>{{.Bank.CreditorKey}}</code>{{else}}<span class="muted">— não configurada</span>{{end}}</dd>
+  </dl>
+  <p class="help">A edição da chave pela console está disponível apenas no banco padrão.</p>
+</div>
+{{end}}
+{{end}}
