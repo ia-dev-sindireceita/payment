@@ -225,6 +225,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/tenants", s.handleCreateTenant)
 			r.Post("/tenants/{tenantID}/pricing", s.handleSetPrice)
 			r.Put("/tenants/{tenantID}/bank-credential", s.handleSetBankCredential)
+			r.Put("/tenants/{tenantID}/bank-certificate", s.handleSetBankCertificate)
 		})
 	})
 
