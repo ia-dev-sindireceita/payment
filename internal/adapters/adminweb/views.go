@@ -1,6 +1,7 @@
 package adminweb
 
 import (
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -144,10 +145,92 @@ type BankRow struct {
 	ClientID      string
 	CreditorKey   string
 	Active        bool
+	// Cert is the bank's mTLS certificate metadata (public only), or nil when no
+	// certificate is configured. It drives the cert_status_badge and the detail card.
+	Cert *CertMeta
 }
 
 // CreditorKeySet reports whether a creditor (PIX) key is pinned for this bank.
 func (r BankRow) CreditorKeySet() bool { return strings.TrimSpace(r.CreditorKey) != "" }
+
+// CertMeta is the template-facing projection of a bank's mTLS certificate. It is
+// PUBLIC metadata only — there is no private-key field by construction, so it can
+// never leak the key (threat C1/C4). LogValue() makes that explicit so the value
+// is safe to log as a structured attribute. The status helpers expose the
+// precomputed lifecycle band (computed server-side with the service clock) so the
+// template stays logic-light.
+type CertMeta struct {
+	SubjectCN         string
+	Issuer            string
+	SerialNumber      string
+	FingerprintSHA256 string
+	NotBefore         time.Time
+	NotAfter          time.Time
+
+	status       app.CertStatus
+	daysToExpiry int
+}
+
+// StatusValid / StatusExpiring / StatusExpired / StatusNotYetValid expose the
+// precomputed lifecycle band to the badge template (one is true at a time).
+func (m *CertMeta) StatusValid() bool       { return m.status == app.CertStatusValid }
+func (m *CertMeta) StatusExpiring() bool    { return m.status == app.CertStatusExpiringSoon }
+func (m *CertMeta) StatusExpired() bool     { return m.status == app.CertStatusExpired }
+func (m *CertMeta) StatusNotYetValid() bool { return m.status == app.CertStatusNotYetValid }
+
+// DaysToExpiry is the magnitude of days until (or since) NotAfter, for the badge
+// copy ("Expira em N dias" / "Expirado há N dias").
+func (m *CertMeta) DaysToExpiry() int {
+	if m.daysToExpiry < 0 {
+		return -m.daysToExpiry
+	}
+	return m.daysToExpiry
+}
+
+// DaysUnit agrees the day count with "dia"/"dias".
+func (m *CertMeta) DaysUnit() string {
+	if m.DaysToExpiry() == 1 {
+		return "dia"
+	}
+	return "dias"
+}
+
+// NotBeforeBR / NotAfterBR render the validity bounds in Brazilian date format.
+func (m *CertMeta) NotBeforeBR() string { return m.NotBefore.Format("02/01/2006") }
+func (m *CertMeta) NotAfterBR() string  { return m.NotAfter.Format("02/01/2006") }
+
+// LogValue emits only the certificate's public metadata under structured logging,
+// making explicit that no private-key material exists on this value (threat
+// C1/C4). A nil receiver renders an "[absent]" group rather than panicking.
+func (m *CertMeta) LogValue() slog.Value {
+	if m == nil {
+		return slog.StringValue("[absent]")
+	}
+	return slog.GroupValue(
+		slog.String("subject_cn", m.SubjectCN),
+		slog.String("fingerprint_sha256", m.FingerprintSHA256),
+		slog.Time("not_before", m.NotBefore),
+		slog.Time("not_after", m.NotAfter),
+		slog.String("status", string(m.status)),
+	)
+}
+
+// toCertMeta projects a bank's certificate info (nil when none) for rendering.
+func toCertMeta(c *app.BankCertInfo) *CertMeta {
+	if c == nil {
+		return nil
+	}
+	return &CertMeta{
+		SubjectCN:         c.SubjectCN,
+		Issuer:            c.Issuer,
+		SerialNumber:      c.SerialNumber,
+		FingerprintSHA256: c.FingerprintSHA256,
+		NotBefore:         c.NotBefore,
+		NotAfter:          c.NotAfter,
+		status:            c.Status,
+		daysToExpiry:      c.DaysToExpiry,
+	}
+}
 
 // toBankRow projects a domain bank info for rendering, stamped with its tenant id
 // (for the row's links) and the tenant's lifecycle state.
@@ -160,6 +243,7 @@ func toBankRow(tenantID string, info app.BankInfo, active bool) BankRow {
 		ClientID:      info.ClientID,
 		CreditorKey:   info.CreditorKey,
 		Active:        active,
+		Cert:          toCertMeta(info.Cert),
 	}
 }
 
@@ -217,6 +301,8 @@ type BankDetailView struct {
 	CredSaved        bool
 	CreditorSaved    bool
 	CreditorEditable bool
+	// CertSaved drives the certificate card's success banner after an upload/rotation.
+	CertSaved bool
 }
 
 // ConsumptionRow is one endpoint's aggregated usage in the consumption screen.

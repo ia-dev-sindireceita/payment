@@ -66,6 +66,7 @@
          hx-get="/console/tenants/{{.TenantID}}/banks/{{.Slug}}" hx-target="#main" hx-push-url="true">{{.DisplayName}}</a></td>
   <td><code>{{.Slug}}</code></td>
   <td>{{template "cred_status_badge" .CredentialSet}}</td>
+  <td>{{template "cert_status_badge" .Cert}}</td>
   <td>{{template "status_badge" .}}</td>
 </tr>
 {{end}}
@@ -75,10 +76,90 @@
 {{- if .Banks -}}
 {{- range .Banks}}{{template "bank_row" .}}{{end -}}
 {{- else -}}
-<tr class="empty-row"><td colspan="4">
+<tr class="empty-row"><td colspan="5">
   <div class="empty"><h2>Nenhum banco configurado</h2><p class="muted">Adicione o primeiro banco para o tenant começar a transacionar.</p></div>
 </td></tr>
 {{- end -}}
+{{end}}
+
+{{/* cert_status_badge maps a bank's mTLS certificate metadata to a lifecycle
+     badge. Data is a *CertMeta (nil → "sem certificado"). It carries only public
+     metadata; the private key is never available here (threat C1/C4). */}}
+{{define "cert_status_badge"}}
+{{- if . -}}
+  {{- if .StatusExpired -}}
+  <span class="badge badge--danger"><span class="dot" aria-hidden="true"></span>✕ Expirado</span>
+  {{- else if .StatusExpiring -}}
+  <span class="badge badge--warning"><span class="dot" aria-hidden="true"></span>⚠ Expira em {{.DaysToExpiry}} {{.DaysUnit}}</span>
+  {{- else if .StatusNotYetValid -}}
+  <span class="badge badge--muted"><span class="dot" aria-hidden="true"></span>Entra em vigor em {{.NotBeforeBR}}</span>
+  {{- else -}}
+  <span class="badge badge--success"><span class="dot" aria-hidden="true"></span>Válido</span>
+  {{- end -}}
+{{- else -}}
+<span class="badge badge--muted"><span class="dot" aria-hidden="true"></span>sem certificado</span>
+{{- end -}}
+{{end}}
+
+{{/* cert_status_oob updates the detail header's cert badge out-of-band after an
+     upload/rotation, so the title reflects the new validity band immediately.
+     Data is a BankRow. */}}
+{{define "cert_status_oob"}}
+<span id="cert-status" hx-swap-oob="true">{{template "cert_status_badge" .Cert}}</span>
+{{end}}
+
+{{/* cert_card renders the per-bank mTLS certificate card. Data is a BankDetailView.
+     The form is multipart (file uploads) and posts to itself, swapping only
+     #cert-card (outerHTML) so a rotation never disturbs the rest of the detail
+     screen. The private key is write-only: it is uploaded, validated server-side,
+     stored in the vault, and NEVER re-rendered. Only public metadata is shown back.
+     No inline JS (CSP): the input is a native file control with a label + aria. */}}
+{{define "cert_card"}}
+<form id="cert-card" class="form card" method="post" enctype="multipart/form-data"
+      action="/console/tenants/{{.Tenant.ID}}/banks/{{.Bank.Slug}}/certificate"
+      hx-post="/console/tenants/{{.Tenant.ID}}/banks/{{.Bank.Slug}}/certificate"
+      hx-encoding="multipart/form-data" hx-target="#cert-card" hx-swap="outerHTML"
+      {{if .Bank.Cert}}hx-confirm="Substituir o certificado mTLS atual do {{.Bank.DisplayName}}? As novas conexões ao banco passam a apresentar o certificado novo."{{end}}>
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <h2>Certificado mTLS — {{.Bank.DisplayName}} {{template "cert_status_badge" .Bank.Cert}}</h2>
+  {{if .CertSaved}}<div class="banner banner--success" role="status">Certificado salvo. A chave privada foi gravada no cofre (write-only) e não é exibida novamente.</div>{{end}}
+  {{if .Errors.form}}<div class="banner banner--danger" role="alert">{{.Errors.form}}</div>{{end}}
+
+  {{with .Bank.Cert}}
+  <dl class="dl">
+    <dt>Emitido para</dt>
+    <dd>{{if .SubjectCN}}{{.SubjectCN}}{{else}}<span class="muted">— sem CN</span>{{end}}</dd>
+    <dt>Emissor</dt>
+    <dd>{{if .Issuer}}{{.Issuer}}{{else}}<span class="muted">—</span>{{end}}</dd>
+    <dt>Validade</dt>
+    <dd>{{.NotBeforeBR}} – {{.NotAfterBR}}</dd>
+    <dt>Fingerprint SHA-256</dt>
+    <dd><code>{{.FingerprintSHA256}}</code></dd>
+  </dl>
+  {{else}}
+  <p class="muted">Nenhum certificado configurado para este banco.</p>
+  {{end}}
+
+  <p class="muted">A chave privada é gravada uma única vez no cofre (write-only); esta tela nunca a reexibe. Envie o certificado e a chave em formato PEM.</p>
+
+  <div class="field{{if .Errors.cert_pem}} has-error{{end}}">
+    <label for="f-cert">Certificado (PEM) *</label>
+    <input id="f-cert" name="cert_pem" type="file" accept=".pem,.crt,.cer,application/x-pem-file" required
+           {{if .Errors.cert_pem}}aria-invalid="true" aria-describedby="e-cert"{{else}}aria-describedby="h-cert"{{end}}>
+    {{if .Errors.cert_pem}}<span class="error" id="e-cert" role="alert">{{.Errors.cert_pem}}</span>{{else}}<span class="help" id="h-cert">Certificado de cliente público (folha) em PEM.</span>{{end}}
+  </div>
+
+  <div class="field{{if .Errors.key_pem}} has-error{{end}}">
+    <label for="f-key">Chave privada (PEM) *</label>
+    <input id="f-key" name="key_pem" type="file" accept=".pem,.key" required
+           {{if .Errors.key_pem}}aria-invalid="true" aria-describedby="e-key"{{else}}aria-describedby="h-key"{{end}}>
+    {{if .Errors.key_pem}}<span class="error" id="e-key" role="alert">{{.Errors.key_pem}}</span>{{else}}<span class="help" id="h-key">Não é armazenada em texto na aplicação; vai direto ao cofre.</span>{{end}}
+  </div>
+
+  <div class="form-actions">
+    <button class="btn btn--primary" type="submit">{{if .Bank.Cert}}Rotacionar certificado{{else}}Enviar certificado{{end}}</button>
+  </div>
+</form>
 {{end}}
 
 {{/* cred_card renders the write-only credential card. Data is a BankDetailView.
