@@ -161,6 +161,7 @@ func run() error {
 		Pricing:         store,
 		Ledger:          store,
 		CredWriter:      creds,
+		CredReader:      creds,
 		CredInvalidator: credInvalidator,
 		Clock:           system.Clock{},
 		IDs:             system.IDProvider{},

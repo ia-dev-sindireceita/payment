@@ -11,8 +11,8 @@
 
 <nav class="tabs" aria-label="Seções do tenant">
   <a href="/console/tenants/{{.ID}}" aria-current="page">Visão geral</a>
-  <a href="/console/tenants/{{.ID}}/credentials"
-     hx-get="/console/tenants/{{.ID}}/credentials" hx-target="#main" hx-push-url="true">Credenciais</a>
+  <a href="/console/tenants/{{.ID}}/banks"
+     hx-get="/console/tenants/{{.ID}}/banks" hx-target="#main" hx-push-url="true">Bancos</a>
   <a href="/console/tenants/{{.ID}}/pricing"
      hx-get="/console/tenants/{{.ID}}/pricing" hx-target="#main" hx-push-url="true">Tarifação</a>
   <a href="/console/tenants/{{.ID}}/consumption"
@@ -31,8 +31,8 @@
   </div>
   <div class="card">
     <h2>Atalhos</h2>
-    <p><a class="btn btn--ghost" href="/console/tenants/{{.ID}}/credentials"
-          hx-get="/console/tenants/{{.ID}}/credentials" hx-target="#main" hx-push-url="true">Credenciais bancárias ›</a></p>
+    <p><a class="btn btn--ghost" href="/console/tenants/{{.ID}}/banks"
+          hx-get="/console/tenants/{{.ID}}/banks" hx-target="#main" hx-push-url="true">Bancos ›</a></p>
     <p><a class="btn btn--ghost" href="/console/tenants/{{.ID}}/pricing"
           hx-get="/console/tenants/{{.ID}}/pricing" hx-target="#main" hx-push-url="true">Tarifação ›</a></p>
     <p><a class="btn btn--ghost" href="/console/tenants/{{.ID}}/consumption"

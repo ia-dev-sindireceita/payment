@@ -25,6 +25,7 @@ func newConsole() (*app.ConsoleService, *persistence.Store, *secret.Store) {
 		Pricing:    store,
 		Ledger:     store,
 		CredWriter: creds,
+		CredReader: creds,
 		Clock:      fixedClock{t: time.Unix(1000, 0).UTC()},
 		IDs:        &seqIDs{},
 	})

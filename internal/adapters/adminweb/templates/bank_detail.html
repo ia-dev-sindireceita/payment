@@ -1,0 +1,27 @@
+{{define "body"}}
+{{with .Tenant}}
+<p class="breadcrumb"><a href="/console/tenants/{{.ID}}" hx-get="/console/tenants/{{.ID}}" hx-target="#main" hx-push-url="true">‹ {{.Name}}</a> / <a href="/console/tenants/{{.ID}}/banks" hx-get="/console/tenants/{{.ID}}/banks" hx-target="#main" hx-push-url="true">Bancos</a> / {{$.Bank.DisplayName}}</p>
+{{end}}
+<div class="topbar">
+  <div><h1>{{.Bank.DisplayName}} <span id="tenant-status">{{template "status_badge" .Tenant}}</span></h1>
+  <p class="muted">apelido <code>{{.Bank.Slug}}</code></p></div>
+</div>
+
+<nav class="tabs" aria-label="Seções do tenant">
+  <a href="/console/tenants/{{.Tenant.ID}}" hx-get="/console/tenants/{{.Tenant.ID}}" hx-target="#main" hx-push-url="true">Visão geral</a>
+  <a href="/console/tenants/{{.Tenant.ID}}/banks" aria-current="page">Bancos</a>
+  <a href="/console/tenants/{{.Tenant.ID}}/pricing" hx-get="/console/tenants/{{.Tenant.ID}}/pricing" hx-target="#main" hx-push-url="true">Tarifação</a>
+  <a href="/console/tenants/{{.Tenant.ID}}/consumption" hx-get="/console/tenants/{{.Tenant.ID}}/consumption" hx-target="#main" hx-push-url="true">Consumo</a>
+</nav>
+
+{{template "cred_card" .}}
+
+<div class="card">
+  <h2>Chave PIX do recebedor</h2>
+  <dl class="dl">
+    <dt>Chave registrada</dt>
+    <dd>{{if .Bank.CreditorKeySet}}<code>{{.Bank.CreditorKey}}</code>{{else}}<span class="muted">— não configurada</span>{{end}}</dd>
+  </dl>
+  <p class="help">A chave do recebedor fixa o destino dos fundos do tenant. Não é um segredo. A edição pela console será habilitada em uma próxima entrega (depende do port de escrita da chave).</p>
+</div>
+{{end}}
