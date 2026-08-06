@@ -35,6 +35,9 @@ type Server struct {
 	// (multi-bank selector, SIN-66022). When nil the tenant plane runs single-bank:
 	// no selector is read and every request resolves to the default bank.
 	bankResolver *BankResolver
+	// trustedProxyHops selects the spoof-resistant client-IP middleware installed
+	// by Router (replaces chi middleware.RealIP). See Config.TrustedProxyHops.
+	trustedProxyHops int
 }
 
 // Config wires a Server's dependencies. Console and UI back the HTML admin
@@ -83,28 +86,54 @@ type Config struct {
 	// (CSRF token; the admin-UI session cookie via Server.CSRF). Driven by config
 	// because TLS is terminated at a proxy — see config.Config.SecureCookies.
 	SecureCookies bool
+	// TrustedProxyHops is the number of trusted reverse proxies in front of this
+	// service; it selects how the client IP (rate-limit key, IP attribution) is
+	// derived. 0 (default) trusts only the TCP peer and ignores forwarding
+	// headers (spoof-proof); N≥1 trusts exactly N proxy hops of X-Forwarded-For.
+	// See config.Config.TrustedProxyHops — this replaces the spoofable
+	// middleware.RealIP (GO-2026-5775).
+	TrustedProxyHops int
 }
 
 // NewServer builds a Server from its config.
 func NewServer(c Config) *Server {
 	return &Server{
-		charges:      c.Charges,
-		pix:          c.Pix,
-		pixCobV:      c.PixCobV,
-		checkout:     c.Checkout,
-		boleto:       c.Boleto,
-		dda:          c.DDA,
-		statement:    c.Statement,
-		admin:        c.Admin,
-		console:      c.Console,
-		ui:           c.UI,
-		webhooks:     c.Webhooks,
-		tenantAuth:   c.TenantAuth,
-		adminAuth:    c.AdminAuth,
-		webhookAuth:  c.WebhookAuth,
-		csrf:         NewCSRFGuard(c.SecureCookies),
-		bankResolver: c.BankResolver,
+		charges:          c.Charges,
+		pix:              c.Pix,
+		pixCobV:          c.PixCobV,
+		checkout:         c.Checkout,
+		boleto:           c.Boleto,
+		dda:              c.DDA,
+		statement:        c.Statement,
+		admin:            c.Admin,
+		console:          c.Console,
+		ui:               c.UI,
+		webhooks:         c.Webhooks,
+		tenantAuth:       c.TenantAuth,
+		adminAuth:        c.AdminAuth,
+		webhookAuth:      c.WebhookAuth,
+		csrf:             NewCSRFGuard(c.SecureCookies),
+		bankResolver:     c.BankResolver,
+		trustedProxyHops: c.TrustedProxyHops,
 	}
+}
+
+// clientIPMiddleware returns the spoof-resistant client-IP middleware for the
+// configured trusted-proxy depth. It replaces chi's middleware.RealIP, which
+// blindly trusted the leftmost X-Forwarded-For value and was spoofable
+// (GO-2026-5775). Both variants store the resolved IP on the request context;
+// clientIP reads it via middleware.GetClientIP.
+//
+//   - hops == 0: ClientIPFromRemoteAddr — ignore all forwarding headers and use
+//     the TCP peer. Spoof-proof; the secure default.
+//   - hops >= 1: ClientIPFromXFFTrustedProxies(hops) — read the entry the
+//     outermost trusted proxy added to X-Forwarded-For, the only entry a client
+//     cannot forge past our own proxies.
+func clientIPMiddleware(hops int) func(http.Handler) http.Handler {
+	if hops < 1 {
+		return middleware.ClientIPFromRemoteAddr
+	}
+	return middleware.ClientIPFromXFFTrustedProxies(hops)
 }
 
 // CSRF returns the server's CSRF guard so the admin-UI child can wrap its live
@@ -116,7 +145,10 @@ func (s *Server) CSRF() CSRFGuard { return s.csrf }
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// Spoof-resistant client IP (replaces the deprecated, spoofable
+	// middleware.RealIP — GO-2026-5775). Installed before the rate limiters so
+	// clientIP keys on a value a client cannot forge. See clientIPMiddleware.
+	r.Use(clientIPMiddleware(s.trustedProxyHops))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(15 * time.Second))
 
