@@ -39,6 +39,26 @@ type Config struct {
 	// unspoofable. Defaults to true (secure-by-default); set PAYMENT_SECURE_COOKIES
 	// to a falsey value only for plaintext local development.
 	SecureCookies bool
+	// TrustedProxyHops is the number of trusted reverse proxies between this
+	// service and the public internet. It governs how the client IP (used for
+	// rate-limit keying and IP-based attribution) is derived from a request:
+	//
+	//   0  → trust NOBODY: the client IP is the TCP peer (RemoteAddr) and all
+	//        X-Forwarded-For / X-Real-IP headers are ignored. Spoof-proof, and
+	//        the secure-by-default value. Correct when the service is exposed
+	//        directly, or when you are unsure how many proxies front it.
+	//   N≥1 → trust exactly N proxy hops: the client IP is the entry the
+	//        outermost of your N trusted proxies added to X-Forwarded-For — the
+	//        only entry an attacker cannot forge past your own proxies.
+	//
+	// This replaces chi's middleware.RealIP, which blindly trusted the leftmost
+	// X-Forwarded-For value and was therefore spoofable (GO-2026-5775): a client
+	// could send an arbitrary X-Forwarded-For to evade rate limits or poison
+	// IP-based attribution. Set PAYMENT_TRUSTED_PROXY_HOPS to the real proxy
+	// depth of the deployment (the current single-ingress topology is 1).
+	// Defaults to 0 (secure-by-default). A negative or unparseable value falls
+	// back to 0 so a typo cannot silently start trusting client headers.
+	TrustedProxyHops int
 	// C6 holds the C6 bank adapter transport configuration. Endpoints are
 	// per-environment and resolved from config (never hard-coded). The per-tenant
 	// OAuth2 credentials live in BankCreds / the secret store, not here.
@@ -76,15 +96,16 @@ func FromEnv() Config {
 	bankCreds := mergeCreditorKeys(parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS"), logger), os.Getenv("PAYMENT_BANK_CREDITOR_KEYS"), logger)
 	logLoadedBankCreds(bankCreds, logger)
 	return Config{
-		HTTPAddr:       getenv("PAYMENT_HTTP_ADDR", ":8080"),
-		DBPath:         getenv("PAYMENT_DB_PATH", "payment.db"),
-		TenantTokens:   parseKV(os.Getenv("PAYMENT_TENANT_TOKENS")),
-		AdminTokens:    splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
-		OperatorTokens: splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
-		WebhookRefs:    parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
-		BankCreds:      bankCreds,
-		RabbitURL:      os.Getenv("PAYMENT_RABBIT_URL"),
-		SecureCookies:  getenvBool("PAYMENT_SECURE_COOKIES", true),
+		HTTPAddr:         getenv("PAYMENT_HTTP_ADDR", ":8080"),
+		DBPath:           getenv("PAYMENT_DB_PATH", "payment.db"),
+		TenantTokens:     parseKV(os.Getenv("PAYMENT_TENANT_TOKENS")),
+		AdminTokens:      splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
+		OperatorTokens:   splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
+		WebhookRefs:      parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
+		BankCreds:        bankCreds,
+		RabbitURL:        os.Getenv("PAYMENT_RABBIT_URL"),
+		SecureCookies:    getenvBool("PAYMENT_SECURE_COOKIES", true),
+		TrustedProxyHops: getenvInt("PAYMENT_TRUSTED_PROXY_HOPS", 0),
 		C6: C6Config{
 			BaseURL:        os.Getenv("PAYMENT_C6_BASE_URL"),
 			TokenURL:       os.Getenv("PAYMENT_C6_TOKEN_URL"),
@@ -117,6 +138,22 @@ func getenvBool(key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+// getenvInt resolves a non-negative integer env var, falling back to def when the
+// variable is unset, unparseable, or negative. Failing back to def keeps a typo'd
+// PAYMENT_TRUSTED_PROXY_HOPS from silently changing which hop the client IP is
+// read from (a security control).
+func getenvInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
 
 // getenvDuration resolves a duration env var (e.g. "20s", "1m"), falling back to

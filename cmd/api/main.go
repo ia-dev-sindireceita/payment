@@ -196,8 +196,9 @@ func run() error {
 		// against the wired registry and the tenant's configured credentials
 		// (deny-by-default, no oracle). The tenant plane reads X-Bank-Id / the DTO
 		// `bank` field and routes accordingly.
-		BankResolver:  httpadapter.NewBankResolver(registry.Banks(), creds),
-		SecureCookies: cfg.SecureCookies,
+		BankResolver:     httpadapter.NewBankResolver(registry.Banks(), creds),
+		SecureCookies:    cfg.SecureCookies,
+		TrustedProxyHops: cfg.TrustedProxyHops,
 	})
 
 	httpServer := &stdhttp.Server{
