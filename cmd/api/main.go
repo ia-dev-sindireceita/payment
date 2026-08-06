@@ -252,10 +252,13 @@ func newBankRegistry(cfg config.Config, creds ports.CredentialStore) (*bank.Regi
 		return reg, nil
 	}
 	c6cfg := c6.Config{
-		BaseURL:  cfg.C6.BaseURL,
-		TokenURL: cfg.C6.TokenURL,
-		Scope:    cfg.C6.Scope,
-		Timeout:  cfg.C6.Timeout,
+		BaseURL:            cfg.C6.BaseURL,
+		TokenURL:           cfg.C6.TokenURL,
+		Scope:              cfg.C6.Scope,
+		Timeout:            cfg.C6.Timeout,
+		RateLimitPerSecond: cfg.C6.RateLimitRPS,
+		RateLimitBurst:     cfg.C6.RateLimitBurst,
+		MaxRetries:         cfg.C6.MaxRetries,
 	}
 	// C6 requires an mTLS client certificate on the connection. When a cert/key
 	// path is configured, build a client-cert transport and inject it; a load

@@ -88,6 +88,14 @@ type C6Config struct {
 	// document, the correct interim until F4 go-live (SIN-66061). It is a URL, never
 	// a secret: only public keys are served from it.
 	RecJWKSURL string
+	// RateLimitRPS and RateLimitBurst configure the proactive outbound token bucket
+	// that paces requests to C6 (Termo A5 — no DoS-shaped load). Zero/unparseable ⇒
+	// the adapter's conservative defaults. MaxRetries bounds retries on a retryable
+	// status (429/503) with backoff honoring Retry-After (Termo B11); zero ⇒ the
+	// adapter default, negative ⇒ single-shot (no retries).
+	RateLimitRPS   float64
+	RateLimitBurst int
+	MaxRetries     int
 }
 
 // FromEnv builds a Config from environment variables, applying safe defaults.
@@ -114,6 +122,9 @@ func FromEnv() Config {
 			ClientCertPath: os.Getenv("PAYMENT_C6_CLIENT_CERT"),
 			ClientKeyPath:  os.Getenv("PAYMENT_C6_CLIENT_KEY"),
 			RecJWKSURL:     os.Getenv("PAYMENT_C6_REC_JWKS_URL"),
+			RateLimitRPS:   getenvFloat("PAYMENT_C6_RATE_LIMIT_RPS", 0),
+			RateLimitBurst: getenvInt("PAYMENT_C6_RATE_LIMIT_BURST", 0),
+			MaxRetries:     getenvIntSigned("PAYMENT_C6_MAX_RETRIES", 0),
 		},
 	}
 }
@@ -169,6 +180,37 @@ func getenvDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// getenvFloat resolves a float env var, falling back to def when the variable is
+// unset or unparseable. A typo'd value falls back to def rather than silently
+// disabling the outbound rate limit.
+func getenvFloat(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
+}
+
+// getenvIntSigned resolves an integer env var, falling back to def when the
+// variable is unset or unparseable. Unlike getenvInt, negative values are
+// preserved (e.g. a negative PAYMENT_C6_MAX_RETRIES selects single-shot in the
+// adapter).
+func getenvIntSigned(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // parseKV parses "k1:v1,k2:v2" into a map. Malformed pairs are skipped.
