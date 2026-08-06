@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // rateLimiter is a small concurrency-safe token-bucket limiter keyed by an
@@ -96,8 +98,15 @@ func adminTokenKey(r *http.Request) string {
 }
 
 func clientIP(r *http.Request) string {
-	// RemoteAddr is host:port; strip the port. Trusting proxy headers is a
-	// deployment concern handled at the ingress, not here.
+	// Prefer the spoof-resistant client IP resolved by clientIPMiddleware and
+	// stored on the request context (never the raw, client-controllable
+	// X-Forwarded-For — GO-2026-5775). It is empty only when the configured
+	// trusted-proxy depth found no trustworthy hop (fail-closed); fall back to
+	// the TCP peer so rate limiting still functions.
+	if ip := middleware.GetClientIP(r.Context()); ip != "" {
+		return ip
+	}
+	// RemoteAddr is host:port; strip the port to key on the bare peer IP.
 	addr := r.RemoteAddr
 	for i := len(addr) - 1; i >= 0; i-- {
 		if addr[i] == ':' {
