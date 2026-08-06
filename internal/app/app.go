@@ -94,6 +94,13 @@ type Deps struct {
 	// footgun: production MUST wire a real audit log so privileged actions are
 	// recorded for forensics/compliance.
 	Audit ports.AuditLog
-	Clock ports.Clock
-	IDs   ports.IDProvider
+	// PIIAccess is the append-only LGPD / art.13 register of READ access to a
+	// titular's personal data at rest (ADR-0008, SIN-68748). It is bundled into the
+	// unit of work so a mediated read of local PII and its access record commit
+	// atomically (Complete Mediation). When nil, PIIAccessService falls back to a
+	// no-op recorder (unit tests) — a footgun: production MUST wire a real
+	// append-only recorder so PII reads are recorded for LGPD compliance.
+	PIIAccess ports.PIIAccessRecorder
+	Clock     ports.Clock
+	IDs       ports.IDProvider
 }

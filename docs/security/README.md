@@ -17,6 +17,7 @@ Conjunto de documentos de segurança da plataforma de pagamentos multi-tenant
 | [`adr-0005-c6-boleto-payer-port-contract.md`](./adr-0005-c6-boleto-payer-port-contract.md) | ADR (Aceito) — `ports.BoletoRequest` carrega o pagador completo (`Payer{Name, TaxID, Address}`) para o contrato real C6 `POST /v1/bank_slips`. |
 | [`adr-0006-payment-staging-deploy.md`](./adr-0006-payment-staging-deploy.md) | ADR — deploy de staging do serviço de pagamentos. |
 | [`adr-0007-multi-bank-credential-per-tenant.md`](./adr-0007-multi-bank-credential-per-tenant.md) | ADR (Proposto) — credencial bancária chaveada por par composto `(tenantID, bankID)` (multi-banco): seletor `bank` na borda (não header), deny-by-default sem fallback cross-bank, sem-oráculo, migração aditiva `bank_id NOT NULL DEFAULT 'c6'` (sucessor do ADR-0004). |
+| [`adr-0008-pii-read-access-log.md`](./adr-0008-pii-read-access-log.md) | ADR (Proposto) — inventário de acesso (leitura) a dados pessoais de titular no plano de dados (LGPD/Decreto 8.771/2016 art.13; Termo C6 B10-v): trilha dedicada `pii_access_log` (≠ audit_log), `subject_ref` pseudônimo (HMAC, nunca PII em claro), responsável derivado server-side, choke-point de Complete Mediation na mesma tx da leitura, retenção bounded + expurgo. |
 | [`../ops/ingress-runbook.md`](../ops/ingress-runbook.md) | Runbook de ingress — premissa de deploy não-negociável da Opção A (ADR-0001) como pré-requisito de go-live: app só via proxy confiável, token não vaza, sessão autenticada no edge. |
 
 ## Postura

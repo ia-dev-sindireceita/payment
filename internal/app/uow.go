@@ -18,6 +18,7 @@ type directRepo struct {
 	ports.RecRepository
 	ports.CobRRepository
 	ports.AuditLog
+	ports.PIIAccessRecorder
 }
 
 // autocommitUoW runs fn against the repositories directly, with no surrounding
@@ -44,6 +45,13 @@ func resolveUoW(d Deps) ports.UnitOfWork {
 		// per-port fakes); production wires a real one (footgun guarded elsewhere).
 		a = noopAudit{}
 	}
+	pii := d.PIIAccess
+	if pii == nil {
+		// Same footgun-guard for the PII access recorder: a use-case that mediates a
+		// PII read through the unit of work must not panic when no recorder was wired
+		// (unit tests with per-port fakes). Production wires a real append-only one.
+		pii = noopPIIAccess{}
+	}
 	return autocommitUoW{repo: directRepo{
 		PaymentRepository:   d.Payments,
 		TenantRepository:    d.Tenants,
@@ -53,5 +61,6 @@ func resolveUoW(d Deps) ports.UnitOfWork {
 		RecRepository:       d.Recs,
 		CobRRepository:      d.CobRs,
 		AuditLog:            a,
+		PIIAccessRecorder:   pii,
 	}}
 }
