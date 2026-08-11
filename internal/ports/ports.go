@@ -17,6 +17,7 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/recurrence"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/termsconsent"
 )
 
 // Clock abstracts time so the domain stays deterministic and testable.
@@ -134,6 +135,33 @@ type UnitOfWork interface {
 // audit record commit atomically (threat: forensic gaps).
 type AuditLog interface {
 	Append(ctx context.Context, e audit.Entry) error
+}
+
+// TermsConsentStore is the durable, append-only output port for LGPD consent to
+// the Solution's terms of use (C6 Termo 3.5 / B9, SIN-68743). It is a DISTINCT
+// concern from the PIX Automático mandate ports above: it records legal consent to
+// terms, not an authorization to move money.
+//
+// Implementations MUST be append-only — RecordConsent only ever INSERTs; there is
+// no update or delete path, so a captured consent is immutable and re-consent adds
+// a NEW row rather than overwriting the prior one (the forensic property, OWASP
+// A09). Every method is tenant-scoped so one tenant can never read another's
+// consents (threat P1). A termsconsent.Record carries PII (subject/IP/user-agent)
+// which these adapters persist but never log (Record.LogValue redacts it).
+type TermsConsentStore interface {
+	// RecordConsent durably appends one consent event (append-only INSERT). The
+	// Record's id is the opaque primary key, so distinct captures never collide and
+	// re-consent to the same version is preserved as a separate row.
+	RecordConsent(ctx context.Context, r *termsconsent.Record) error
+	// FindLatestConsent returns the most recent consent for (tenant, subject,
+	// version), or shared.ErrNotFound when the subject never consented to that
+	// version. Tenant-scoped: a subject/version owned by another tenant reads as
+	// ErrNotFound (no cross-tenant oracle).
+	FindLatestConsent(ctx context.Context, tenantID, subject, termsVersion string) (*termsconsent.Record, error)
+	// ListConsents returns a subject's full consent history for a tenant, newest
+	// first (granted_at desc, id desc tie-break). It exposes the append-only trail
+	// so the immutability of prior captures is observable. Tenant-scoped.
+	ListConsents(ctx context.Context, tenantID, subject string) ([]*termsconsent.Record, error)
 }
 
 // ProcessedEventStore records which external events (webhooks) have already been

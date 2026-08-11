@@ -17,6 +17,7 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/domain/recurrence"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/termsconsent"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
 
@@ -31,6 +32,7 @@ type Store struct {
 	audit     []audit.Entry               // append-only audit trail (mirrors audit_log)
 	recs      map[string]*recurrence.Rec  // keyed by tenantID+"\x00"+idRec
 	cobrs     map[string]*recurrence.CobR // keyed by tenantID+"\x00"+txID
+	consents  []*termsconsent.Record      // append-only LGPD terms consent (mirrors terms_consent)
 }
 
 // NewStore returns an empty in-memory store.
@@ -54,6 +56,7 @@ var (
 	_ ports.RecRepository       = (*Store)(nil)
 	_ ports.CobRRepository      = (*Store)(nil)
 	_ ports.AuditLog            = (*Store)(nil)
+	_ ports.TermsConsentStore   = (*Store)(nil)
 	_ ports.Repository          = (*Store)(nil)
 	_ ports.UnitOfWork          = (*Store)(nil)
 )
