@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/access"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
@@ -112,6 +113,13 @@ type Repository interface {
 	// record did not (or vice-versa). The standalone Deps.Audit port remains for
 	// callers that append outside a transaction (SIN-66025 / SIN-66016).
 	AuditLog
+	// PIIAccessRecorder is bundled so the art.13 / LGPD access record for reading a
+	// titular's PII AT REST (today: pix_rec.devedor_*) commits in the SAME
+	// transaction as the read that materialised it. This makes the access log a
+	// Complete-Mediation choke-point: if the append fails, the read is rolled back,
+	// so there is no unlogged read of local PII (ADR-0008 §5/§6). The standalone
+	// Deps.PIIAccess port remains for best-effort logging of pass-through bank reads.
+	PIIAccessRecorder
 }
 
 // UnitOfWork runs fn inside one atomic transaction. Every write performed through
@@ -162,6 +170,30 @@ type TermsConsentStore interface {
 	// first (granted_at desc, id desc tie-break). It exposes the append-only trail
 	// so the immutability of prior captures is observable. Tenant-scoped.
 	ListConsents(ctx context.Context, tenantID, subject string) ([]*termsconsent.Record, error)
+}
+
+// PIIAccessRecorder is the append-only output port for the LGPD / Decreto
+// 8.771/2016 art.13 register of READ access to a titular's personal data in the
+// data plane (Termo C6 B10-v; ADR-0008). Implementations MUST treat entries as
+// immutable (append-only) and MUST NOT persist or log any plaintext PII — an
+// access.Entry carries only a pseudonymous subject_ref by construction (ADR-0008
+// §4). When backed by a persisted store, the append should share the mediated
+// read's transaction so a read of local PII and its access record commit
+// atomically (Complete Mediation): a read whose append fails is rolled back, so
+// PII at rest cannot be read without being recorded.
+type PIIAccessRecorder interface {
+	RecordPIIAccess(ctx context.Context, e access.Entry) error
+}
+
+// PIIAccessPurger expires access-log entries by retention policy. This is the ONLY
+// delete permitted on the otherwise append-only pii_access_log — LGPD
+// minimisation: the register is kept only as long as needed to evidence art.13
+// compliance (default bounded, ADR-0008 §3). PurgePIIAccessBefore removes entries
+// strictly older than cutoff and returns how many were removed. It runs on the
+// connection pool (a maintenance routine), not inside a business transaction, so
+// it is kept off the bundled Repository surface.
+type PIIAccessPurger interface {
+	PurgePIIAccessBefore(ctx context.Context, cutoff time.Time) (int64, error)
 }
 
 // ProcessedEventStore records which external events (webhooks) have already been

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/access"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
@@ -33,6 +34,7 @@ type Store struct {
 	recs      map[string]*recurrence.Rec  // keyed by tenantID+"\x00"+idRec
 	cobrs     map[string]*recurrence.CobR // keyed by tenantID+"\x00"+txID
 	consents  []*termsconsent.Record      // append-only LGPD terms consent (mirrors terms_consent)
+	piiAccess []access.Entry              // append-only PII read-access log (mirrors pii_access_log)
 }
 
 // NewStore returns an empty in-memory store.
@@ -57,6 +59,8 @@ var (
 	_ ports.CobRRepository      = (*Store)(nil)
 	_ ports.AuditLog            = (*Store)(nil)
 	_ ports.TermsConsentStore   = (*Store)(nil)
+	_ ports.PIIAccessRecorder   = (*Store)(nil)
+	_ ports.PIIAccessPurger     = (*Store)(nil)
 	_ ports.Repository          = (*Store)(nil)
 	_ ports.UnitOfWork          = (*Store)(nil)
 )
@@ -257,6 +261,7 @@ type snapshot struct {
 	audit     []audit.Entry
 	recs      map[string]*recurrence.Rec
 	cobrs     map[string]*recurrence.CobR
+	piiAccess []access.Entry
 }
 
 func (s *Store) snapshot() snapshot {
@@ -288,7 +293,9 @@ func (s *Store) snapshot() snapshot {
 	for k, v := range s.cobrs {
 		cobrs[k] = v
 	}
-	return snapshot{tenants: tenants, payments: payments, pricing: pricing, ledger: ledger, processed: processed, audit: auditCopy, recs: recs, cobrs: cobrs}
+	piiAccess := make([]access.Entry, len(s.piiAccess))
+	copy(piiAccess, s.piiAccess)
+	return snapshot{tenants: tenants, payments: payments, pricing: pricing, ledger: ledger, processed: processed, audit: auditCopy, recs: recs, cobrs: cobrs, piiAccess: piiAccess}
 }
 
 func (s *Store) restore(snap snapshot) {
@@ -300,6 +307,7 @@ func (s *Store) restore(snap snapshot) {
 	s.audit = snap.audit
 	s.recs = snap.recs
 	s.cobrs = snap.cobrs
+	s.piiAccess = snap.piiAccess
 }
 
 // --- Lock-free core (callers must hold s.mu) ---

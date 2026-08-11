@@ -11,8 +11,18 @@
 --
 -- Multi-tenancy: every row carries tenant_id and is queried scoped (threat P1).
 -- Multi-bank: pix_rec carries bank_id, the non-secret bank slug (ADR-0007), so a
--- mandate is attributable to which bank originated it. No secret/credential/PII is
+-- mandate is attributable to which bank originated it. No secret/credential is
 -- stored.
+--
+-- PII AT REST (corrected 2026-08-06 — SIN-68748 / ADR-0008): pix_rec DOES store
+-- titular personal data — devedor_doc (CPF/CNPJ) and devedor_nome are the payer's
+-- personal data at rest. This is the ONLY structured titular PII persisted by this
+-- service. An earlier version of this comment wrongly said "No … PII is stored";
+-- that was incorrect. Any READ that resolves and exposes these fields (today the
+-- FindRecByID path) is subject to the LGPD / Decreto 8.771/2016 art.13 access
+-- register — see docs/security/adr-0008-pii-read-access-log.md and migration
+-- 0006_pii_access_log. That register stores only a pseudonymous subject_ref, never a
+-- copy of devedor_doc/devedor_nome (minimisation, ADR-0008 §4).
 --
 -- Portability (same conventions as 0001_init): TEXT opaque ids, TEXT RFC3339-UTC
 -- timestamps, TEXT yyyy-MM-dd calendar dates, INTEGER cents (BIGINT in Postgres).
