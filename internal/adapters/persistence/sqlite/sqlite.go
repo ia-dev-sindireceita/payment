@@ -17,6 +17,7 @@ import (
 	// Pure-Go SQLite driver (no cgo) for simple, portable CI builds.
 	_ "modernc.org/sqlite"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
@@ -129,6 +130,7 @@ func NewStore(db *sql.DB) *Store { return &Store{db: db, repo: repo{q: db}} }
 var (
 	_ ports.PaymentRepository   = (*Store)(nil)
 	_ ports.TenantRepository    = (*Store)(nil)
+	_ ports.AccountRepository   = (*Store)(nil)
 	_ ports.PricingRepository   = (*Store)(nil)
 	_ ports.LedgerRepository    = (*Store)(nil)
 	_ ports.ProcessedEventStore = (*Store)(nil)
@@ -158,37 +160,43 @@ func (s *Store) WithinTx(ctx context.Context, fn func(ports.Repository) error) e
 
 // --- Tenants ---
 
-// SaveTenant inserts or updates a tenant.
+// SaveTenant inserts or updates a tenant. account_id is written on INSERT but is
+// deliberately NOT in the DO UPDATE SET clause: the owning account is IMMUTABLE
+// once assigned (ADR-0009 §3.2), so an admin activate/suspend upsert must never
+// clobber a backfilled owner. An empty AccountID persists as SQL NULL — the
+// NULL-safe "self-account" legacy semantics (ADR-0009 §4).
 func (r repo) SaveTenant(ctx context.Context, t *tenant.Tenant) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO tenants (id, name, active, created_at) VALUES (?, ?, ?, ?)
+		`INSERT INTO tenants (id, name, active, created_at, account_id) VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET name = excluded.name, active = excluded.active`,
-		t.ID(), t.Name(), boolToInt(t.Active()), t.CreatedAt().Format(tsLayout))
+		t.ID(), t.Name(), boolToInt(t.Active()), t.CreatedAt().Format(tsLayout), nullIfEmpty(t.AccountID()))
 	if err != nil {
 		return fmt.Errorf("save tenant: %w", err)
 	}
 	return nil
 }
 
-// FindTenantByID returns a tenant or ErrNotFound.
+// FindTenantByID returns a tenant or ErrNotFound. A NULL account_id (legacy
+// self-account) reads back as an empty owner.
 func (r repo) FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, error) {
-	row := r.q.QueryRowContext(ctx, `SELECT id, name, active, created_at FROM tenants WHERE id = ?`, id)
+	row := r.q.QueryRowContext(ctx, `SELECT id, name, active, created_at, account_id FROM tenants WHERE id = ?`, id)
 	var gotID, name, createdAt string
+	var accountID sql.NullString
 	var active int
-	if err := row.Scan(&gotID, &name, &active, &createdAt); err != nil {
+	if err := row.Scan(&gotID, &name, &active, &createdAt, &accountID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, shared.ErrNotFound
 		}
 		return nil, fmt.Errorf("scan tenant: %w", err)
 	}
-	return tenant.Rehydrate(gotID, name, active != 0, parseTime(createdAt)), nil
+	return tenant.RehydrateWithAccount(gotID, name, active != 0, parseTime(createdAt), accountID.String), nil
 }
 
 // ListTenants returns every tenant, newest-first (created_at desc, id desc as a
 // deterministic tie-break). Used by the admin console listing.
 func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, active, created_at FROM tenants ORDER BY created_at DESC, id DESC`)
+		`SELECT id, name, active, created_at, account_id FROM tenants ORDER BY created_at DESC, id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("query tenants: %w", err)
 	}
@@ -196,16 +204,47 @@ func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
 	var out []*tenant.Tenant
 	for rows.Next() {
 		var id, name, createdAt string
+		var accountID sql.NullString
 		var active int
-		if err := rows.Scan(&id, &name, &active, &createdAt); err != nil {
+		if err := rows.Scan(&id, &name, &active, &createdAt, &accountID); err != nil {
 			return nil, fmt.Errorf("scan tenant: %w", err)
 		}
-		out = append(out, tenant.Rehydrate(id, name, active != 0, parseTime(createdAt)))
+		out = append(out, tenant.RehydrateWithAccount(id, name, active != 0, parseTime(createdAt), accountID.String))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate tenants: %w", err)
 	}
 	return out, nil
+}
+
+// --- Accounts (two-level tenancy, ADR-0009) ---
+
+// SaveAccount inserts or updates an account (the API user / reseller that owns
+// tenants). Upsert on id so admin rename/activate is retry-safe, mirroring
+// SaveTenant. An account holds no bank credential and no money.
+func (r repo) SaveAccount(ctx context.Context, a *account.Account) error {
+	_, err := r.q.ExecContext(ctx,
+		`INSERT INTO accounts (id, name, active, created_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET name = excluded.name, active = excluded.active`,
+		a.ID(), a.Name(), boolToInt(a.Active()), a.CreatedAt().Format(tsLayout))
+	if err != nil {
+		return fmt.Errorf("save account: %w", err)
+	}
+	return nil
+}
+
+// FindAccountByID returns an account or ErrNotFound.
+func (r repo) FindAccountByID(ctx context.Context, id string) (*account.Account, error) {
+	row := r.q.QueryRowContext(ctx, `SELECT id, name, active, created_at FROM accounts WHERE id = ?`, id)
+	var gotID, name, createdAt string
+	var active int
+	if err := row.Scan(&gotID, &name, &active, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, shared.ErrNotFound
+		}
+		return nil, fmt.Errorf("scan account: %w", err)
+	}
+	return account.Rehydrate(gotID, name, active != 0, parseTime(createdAt)), nil
 }
 
 // --- Payments (tenant-scoped) ---
@@ -399,6 +438,16 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// nullIfEmpty maps an empty string to a SQL NULL and any other value to itself,
+// so an unset optional column (e.g. a self-account tenant's account_id) is stored
+// as NULL rather than ” — preserving the NULL-safe semantics of migration 0007.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func parseTime(s string) time.Time {
