@@ -51,6 +51,27 @@ func Rehydrate(id, name string, active bool, createdAt time.Time) *Account {
 	return &Account{id: id, name: name, active: active, createdAt: createdAt}
 }
 
+// selfAccountPrefix is the deterministic prefix that derives a tenant's
+// self-account id. It MUST match the backfill in migration 0007
+// ('acct-' || tenant.id) so the flat legacy model is "an account of one tenant,
+// 1:1" with a reproducible id and no bookkeeping (ADR-0009 §4).
+const selfAccountPrefix = "acct-"
+
+// SelfAccountID returns the id of the self-account that owns a legacy/flat tenant
+// — the single home for the "acct-<tenantID>" convention established by migration
+// 0007's backfill (ADR-0009 §4). A tenant whose owning account has not been
+// explicitly assigned (empty accountID, NULL-safe legacy semantics) belongs to
+// this derived self-account. Auth (SIN-69126) and metering (SIN-69127) both
+// resolve the account through here so the derivation lives in exactly one place.
+// A blank tenant id yields "" (there is no self-account for a non-tenant).
+func SelfAccountID(tenantID string) string {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return ""
+	}
+	return selfAccountPrefix + tenantID
+}
+
 // ID returns the account identifier.
 func (a *Account) ID() string { return a.id }
 

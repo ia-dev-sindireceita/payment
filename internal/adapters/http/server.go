@@ -27,7 +27,7 @@ type Server struct {
 	console     *app.ConsoleService
 	ui          *adminweb.Renderer
 	webhooks    *app.WebhookService
-	tenantAuth  TenantAuthenticator
+	tenantAuth  TenantPrincipalAuthenticator
 	adminAuth   AdminPrincipalAuthenticator
 	webhookAuth WebhookAuthenticator
 	csrf        CSRFGuard
@@ -73,7 +73,7 @@ type Config struct {
 	Console     *app.ConsoleService
 	UI          *adminweb.Renderer
 	Webhooks    *app.WebhookService
-	TenantAuth  TenantAuthenticator
+	TenantAuth  TenantPrincipalAuthenticator
 	AdminAuth   AdminPrincipalAuthenticator
 	WebhookAuth WebhookAuthenticator
 	// BankResolver resolves and validates the per-request bank selector for the
