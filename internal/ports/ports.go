@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/access"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
@@ -52,6 +53,18 @@ type PaymentRepository interface {
 type TenantRepository interface {
 	SaveTenant(ctx context.Context, t *tenant.Tenant) error
 	FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, error)
+}
+
+// AccountRepository persists Account aggregates — the API user / reseller that
+// owns tenants in the two-level tenancy model (ADR-0009, SIN-69119 §3.1). Kept
+// deliberately minimal and separate from TenantRepository: an account is
+// attribution-only and never carries a bank credential. Reads are keyed by the
+// opaque account id (an account spans tenants, so it is not tenant-scoped);
+// isolation between accounts is enforced by the auth choke-point (F1) and by
+// deny-by-default listings (F3), not by this write/lookup port.
+type AccountRepository interface {
+	SaveAccount(ctx context.Context, a *account.Account) error
+	FindAccountByID(ctx context.Context, id string) (*account.Account, error)
 }
 
 // PricingRepository resolves and stores per-endpoint pricing. The admin-console
