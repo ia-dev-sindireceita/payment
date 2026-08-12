@@ -35,6 +35,7 @@ var screenFiles = map[string]string{
 	"bank_detail":   "templates/bank_detail.html",
 	"pricing":       "templates/pricing.html",
 	"consumption":   "templates/consumption.html",
+	"invoices":      "templates/invoices.html",
 }
 
 // Renderer holds the parsed template sets. base carries the layout and all

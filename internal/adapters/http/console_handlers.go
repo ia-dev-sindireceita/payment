@@ -709,6 +709,117 @@ func centsDecimal(cents int64) string {
 	return fmt.Sprintf("%s%d.%02d", neg, cents/100, cents%100)
 }
 
+// --- Invoices (Faturas, SIN-69121) ---
+
+// consoleInvoices renders the "Faturas" screen: the tenant's generated invoices
+// (newest-first) plus the period picker that drives generation. The date inputs
+// default to the last 30 days (parseConsumptionRange), so the reseller has a
+// sensible pre-filled window without typing.
+func (s *Server) consoleInvoices(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	_, startStr, endStr, err := parseConsumptionRange(r, s.console.Now())
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	invs, err := s.console.ListInvoices(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	view := adminweb.ToInvoicesView(adminweb.ToTenantView(t), invs)
+	view.StartDate, view.EndDate = startStr, endStr
+	view.Base = s.consoleBase(r, "Faturas", "tenants")
+	s.ui.Page(w, r, "invoices", http.StatusOK, view)
+}
+
+// consoleGenerateInvoice generates (freezes) an invoice for a bounded period and
+// re-renders the Faturas list with a success toast. The period comes from the
+// POST body (RoleAdmin + CSRF inherited from the mutation group); an unbounded or
+// malformed window is a 400 via the domain validation error.
+func (s *Server) consoleGenerateInvoice(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	t, err := s.console.GetTenant(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	rng, startStr, endStr, err := parseInvoicePeriod(r)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	if _, err := s.console.GenerateInvoice(r.Context(), id, rng); err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	invs, err := s.console.ListInvoices(r.Context(), id)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	view := adminweb.ToInvoicesView(adminweb.ToTenantView(t), invs)
+	view.StartDate, view.EndDate = startStr, endStr
+	view.Base = s.consoleBase(r, "Faturas", "tenants")
+	s.ui.BodyWithOOB(w, http.StatusOK, "invoices", view,
+		adminweb.OOBPart{Name: "toast_oob", Data: adminweb.ToastData{Kind: "success", Message: "Fatura gerada."}})
+}
+
+// consoleInvoiceCSV downloads one invoice as a CSV document. Read-only, same-
+// origin GET (CSP-friendly). Money is emitted in both integer centavos (exact)
+// and a locale-neutral decimal. The filename is built from the invoice's own
+// server-side period (never the raw URL id), so it carries no header-injection
+// surface.
+func (s *Server) consoleInvoiceCSV(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	invID := chi.URLParam(r, "invId")
+	inv, err := s.console.GetInvoice(r.Context(), id, invID)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	from := inv.PeriodStart().UTC().Format(consumptionDateLayout)
+	to := inv.PeriodEnd().UTC().AddDate(0, 0, -1).Format(consumptionDateLayout)
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"fatura-%s-a-%s.csv\"", from, to))
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"endpoint", "chamadas", "total_centavos", "total_reais"})
+	for _, l := range inv.Lines() {
+		_ = cw.Write([]string{l.Endpoint(), strconv.Itoa(l.Calls()), strconv.FormatInt(l.SubtotalCents(), 10), centsDecimal(l.SubtotalCents())})
+	}
+	_ = cw.Write([]string{"TOTAL", strconv.Itoa(inv.TotalCalls()), strconv.FormatInt(inv.TotalCents(), 10), centsDecimal(inv.TotalCents())})
+	cw.Flush()
+}
+
+// parseInvoicePeriod reads the required start_date/end_date from the POST body
+// and returns a BOUNDED half-open window [start, end+1day). Both dates are
+// required (an invoice bills a definite period); a missing or malformed value is
+// a validation error surfaced as 400. The echoed strings refill the picker.
+func parseInvoicePeriod(r *http.Request) (app.ConsumptionRange, string, string, error) {
+	startRaw := strings.TrimSpace(r.PostFormValue("start_date"))
+	endRaw := strings.TrimSpace(r.PostFormValue("end_date"))
+	if startRaw == "" || endRaw == "" {
+		return app.ConsumptionRange{}, "", "", shared.NewValidationError("period", "período inicial e final são obrigatórios")
+	}
+	start, err := time.ParseInLocation(consumptionDateLayout, startRaw, time.UTC)
+	if err != nil {
+		return app.ConsumptionRange{}, "", "", shared.NewValidationError("start_date", "data inicial inválida")
+	}
+	end, err := time.ParseInLocation(consumptionDateLayout, endRaw, time.UTC)
+	if err != nil {
+		return app.ConsumptionRange{}, "", "", shared.NewValidationError("end_date", "data final inválida")
+	}
+	// Half-open [start, end+1day) so the chosen end day is inclusive of its charges.
+	rng := app.ConsumptionRange{Start: start, End: end.AddDate(0, 0, 1)}
+	return rng, start.Format(consumptionDateLayout), end.Format(consumptionDateLayout), nil
+}
+
 // --- helpers ---
 
 // consoleError maps a use-case error to an HTML error response, mirroring the
@@ -719,6 +830,8 @@ func (s *Server) consoleError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, shared.ErrValidation):
 		http.Error(w, "invalid request", http.StatusBadRequest)
+	case errors.Is(err, app.ErrInvoicesUnavailable):
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}

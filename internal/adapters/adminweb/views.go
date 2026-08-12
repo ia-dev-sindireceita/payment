@@ -8,6 +8,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/app"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/invoice"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
 )
@@ -344,6 +345,58 @@ func ToConsumptionView(t TenantView, rep app.ConsumptionReport) ConsumptionView 
 		rows = append(rows, ConsumptionRow{Endpoint: l.Endpoint, Calls: l.Calls, TotalCents: l.TotalCents})
 	}
 	return ConsumptionView{Tenant: t, Rows: rows, TotalCalls: rep.TotalCalls, TotalCents: rep.TotalCents}
+}
+
+// --- Invoices (Faturas, SIN-69121) ---
+
+// InvoiceRow is one invoice in the tenant's Faturas list. Period and generated
+// timestamps are pre-formatted (ISO date) for the template; money is exposed via
+// TotalReais so the currency formatting stays in one place.
+type InvoiceRow struct {
+	ID         string
+	PeriodFrom string
+	PeriodTo   string
+	Generated  string
+	TotalCalls int
+	TotalCents int64
+}
+
+// TotalReais renders the invoice total in Brazilian currency.
+func (r InvoiceRow) TotalReais() string { return reais(r.TotalCents) }
+
+// CSVHref is the same-origin download link for one invoice (a plain GET to a
+// whitelisted route; CSP-friendly). The id is path-escaped.
+func (r InvoiceRow) CSVHref(tenantID string) string {
+	return "/console/tenants/" + url.PathEscape(tenantID) + "/invoices/" + url.PathEscape(r.ID) + ".csv"
+}
+
+// InvoicesView backs the "Faturas" screen: the tenant's generated invoices plus
+// the period picker that drives generation. StartDate/EndDate echo the chosen
+// window back into the date inputs.
+type InvoicesView struct {
+	Base
+	Tenant    TenantView
+	Rows      []InvoiceRow
+	StartDate string
+	EndDate   string
+}
+
+// ToInvoicesView projects a tenant's invoices for the list screen. Timestamps are
+// rendered as ISO dates (YYYY-MM-DD); the invoice period is half-open, so the
+// display end is the stored exclusive end minus one day (the last billed day).
+func ToInvoicesView(t TenantView, invs []invoice.Invoice) InvoicesView {
+	rows := make([]InvoiceRow, 0, len(invs))
+	for _, inv := range invs {
+		rows = append(rows, InvoiceRow{
+			ID:         inv.ID(),
+			PeriodFrom: inv.PeriodStart().UTC().Format("2006-01-02"),
+			PeriodTo:   inv.PeriodEnd().UTC().AddDate(0, 0, -1).Format("2006-01-02"),
+			Generated:  inv.GeneratedAt().UTC().Format("2006-01-02"),
+			TotalCalls: inv.TotalCalls(),
+			TotalCents: inv.TotalCents(),
+		})
+	}
+	return InvoicesView{Tenant: t, Rows: rows}
 }
 
 // ToastData backs an out-of-band toast notification.

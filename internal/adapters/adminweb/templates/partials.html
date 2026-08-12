@@ -43,6 +43,20 @@
 </table>
 {{end}}
 
+{{define "invoice_rows"}}
+<table class="data">
+  <caption class="sr-only">Faturas de {{.Tenant.Name}}</caption>
+  <thead><tr><th scope="col">Período</th><th scope="col">Gerada em</th><th scope="col">Chamadas</th><th scope="col">Total</th><th scope="col">Documento</th></tr></thead>
+  <tbody>
+  {{- if .Rows -}}
+  {{range .Rows}}<tr><td>{{.PeriodFrom}} — {{.PeriodTo}}</td><td>{{.Generated}}</td><td>{{.TotalCalls}}</td><td>{{.TotalReais}}</td><td><a class="btn btn--secondary" href="{{.CSVHref $.Tenant.ID}}" download>Baixar CSV</a></td></tr>{{end}}
+  {{- else -}}
+  <tr class="empty-row"><td colspan="5"><div class="empty"><p class="muted">Nenhuma fatura gerada. Escolha um período e clique em “Gerar fatura”.</p></div></td></tr>
+  {{- end -}}
+  </tbody>
+</table>
+{{end}}
+
 {{define "toast_oob"}}
 <div id="toasts" hx-swap-oob="afterbegin">
   <div class="toast toast--{{.Kind}}" role="status">{{.Message}}</div>
