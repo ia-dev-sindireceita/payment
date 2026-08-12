@@ -66,3 +66,23 @@ func TestAccountRehydrateAndToggle(t *testing.T) {
 		t.Fatal("should be active after Activate")
 	}
 }
+
+func TestSelfAccountID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, tenantID, want string
+	}{
+		{name: "derives acct- prefix", tenantID: "t1", want: "acct-t1"},
+		{name: "trims whitespace", tenantID: "  t1  ", want: "acct-t1"},
+		{name: "empty tenant has no self-account", tenantID: "", want: ""},
+		{name: "blank tenant has no self-account", tenantID: "   ", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := account.SelfAccountID(tt.tenantID); got != tt.want {
+				t.Fatalf("SelfAccountID(%q) = %q, want %q", tt.tenantID, got, tt.want)
+			}
+		})
+	}
+}

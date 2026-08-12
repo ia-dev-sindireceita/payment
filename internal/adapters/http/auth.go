@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/ia-dev-sindireceita/payment/internal/app"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 )
 
 type ctxKey int
@@ -23,6 +24,12 @@ const (
 	ctxTenantID ctxKey = iota
 	ctxRole
 	ctxCSRFToken
+	// ctxAccountID carries the owning Account id resolved at the auth choke-point
+	// alongside ctxTenantID (two-level tenancy, ADR-0009 / SIN-69126). It is
+	// derived server-side from the authenticated token — never from client input —
+	// and read by the metering/billing rollup (F2+). Downstream handlers keep
+	// reading only ctxTenantID; the tenant isolation boundary is unchanged.
+	ctxAccountID
 )
 
 // Role is an admin-plane authorization role. It is derived server-side from the
@@ -42,6 +49,28 @@ const (
 // lookup denies the request (threat H2).
 type TenantAuthenticator interface {
 	AuthenticateTenant(token string) (tenantID string, ok bool)
+}
+
+// Principal is the server-side identity of an authenticated tenant caller in the
+// two-level tenancy model (ADR-0009 / SIN-69126): the empresa-cliente (TenantID)
+// plus the owning API-user/reseller account (AccountID). BOTH are resolved from
+// the token server-side at the single auth choke-point — never from client input
+// (there is no client selector, so the whole broken-access-control class A01 is
+// designed out). TenantID stays authoritative for the isolation boundary exactly
+// as before; AccountID is attribution-only (billing/metering rollup) and never
+// widens or weakens the tenant scope.
+type Principal struct {
+	AccountID string
+	TenantID  string
+}
+
+// TenantPrincipalAuthenticator resolves an opaque API token to the full tenant
+// principal (owning account + tenant). It is the identity source the tenant
+// middleware uses so the account dimension is carried from the same choke-point
+// that already resolves the tenant. A failed lookup denies the request (threat
+// H2), identically to AuthenticateTenant.
+type TenantPrincipalAuthenticator interface {
+	AuthenticateTenantPrincipal(token string) (Principal, bool)
 }
 
 // AdminAuthenticator authenticates an admin token and resolves its role (admin
@@ -167,6 +196,23 @@ func (a *StaticTokenAuth) AuthenticateTenant(token string) (string, bool) {
 	return tenantID, ok
 }
 
+// AuthenticateTenantPrincipal resolves a token to its full principal (owning
+// account + tenant). The tenant is resolved exactly as AuthenticateTenant; the
+// owning account is DERIVED server-side as the tenant's self-account
+// (account.SelfAccountID, the "acct-<tenantID>" convention from migration 0007's
+// backfill). This is the dark-ship default: a legacy token maps to its own
+// self-account, so the account dimension is present and correct with no config or
+// admin-plane change (explicit account assignment arrives in a later phase and
+// will layer on top here). A failed tenant lookup denies with the same
+// (zero, false) as AuthenticateTenant — no new oracle.
+func (a *StaticTokenAuth) AuthenticateTenantPrincipal(token string) (Principal, bool) {
+	tenantID, ok := a.AuthenticateTenant(token)
+	if !ok {
+		return Principal{}, false
+	}
+	return Principal{TenantID: tenantID, AccountID: account.SelfAccountID(tenantID)}, true
+}
+
 // AuthenticateAdmin resolves an admin token to its role. The comparison is
 // constant-time (crypto/subtle) and scans every registered token without an
 // early return, so timing does not reveal which token (if any) matched (mirrors
@@ -284,16 +330,22 @@ func bearerToken(r *http.Request) string {
 	return ""
 }
 
-// tenantAuthMiddleware enforces tenant authentication and injects the tenant id.
-func tenantAuthMiddleware(auth TenantAuthenticator) func(http.Handler) http.Handler {
+// tenantAuthMiddleware enforces tenant authentication and injects the resolved
+// principal: the tenant id (ctxTenantID, unchanged — still authoritative for the
+// isolation boundary) AND the owning account id (ctxAccountID, new — attribution
+// for the metering/billing rollup). Both come from the same single choke-point,
+// derived server-side from the token and never from client input. Deny-by-default:
+// an unresolved token is rejected before any handler runs.
+func tenantAuthMiddleware(auth TenantPrincipalAuthenticator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			tenantID, ok := auth.AuthenticateTenant(bearerToken(r))
+			p, ok := auth.AuthenticateTenantPrincipal(bearerToken(r))
 			if !ok {
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
-			ctx := context.WithValue(r.Context(), ctxTenantID, tenantID)
+			ctx := context.WithValue(r.Context(), ctxTenantID, p.TenantID)
+			ctx = context.WithValue(ctx, ctxAccountID, p.AccountID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -347,6 +399,17 @@ func requireRole(allowed ...Role) func(http.Handler) http.Handler {
 // tenantFromContext returns the authenticated tenant id, or "" if absent.
 func tenantFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(ctxTenantID).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// accountFromContext returns the owning account id resolved at the auth
+// choke-point (two-level tenancy, ADR-0009 / SIN-69126), or "" if absent. It is
+// attribution-only: consumers use it for the metering/billing rollup and MUST
+// keep scoping isolation on the tenant id.
+func accountFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ctxAccountID).(string); ok {
 		return v
 	}
 	return ""
