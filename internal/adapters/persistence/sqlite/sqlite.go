@@ -19,6 +19,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/invoice"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
@@ -456,4 +457,121 @@ func parseTime(s string) time.Time {
 		return time.Time{}
 	}
 	return t.UTC()
+}
+
+// --- Invoices (Faturas, SIN-69121) ---
+
+// SaveInvoice persists a generated invoice append-only: the header and its line
+// items are written together in ONE transaction so a reader never sees a header
+// without its body (and a mid-write failure leaves nothing behind). There is no
+// UPDATE/DELETE path — regenerating a period inserts a new invoice id.
+func (s *Store) SaveInvoice(ctx context.Context, inv invoice.Invoice) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin invoice tx: %w", err)
+	}
+	// Roll back on any early return; the successful path commits and this is a no-op.
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO invoices (id, tenant_id, account_id, period_start, period_end, total_calls, total_cents, generated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		inv.ID(), inv.TenantID(), inv.AccountID(),
+		inv.PeriodStart().UTC().Format(tsLayout), inv.PeriodEnd().UTC().Format(tsLayout),
+		inv.TotalCalls(), inv.TotalCents(), inv.GeneratedAt().UTC().Format(tsLayout)); err != nil {
+		return fmt.Errorf("insert invoice: %w", err)
+	}
+	for i, l := range inv.Lines() {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO invoice_items (invoice_id, seq, endpoint, calls, subtotal_cents) VALUES (?, ?, ?, ?, ?)`,
+			inv.ID(), i, l.Endpoint(), l.Calls(), l.SubtotalCents()); err != nil {
+			return fmt.Errorf("insert invoice item: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit invoice tx: %w", err)
+	}
+	return nil
+}
+
+// FindInvoiceByID returns one invoice with its line items, tenant-scoped (threat
+// P1: the tenant comes from the authenticated console session, never client
+// input). Returns shared.ErrNotFound when the id is unknown for the tenant.
+func (s *Store) FindInvoiceByID(ctx context.Context, tenantID, id string) (invoice.Invoice, error) {
+	var accountID, ps, pe, gen string
+	var totalCalls int
+	var totalCents int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT account_id, period_start, period_end, total_calls, total_cents, generated_at
+		 FROM invoices WHERE tenant_id = ? AND id = ?`, tenantID, id).
+		Scan(&accountID, &ps, &pe, &totalCalls, &totalCents, &gen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return invoice.Invoice{}, shared.ErrNotFound
+	}
+	if err != nil {
+		return invoice.Invoice{}, fmt.Errorf("query invoice: %w", err)
+	}
+	lines, err := s.invoiceItems(ctx, id)
+	if err != nil {
+		return invoice.Invoice{}, err
+	}
+	return invoice.Rehydrate(id, tenantID, accountID, parseTime(ps), parseTime(pe), parseTime(gen), lines, totalCalls, totalCents), nil
+}
+
+// ListInvoices returns a tenant's invoices, newest-first (generated_at desc, id
+// desc tie-break), each with its line items. Tenant-scoped (threat P1).
+func (s *Store) ListInvoices(ctx context.Context, tenantID string) ([]invoice.Invoice, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, account_id, period_start, period_end, total_calls, total_cents, generated_at
+		 FROM invoices WHERE tenant_id = ? ORDER BY generated_at DESC, id DESC`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("query invoices: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []invoice.Invoice
+	for rows.Next() {
+		var id, accountID, ps, pe, gen string
+		var totalCalls int
+		var totalCents int64
+		if err := rows.Scan(&id, &accountID, &ps, &pe, &totalCalls, &totalCents, &gen); err != nil {
+			return nil, fmt.Errorf("scan invoice: %w", err)
+		}
+		lines, err := s.invoiceItems(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, invoice.Rehydrate(id, tenantID, accountID, parseTime(ps), parseTime(pe), parseTime(gen), lines, totalCalls, totalCents))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate invoices: %w", err)
+	}
+	return out, nil
+}
+
+// invoiceItems reads one invoice's line items in stored document order (seq asc).
+func (s *Store) invoiceItems(ctx context.Context, invoiceID string) ([]invoice.LineItem, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT endpoint, calls, subtotal_cents FROM invoice_items WHERE invoice_id = ? ORDER BY seq ASC`, invoiceID)
+	if err != nil {
+		return nil, fmt.Errorf("query invoice items: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []invoice.LineItem
+	for rows.Next() {
+		var endpoint string
+		var calls int
+		var subtotal int64
+		if err := rows.Scan(&endpoint, &calls, &subtotal); err != nil {
+			return nil, fmt.Errorf("scan invoice item: %w", err)
+		}
+		l, err := invoice.NewLineItem(endpoint, calls, subtotal)
+		if err != nil {
+			return nil, fmt.Errorf("rehydrate invoice item: %w", err)
+		}
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate invoice items: %w", err)
+	}
+	return out, nil
 }
