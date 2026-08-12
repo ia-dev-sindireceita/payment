@@ -250,7 +250,9 @@ func TestAuditSchemaCarriesNoSecretColumn(t *testing.T) {
 	}
 	sort.Strings(cols)
 	// bank_id (non-secret bank slug, SIN-66044) is expected; it carries no secret.
-	want := []string{"action", "at", "bank_id", "expected_cents", "id", "operator_id", "received_cents", "tenant_id", "tx_id"}
+	// account_id ('acct-<tenant_id>' attribution, SIN-69127) is likewise non-secret —
+	// added by migration 0009 with CTO authorization to update this allow-list.
+	want := []string{"account_id", "action", "at", "bank_id", "expected_cents", "id", "operator_id", "received_cents", "tenant_id", "tx_id"}
 	if len(cols) != len(want) {
 		t.Fatalf("audit_log columns = %v, want %v", cols, want)
 	}

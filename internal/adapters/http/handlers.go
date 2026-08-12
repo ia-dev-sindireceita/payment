@@ -88,6 +88,7 @@ func (s *Server) handleCreateCharge(w http.ResponseWriter, r *http.Request) {
 	r = nr
 	p, err := s.charges.CreateCharge(r.Context(), app.CreateChargeInput{
 		TenantID:       tenantID,
+		AccountID:      accountFromContext(r.Context()),
 		Endpoint:       req.Endpoint,
 		AmountCents:    req.AmountCents,
 		Currency:       req.Currency,

@@ -75,9 +75,10 @@ func toCobvView(r ports.PixDueChargeResult, amountCents int64) cobvView {
 
 // toDueChargeInput maps the validated boundary body to the use-case input. The due
 // date has already been parsed.
-func toDueChargeInput(tenantID, idemKey string, req cobvRequest, due time.Time) app.DueChargeInput {
+func toDueChargeInput(tenantID, accountID, idemKey string, req cobvRequest, due time.Time) app.DueChargeInput {
 	in := app.DueChargeInput{
 		TenantID:           tenantID,
+		AccountID:          accountID,
 		AmountCents:        req.AmountCents,
 		Currency:           req.Currency,
 		DueDate:            due,
@@ -118,7 +119,7 @@ func (s *Server) handleCreatePixCobV(w http.ResponseWriter, r *http.Request) {
 	}
 	r = nr
 
-	p, res, err := s.pixCobV.CreateDueCharge(r.Context(), toDueChargeInput(tenantID, idemKey, req, due))
+	p, res, err := s.pixCobV.CreateDueCharge(r.Context(), toDueChargeInput(tenantID, accountFromContext(r.Context()), idemKey, req, due))
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -155,7 +156,7 @@ func (s *Server) handleUpdatePixCobV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.pixCobV.UpdateDueCharge(r.Context(), tenantID, txID, toDueChargeInput(tenantID, idemKey, req, due))
+	res, err := s.pixCobV.UpdateDueCharge(r.Context(), tenantID, txID, toDueChargeInput(tenantID, accountFromContext(r.Context()), idemKey, req, due))
 	if err != nil {
 		writeDomainError(w, err)
 		return

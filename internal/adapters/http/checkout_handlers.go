@@ -63,6 +63,7 @@ func (s *Server) handleCreateCheckout(w http.ResponseWriter, r *http.Request) {
 
 	in := app.CreateCheckoutSessionInput{
 		TenantID:              tenantID,
+		AccountID:             accountFromContext(r.Context()),
 		Currency:              req.Currency,
 		ExpiresInSeconds:      req.ExpiresInSeconds,
 		CardType:              req.CardType,

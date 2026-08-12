@@ -86,8 +86,11 @@ type PricingStore interface {
 
 // LedgerReader is the read side of the billing ledger powering the consumption
 // audit. Writes stay on the append-only path used by the charge/settlement flow.
+// ListLedgerEntriesByAccount serves the account→tenant→endpoint rollup (SIN-69127):
+// it returns every entry owned by an account across all of its tenants.
 type LedgerReader interface {
 	ListLedgerEntries(ctx context.Context, tenantID string) ([]billing.LedgerEntry, error)
+	ListLedgerEntriesByAccount(ctx context.Context, accountID string) ([]billing.LedgerEntry, error)
 }
 
 // ConsoleDeps bundles the console's dependencies. The fields reuse the same
@@ -814,4 +817,89 @@ func (s *ConsoleService) ListInvoices(ctx context.Context, tenantID string) ([]i
 		return nil, fmt.Errorf("resolve tenant: %w", err)
 	}
 	return s.invoices.ListInvoices(ctx, tenantID)
+}
+
+// --- Account consumption rollup (account → tenant → endpoint) ---
+
+// TenantConsumption is one tenant's slice of an account-level rollup: the same
+// per-endpoint aggregation as ConsumptionReport, scoped to a single tenant
+// (empresa-cliente) owned by the account.
+type TenantConsumption struct {
+	TenantID   string
+	Lines      []ConsumptionLine
+	TotalCalls int
+	TotalCents int64
+}
+
+// AccountConsumptionReport is the read-only metering rollup for one API-user/reseller
+// account: each tenant (empresa-cliente) it owns, broken down per endpoint, plus the
+// account-wide grand totals. It is the account→tenant→endpoint view the invoicing
+// track (F4, SIN-69121) groups on. Like ConsumptionReport it is a pure aggregation of
+// the append-only ledger — never a value derived from mutable state.
+type AccountConsumptionReport struct {
+	AccountID  string
+	Tenants    []TenantConsumption
+	TotalCalls int
+	TotalCents int64
+}
+
+// AccountConsumption builds the account→tenant→endpoint rollup over all recorded
+// ledger entries owned by the account. See AccountConsumptionInRange for the
+// time-bounded variant.
+func (s *ConsoleService) AccountConsumption(ctx context.Context, accountID string) (AccountConsumptionReport, error) {
+	return s.AccountConsumptionInRange(ctx, accountID, ConsumptionRange{})
+}
+
+// AccountConsumptionInRange builds the account→tenant→endpoint rollup from every
+// ledger entry the account owns (across all its tenants), counting only entries whose
+// time falls inside rng. The scan is account-scoped at the adapter (an account only
+// sees its own tenants' entries). Tenants are returned in stable tenant-id order and
+// each tenant's lines in endpoint order, so the rollup renders and invoices
+// deterministically.
+func (s *ConsoleService) AccountConsumptionInRange(ctx context.Context, accountID string, rng ConsumptionRange) (AccountConsumptionReport, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return AccountConsumptionReport{}, shared.NewValidationError("account_id", "account id is required")
+	}
+	entries, err := s.ledger.ListLedgerEntriesByAccount(ctx, accountID)
+	if err != nil {
+		return AccountConsumptionReport{}, fmt.Errorf("list ledger by account: %w", err)
+	}
+	byTenant := make(map[string]*TenantConsumption)
+	byTenantEndpoint := make(map[string]map[string]*ConsumptionLine)
+	rep := AccountConsumptionReport{AccountID: accountID}
+	for _, e := range entries {
+		if !rng.includes(e.At()) {
+			continue
+		}
+		tc, ok := byTenant[e.TenantID()]
+		if !ok {
+			tc = &TenantConsumption{TenantID: e.TenantID()}
+			byTenant[e.TenantID()] = tc
+			byTenantEndpoint[e.TenantID()] = make(map[string]*ConsumptionLine)
+		}
+		line, ok := byTenantEndpoint[e.TenantID()][e.Endpoint()]
+		if !ok {
+			line = &ConsumptionLine{Endpoint: e.Endpoint()}
+			byTenantEndpoint[e.TenantID()][e.Endpoint()] = line
+		}
+		line.Calls++
+		line.TotalCents += e.PriceCents()
+		tc.TotalCalls++
+		tc.TotalCents += e.PriceCents()
+		rep.TotalCalls++
+		rep.TotalCents += e.PriceCents()
+	}
+	rep.Tenants = make([]TenantConsumption, 0, len(byTenant))
+	for tenantID, tc := range byTenant {
+		lines := make([]ConsumptionLine, 0, len(byTenantEndpoint[tenantID]))
+		for _, line := range byTenantEndpoint[tenantID] {
+			lines = append(lines, *line)
+		}
+		sort.SliceStable(lines, func(i, j int) bool { return lines[i].Endpoint < lines[j].Endpoint })
+		tc.Lines = lines
+		rep.Tenants = append(rep.Tenants, *tc)
+	}
+	sort.SliceStable(rep.Tenants, func(i, j int) bool { return rep.Tenants[i].TenantID < rep.Tenants[j].TenantID })
+	return rep, nil
 }
