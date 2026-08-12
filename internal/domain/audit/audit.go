@@ -74,6 +74,13 @@ const (
 	// records WHICH certificate was provisioned and distinguishes a cert rotation
 	// from an OAuth secret write. It NEVER records the private key (threat C1/C4).
 	ActionSetBankCertificate Action = "certificate.set"
+
+	// ActionInvoiceGenerated records the generation of a Fatura (invoice) for a
+	// tenant over a billing period (SIN-69121). It names the operator and the
+	// tenant; the invoice is append-only billing evidence, so the trail records WHO
+	// generated a statement for WHICH empresa-cliente and WHEN. It carries no
+	// secret and no PII — an invoice is ids + endpoints + money only.
+	ActionInvoiceGenerated Action = "invoice.generated"
 )
 
 // recurrenceActionByStatus maps a recurrence.RecStatus string to the audit Action
@@ -98,7 +105,7 @@ func (a Action) valid() bool {
 		ActionSetCreditorKey, ActionSuspendTenant, ActionActivateTenant,
 		ActionSettlementAmountMismatch, ActionRecCreated, ActionRecApproved,
 		ActionRecRejected, ActionRecExpired, ActionRecCancelled, ActionCobRCreated,
-		ActionSetBankCertificate:
+		ActionSetBankCertificate, ActionInvoiceGenerated:
 		return true
 	default:
 		return false

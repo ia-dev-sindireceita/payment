@@ -14,6 +14,7 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/domain/access"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/invoice"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/payment"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/recurrence"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
@@ -35,6 +36,7 @@ type Store struct {
 	cobrs     map[string]*recurrence.CobR // keyed by tenantID+"\x00"+txID
 	consents  []*termsconsent.Record      // append-only LGPD terms consent (mirrors terms_consent)
 	piiAccess []access.Entry              // append-only PII read-access log (mirrors pii_access_log)
+	invoices  []invoice.Invoice           // append-only Faturas (mirrors invoices/invoice_items)
 }
 
 // NewStore returns an empty in-memory store.
@@ -201,6 +203,50 @@ func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billi
 			return out[i].ID() > out[j].ID()
 		}
 		return ai.After(aj)
+	})
+	return out, nil
+}
+
+// SaveInvoice appends a generated invoice (append-only, mirrors the sqlite
+// header+items insert). Invoice is an immutable value type whose Lines() returns
+// copies, so storing it directly is safe.
+func (s *Store) SaveInvoice(ctx context.Context, inv invoice.Invoice) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invoices = append(s.invoices, inv)
+	return nil
+}
+
+// FindInvoiceByID returns one tenant's invoice by id, or shared.ErrNotFound.
+// Tenant-scoped (threat P1).
+func (s *Store) FindInvoiceByID(ctx context.Context, tenantID, id string) (invoice.Invoice, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, inv := range s.invoices {
+		if inv.TenantID() == tenantID && inv.ID() == id {
+			return inv, nil
+		}
+	}
+	return invoice.Invoice{}, shared.ErrNotFound
+}
+
+// ListInvoices returns a tenant's invoices, newest-first (generated_at desc, id
+// desc tie-break). Tenant-scoped (threat P1).
+func (s *Store) ListInvoices(ctx context.Context, tenantID string) ([]invoice.Invoice, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]invoice.Invoice, 0)
+	for _, inv := range s.invoices {
+		if inv.TenantID() == tenantID {
+			out = append(out, inv)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		gi, gj := out[i].GeneratedAt(), out[j].GeneratedAt()
+		if gi.Equal(gj) {
+			return out[i].ID() > out[j].ID()
+		}
+		return gi.After(gj)
 	})
 	return out, nil
 }

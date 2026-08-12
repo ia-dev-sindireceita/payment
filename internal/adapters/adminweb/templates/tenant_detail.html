@@ -17,6 +17,8 @@
      hx-get="/console/tenants/{{.ID}}/pricing" hx-target="#main" hx-push-url="true">Tarifação</a>
   <a href="/console/tenants/{{.ID}}/consumption"
      hx-get="/console/tenants/{{.ID}}/consumption" hx-target="#main" hx-push-url="true">Consumo</a>
+  <a href="/console/tenants/{{.ID}}/invoices"
+     hx-get="/console/tenants/{{.ID}}/invoices" hx-target="#main" hx-push-url="true">Faturas</a>
 </nav>
 
 <div class="card-grid">
@@ -37,6 +39,8 @@
           hx-get="/console/tenants/{{.ID}}/pricing" hx-target="#main" hx-push-url="true">Tarifação ›</a></p>
     <p><a class="btn btn--ghost" href="/console/tenants/{{.ID}}/consumption"
           hx-get="/console/tenants/{{.ID}}/consumption" hx-target="#main" hx-push-url="true">Consumo ›</a></p>
+    <p><a class="btn btn--ghost" href="/console/tenants/{{.ID}}/invoices"
+          hx-get="/console/tenants/{{.ID}}/invoices" hx-target="#main" hx-push-url="true">Faturas ›</a></p>
   </div>
 </div>
 {{end}}

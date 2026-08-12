@@ -11,6 +11,7 @@ import (
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/bankcert"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/invoice"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
@@ -41,9 +42,32 @@ type ConsoleService struct {
 	// certificate"; a nil writer disables the upload path (the screens still render).
 	certWriter ports.BankCertificateWriter
 	certReader ports.BankCertificateReader
-	audit      ports.AuditLog
-	clock      ports.Clock
-	ids        ports.IDProvider
+	// invoices is the append-only Fatura store (SIN-69121). The console generates
+	// an invoice by freezing a consumption window and reads them back for the
+	// "Faturas" screen and the CSV download. Optional: a nil store disables the
+	// invoice use-cases (GenerateInvoice/ListInvoices return ErrNotConfigured) so
+	// wiring-light tests that don't exercise billing keep working.
+	invoices InvoiceStore
+	audit    ports.AuditLog
+	clock    ports.Clock
+	ids      ports.IDProvider
+}
+
+// ErrInvoicesUnavailable is returned by the invoice use-cases when the console
+// was wired without an InvoiceStore (a misconfiguration in production; some
+// wiring-light tests deliberately omit it). The HTTP adapter maps it to 503.
+var ErrInvoicesUnavailable = errors.New("invoice store not configured")
+
+// InvoiceStore is the append-only persistence the console needs for Faturas: the
+// write path (SaveInvoice) plus the tenant-scoped reads powering the list screen
+// and the CSV download. The concrete sqlite/inmemory stores satisfy it. It is a
+// narrow app-level port (like LedgerReader) — the invoice save runs outside the
+// unit-of-work, paired with its audit entry, mirroring the console's other
+// privileged writes (creditor-key, certificate).
+type InvoiceStore interface {
+	SaveInvoice(ctx context.Context, inv invoice.Invoice) error
+	FindInvoiceByID(ctx context.Context, tenantID, id string) (invoice.Invoice, error)
+	ListInvoices(ctx context.Context, tenantID string) ([]invoice.Invoice, error)
 }
 
 // TenantStore is the tenant capability the console needs: the foundation's
@@ -92,6 +116,9 @@ type ConsoleDeps struct {
 	// CertWriter disables the upload use-case (the screen still renders read-only).
 	CertWriter ports.BankCertificateWriter
 	CertReader ports.BankCertificateReader
+	// Invoices is the append-only Fatura store (SIN-69121). Optional: nil disables
+	// the invoice use-cases (the rest of the console still works).
+	Invoices InvoiceStore
 	// CredInvalidator evicts cached state keyed on a tenant's credential (the C6
 	// OAuth2 token cache) right after a credential write, closing the
 	// token-revocation lag (ADR-0003). Optional: nil degrades to a no-op.
@@ -125,6 +152,7 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 		credReader:    d.CredReader,
 		certWriter:    d.CertWriter,
 		certReader:    d.CertReader,
+		invoices:      d.Invoices,
 		credEvictor:   ci,
 		audit:         a,
 		clock:         d.Clock,
@@ -700,4 +728,90 @@ func (s *ConsoleService) ConsumptionInRange(ctx context.Context, tenantID string
 	}
 	sort.SliceStable(rep.Lines, func(i, j int) bool { return rep.Lines[i].Endpoint < rep.Lines[j].Endpoint })
 	return rep, nil
+}
+
+// --- Invoices (Faturas, SIN-69121) ---
+
+// GenerateInvoice freezes the tenant's metered consumption over the BOUNDED
+// window rng into a durable, append-only Fatura and records it on the audit
+// trail. The invoice line totals are the sum of the recorded ledger prices in the
+// window (via ConsumptionInRange) — never recomputed from the mutable pricing
+// table — so the document is authoritative and reproducible.
+//
+// The window MUST be bounded on both sides: an invoice bills a definite period,
+// so an open-ended range is rejected (unlike the read-only consumption screen,
+// which allows an unbounded "all time" view). The tenant must exist (404 clean).
+// Regenerating the same period is allowed and produces a NEW invoice id — the
+// store is append-only, never an overwrite, so the full billing history stands.
+func (s *ConsoleService) GenerateInvoice(ctx context.Context, tenantID string, rng ConsumptionRange) (invoice.Invoice, error) {
+	if s.invoices == nil {
+		return invoice.Invoice{}, ErrInvoicesUnavailable
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if rng.Start.IsZero() || rng.End.IsZero() {
+		return invoice.Invoice{}, shared.NewValidationError("period", "invoice period start and end are required")
+	}
+	if !rng.Start.Before(rng.End) {
+		return invoice.Invoice{}, shared.NewValidationError("period", "invoice period start must be before end")
+	}
+	t, err := s.tenants.FindTenantByID(ctx, tenantID)
+	if err != nil {
+		return invoice.Invoice{}, fmt.Errorf("resolve tenant: %w", err)
+	}
+	rep, err := s.ConsumptionInRange(ctx, tenantID, rng)
+	if err != nil {
+		return invoice.Invoice{}, err
+	}
+	lines := make([]invoice.LineItem, 0, len(rep.Lines))
+	for _, l := range rep.Lines {
+		li, err := invoice.NewLineItem(l.Endpoint, l.Calls, l.TotalCents)
+		if err != nil {
+			return invoice.Invoice{}, fmt.Errorf("build invoice line: %w", err)
+		}
+		lines = append(lines, li)
+	}
+	// account rollup parent: the tenant's owning account, defaulting to the
+	// deterministic self-account id (matching migration 0007's ledger backfill)
+	// when the tenant has not yet been bound to a real account.
+	accountID := t.AccountID()
+	if accountID == "" {
+		accountID = "acct-" + tenantID
+	}
+	inv, err := invoice.New(s.ids.NewID(), tenantID, accountID, rng.Start, rng.End, s.clock.Now(), lines)
+	if err != nil {
+		return invoice.Invoice{}, err
+	}
+	if err := s.invoices.SaveInvoice(ctx, inv); err != nil {
+		return invoice.Invoice{}, fmt.Errorf("save invoice: %w", err)
+	}
+	e, err := audit.NewEntry(s.ids.NewID(), OperatorIDFromContext(ctx), audit.ActionInvoiceGenerated, tenantID, s.clock.Now())
+	if err != nil {
+		return invoice.Invoice{}, err
+	}
+	if err := s.audit.Append(ctx, e); err != nil {
+		return invoice.Invoice{}, fmt.Errorf("audit invoice generation: %w", err)
+	}
+	return inv, nil
+}
+
+// GetInvoice returns one invoice for a tenant, or shared.ErrNotFound. Tenant-
+// scoped: the id is resolved only within the tenant's own invoices (threat P1).
+func (s *ConsoleService) GetInvoice(ctx context.Context, tenantID, id string) (invoice.Invoice, error) {
+	if s.invoices == nil {
+		return invoice.Invoice{}, ErrInvoicesUnavailable
+	}
+	return s.invoices.FindInvoiceByID(ctx, strings.TrimSpace(tenantID), strings.TrimSpace(id))
+}
+
+// ListInvoices returns a tenant's invoices newest-first. The tenant must exist so
+// the screen 404s cleanly on an unknown id.
+func (s *ConsoleService) ListInvoices(ctx context.Context, tenantID string) ([]invoice.Invoice, error) {
+	if s.invoices == nil {
+		return nil, ErrInvoicesUnavailable
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
+		return nil, fmt.Errorf("resolve tenant: %w", err)
+	}
+	return s.invoices.ListInvoices(ctx, tenantID)
 }

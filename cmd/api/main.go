@@ -172,6 +172,7 @@ func run() error {
 		CredReader:      creds,
 		CertWriter:      certs,
 		CertReader:      certs,
+		Invoices:        store,
 		CredInvalidator: credInvalidator,
 		Audit:           store,
 		Clock:           system.Clock{},

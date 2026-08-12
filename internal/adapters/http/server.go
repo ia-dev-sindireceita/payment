@@ -291,6 +291,9 @@ func (s *Server) Router() http.Handler {
 				r.Get("/tenants/{id}/consumption", s.consoleConsumption)
 				r.Get("/tenants/{id}/consumption/rows", s.consoleConsumptionRows)
 				r.Get("/tenants/{id}/consumption.csv", s.consoleConsumptionCSV)
+				// Faturas (SIN-69121): list + per-invoice CSV download (read side).
+				r.Get("/tenants/{id}/invoices", s.consoleInvoices)
+				r.Get("/tenants/{id}/invoices/{invId}.csv", s.consoleInvoiceCSV)
 			})
 
 			r.Group(func(r chi.Router) {
@@ -307,6 +310,9 @@ func (s *Server) Router() http.Handler {
 				// Creditor PIX key write — bankless per the binding port-shape decision
 				// (SIN-66017 / ADR-0008); writes the tenant's default-bank credential.
 				r.Post("/tenants/{id}/creditor-key", s.consoleSetCreditorKey)
+				// Fatura generation freezes a consumption window into a durable invoice
+				// (append-only). Admin-only write; CSRF inherited from this group.
+				r.Post("/tenants/{id}/invoices", s.consoleGenerateInvoice)
 				r.Post("/tenants/{id}/pricing", s.consoleSetPrice)
 			})
 		})
