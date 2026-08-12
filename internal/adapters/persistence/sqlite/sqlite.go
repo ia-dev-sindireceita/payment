@@ -367,11 +367,13 @@ func (s *Store) ListEndpointPrices(ctx context.Context, tenantID string) ([]bill
 
 // --- Ledger ---
 
-// AppendLedgerEntry appends a billable event (append-only).
+// AppendLedgerEntry appends a billable event (append-only). account_id carries the
+// charged tenant's owning account (two-level tenancy metering, SIN-69127); a
+// self-account is stored as NULL (NULL-safe, matching migration 0007's backfill).
 func (r repo) AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO billing_ledger (id, tenant_id, endpoint, price_cents, reference, at) VALUES (?, ?, ?, ?, ?, ?)`,
-		e.ID(), e.TenantID(), e.Endpoint(), e.PriceCents(), e.Reference(), e.At().Format(tsLayout))
+		`INSERT INTO billing_ledger (id, tenant_id, endpoint, price_cents, reference, at, account_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		e.ID(), e.TenantID(), e.Endpoint(), e.PriceCents(), e.Reference(), e.At().Format(tsLayout), nullIfEmpty(e.AccountID()))
 	if err != nil {
 		return fmt.Errorf("append ledger: %w", err)
 	}
@@ -381,9 +383,29 @@ func (r repo) AppendLedgerEntry(ctx context.Context, e billing.LedgerEntry) erro
 // ListLedgerEntries returns one tenant's ledger entries, newest-first (at desc,
 // id desc tie-break). Tenant-scoped (threat P1).
 func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billing.LedgerEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, tenant_id, endpoint, price_cents, reference, at FROM billing_ledger
+	return s.scanLedger(ctx,
+		`SELECT id, tenant_id, endpoint, price_cents, reference, at, account_id FROM billing_ledger
 		 WHERE tenant_id = ? ORDER BY at DESC, id DESC`, tenantID)
+}
+
+// ListLedgerEntriesByAccount returns every ledger entry owned by one account,
+// across all of its tenants, newest-first. It is the read side of the
+// account→tenant→endpoint metering rollup (SIN-69127) — the app layer groups the
+// returned entries by tenant then endpoint. The scan is served by the
+// ix_ledger_account_at index (migration 0007). Account-scoped: an account only
+// ever sees its own tenants' entries.
+func (s *Store) ListLedgerEntriesByAccount(ctx context.Context, accountID string) ([]billing.LedgerEntry, error) {
+	return s.scanLedger(ctx,
+		`SELECT id, tenant_id, endpoint, price_cents, reference, at, account_id FROM billing_ledger
+		 WHERE account_id = ? ORDER BY at DESC, id DESC`, accountID)
+}
+
+// scanLedger runs a ledger SELECT (whose column order is id, tenant_id, endpoint,
+// price_cents, reference, at, account_id) and rehydrates each row into a
+// billing.LedgerEntry. A NULL account_id (a self-account, or a row written before
+// the account dimension existed) rehydrates to the empty account — NULL-safe.
+func (s *Store) scanLedger(ctx context.Context, query string, args ...any) ([]billing.LedgerEntry, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query ledger: %w", err)
 	}
@@ -391,11 +413,13 @@ func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billi
 	var out []billing.LedgerEntry
 	for rows.Next() {
 		var id, gotTenant, endpoint, reference, at string
+		var account sql.NullString
 		var price int64
-		if err := rows.Scan(&id, &gotTenant, &endpoint, &price, &reference, &at); err != nil {
+		if err := rows.Scan(&id, &gotTenant, &endpoint, &price, &reference, &at, &account); err != nil {
 			return nil, fmt.Errorf("scan ledger: %w", err)
 		}
-		e, err := billing.NewLedgerEntry(id, gotTenant, endpoint, reference, price, parseTime(at))
+		e, err := billing.NewLedgerEntry(id, gotTenant, endpoint, reference, price, parseTime(at),
+			billing.WithAccount(account.String))
 		if err != nil {
 			return nil, fmt.Errorf("rehydrate ledger: %w", err)
 		}

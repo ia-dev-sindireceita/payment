@@ -179,6 +179,7 @@ func (s *Server) handleCreateBoleto(w http.ResponseWriter, r *http.Request) {
 
 	in := app.RegisterBoletoInput{
 		TenantID:           tenantID,
+		AccountID:          accountFromContext(r.Context()),
 		AmountCents:        req.AmountCents,
 		Currency:           req.Currency,
 		DueDate:            due,

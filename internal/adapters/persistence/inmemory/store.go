@@ -189,11 +189,25 @@ func (s *Store) MarkProcessed(ctx context.Context, tenantID, eventKey string) (b
 
 // ListLedgerEntries returns a tenant's ledger entries, newest-first.
 func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billing.LedgerEntry, error) {
+	return s.filterLedger(func(e billing.LedgerEntry) bool { return e.TenantID() == tenantID }), nil
+}
+
+// ListLedgerEntriesByAccount returns every ledger entry owned by one account,
+// across all of its tenants, newest-first. It is the read side of the
+// account→tenant→endpoint metering rollup (SIN-69127); the app layer groups the
+// returned entries by tenant then endpoint. Account-scoped like the tenant view.
+func (s *Store) ListLedgerEntriesByAccount(ctx context.Context, accountID string) ([]billing.LedgerEntry, error) {
+	return s.filterLedger(func(e billing.LedgerEntry) bool { return e.AccountID() == accountID }), nil
+}
+
+// filterLedger returns the ledger entries matching keep, newest-first (at desc,
+// id desc tie-break), under the read lock.
+func (s *Store) filterLedger(keep func(billing.LedgerEntry) bool) []billing.LedgerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]billing.LedgerEntry, 0)
 	for _, e := range s.ledger {
-		if e.TenantID() == tenantID {
+		if keep(e) {
 			out = append(out, e)
 		}
 	}
@@ -204,7 +218,7 @@ func (s *Store) ListLedgerEntries(ctx context.Context, tenantID string) ([]billi
 		}
 		return ai.After(aj)
 	})
-	return out, nil
+	return out
 }
 
 // SaveInvoice appends a generated invoice (append-only, mirrors the sqlite

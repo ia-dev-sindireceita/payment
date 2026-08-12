@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 )
 
@@ -378,6 +379,16 @@ func (e Entry) Action() Action { return e.action }
 
 // TenantID returns the tenant the action targeted.
 func (e Entry) TenantID() string { return e.tenantID }
+
+// AccountID returns the owning API-user/reseller account of the audited tenant —
+// the forensic completeness of the account→tenant rollup (design §4, SIN-69127).
+// In the 1:1 self-account regime it is DERIVED from the tenant through the single
+// source of truth (account.SelfAccountID), so it matches migration 0007/0009's
+// backfill ('acct-'||tenant_id) and the F1 auth-side derivation exactly. When
+// explicit (non-self) accounts arrive in a later phase this becomes a stored
+// field — the same residual noted for the F1 auth resolver; until then deriving
+// here and stamping it on write can never diverge from the tenant's real owner.
+func (e Entry) AccountID() string { return account.SelfAccountID(e.tenantID) }
 
 // At returns the time the action occurred.
 func (e Entry) At() time.Time { return e.at }

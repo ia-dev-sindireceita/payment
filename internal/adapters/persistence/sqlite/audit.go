@@ -37,12 +37,15 @@ var (
 // who/what/tenant/when plus, for a settlement mismatch, the txid and the
 // expected/received cents, and for a credential.set the non-secret bank slug
 // (bank_id, SIN-66044) — never the credential secret or client id (threat C1/C4).
+// It also stamps the audited tenant's owning account (account_id, SIN-69127), a
+// public 'acct-<tenant_id>' attribution id, so the trail completes the
+// account→tenant rollup; a self-account resolves to NULL (NULL-safe).
 func (r repo) Append(ctx context.Context, e audit.Entry) error {
 	_, err := r.q.ExecContext(ctx,
-		`INSERT INTO audit_log (id, operator_id, action, tenant_id, at, tx_id, expected_cents, received_cents, bank_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO audit_log (id, operator_id, action, tenant_id, at, tx_id, expected_cents, received_cents, bank_id, account_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID(), e.OperatorID(), string(e.Action()), e.TenantID(), e.At().Format(tsLayout),
-		e.TxID(), e.ExpectedCents(), e.ReceivedCents(), e.BankID())
+		e.TxID(), e.ExpectedCents(), e.ReceivedCents(), e.BankID(), nullIfEmpty(e.AccountID()))
 	if err != nil {
 		return fmt.Errorf("append audit entry: %w", err)
 	}

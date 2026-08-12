@@ -82,6 +82,7 @@ func (s *Server) handleCreatePix(w http.ResponseWriter, r *http.Request) {
 	r = nr
 	in := app.CreateImmediateChargeInput{
 		TenantID:         tenantID,
+		AccountID:        accountFromContext(r.Context()),
 		AmountCents:      req.AmountCents,
 		Currency:         req.Currency,
 		IdempotencyKey:   idemKey,
