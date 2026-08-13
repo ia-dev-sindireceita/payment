@@ -3,7 +3,9 @@ package http
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -68,6 +70,40 @@ func (rl *rateLimiter) middleware(keyFn func(*http.Request) string) func(http.Ha
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !rl.allow(keyFn(r)) {
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// middlewareSelfServeCred is the DEDICATED inbound limiter for the self-serve
+// credential intake (SIN-69196 Q1). It is deliberately NOT the outbound C6 client
+// limiter (SIN-68742) and NOT the shared tenant-plane limiter: credential rotation
+// is a rare, high-value write, so it gets its own tight bucket keyed STRICTLY on
+// the authenticated tenant (the route sits behind tenant auth, so ctxTenantID is
+// always present). retryAfterSecs is emitted on a 429 so a client can back off
+// deterministically.
+//
+// Fail-securely-for-availability: if the tenant key is unexpectedly empty — only
+// possible via a wiring bug that placed this middleware before tenant auth — it
+// FAILS OPEN (logs a warning and admits the request) rather than throttling. A
+// tenant must never be locked out of rotating its own (security-sensitive)
+// credential by an internal limiter fault; the route is already authenticated, so
+// failing open here does not widen access.
+func (rl *rateLimiter) middlewareSelfServeCred(retryAfterSecs int) func(http.Handler) http.Handler {
+	retryAfter := strconv.Itoa(retryAfterSecs)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tid := tenantFromContext(r.Context())
+			if tid == "" {
+				slog.Warn("self-serve credential limiter: empty tenant key; failing open")
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !rl.allow("selfserve-cred:" + tid) {
+				w.Header().Set("Retry-After", retryAfter)
 				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
