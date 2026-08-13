@@ -13,6 +13,7 @@
 <form class="toolbar" method="post" action="/console/accounts/{{.Account.ID}}/invoices"
       hx-post="/console/accounts/{{.Account.ID}}/invoices" hx-target="#main" hx-push-url="true">
   <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input type="hidden" name="idempotency_key" value="{{.IdempotencyToken}}">
   <label for="start_date">De</label>
   <input id="start_date" type="date" name="start_date" value="{{.StartDate}}" required>
   <label for="end_date">Até</label>

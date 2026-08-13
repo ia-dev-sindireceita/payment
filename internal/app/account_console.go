@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/invoice"
@@ -267,6 +269,23 @@ func (s *ConsoleService) ListInvoicesByAccount(ctx context.Context, acctID strin
 	return out, nil
 }
 
+// GenerateBatchOption tunes GenerateAccountInvoices. The only option today is
+// WithIdempotencyKey; it is variadic so existing callers (and tests) keep the
+// bare three-arg call and get the default append-only behaviour.
+type GenerateBatchOption func(*generateBatchConfig)
+
+type generateBatchConfig struct{ idempotencyKey string }
+
+// WithIdempotencyKey attaches a caller-supplied idempotency token to a batch
+// invoice generation. A double-submit (double click / CSRF-valid retry) carrying
+// the SAME token returns the FIRST submission's invoices instead of appending
+// duplicate Faturas (SIN-69184). An empty key disables the guard (today's
+// behaviour). A deliberate regeneration carries a FRESH token (the form embeds a
+// per-render nonce) and is never collapsed, so the append-only invariant holds.
+func WithIdempotencyKey(key string) GenerateBatchOption {
+	return func(c *generateBatchConfig) { c.idempotencyKey = key }
+}
+
 // GenerateAccountInvoices freezes one invoice per empresa-cliente WITH consumption
 // in the bounded window rng — the batch generation of the period on the account's
 // ótica (spec §5.5). Each invoice is produced by the same GenerateInvoice path
@@ -275,7 +294,45 @@ func (s *ConsoleService) ListInvoicesByAccount(ctx context.Context, acctID strin
 // consumption in the window are skipped (no empty invoices). The window MUST be
 // bounded (an invoice bills a definite period); the account must exist. The returned
 // slice is the invoices actually generated, in tenant order.
-func (s *ConsoleService) GenerateAccountInvoices(ctx context.Context, acctID string, rng ConsumptionRange) ([]invoice.Invoice, error) {
+//
+// Idempotency (SIN-69184): when called WithIdempotencyKey, an accidental
+// double-submit carrying the same token returns the first submission's invoices
+// verbatim instead of generating duplicate Faturas. The guard is process-local and
+// TTL-bounded — a double-submit is inherently same-process/same-second, so this
+// closes the realistic double-click window; durable cross-instance/cross-restart
+// dedup would need a persisted key and is out of scope for this LOW hygiene fix.
+func (s *ConsoleService) GenerateAccountInvoices(ctx context.Context, acctID string, rng ConsumptionRange, opts ...GenerateBatchOption) ([]invoice.Invoice, error) {
+	var cfg generateBatchConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	key := strings.TrimSpace(cfg.idempotencyKey)
+	if key == "" || s.invoiceGuard == nil {
+		return s.generateAccountInvoices(ctx, acctID, rng)
+	}
+	// Serialize the guarded generation on the idempotency key so two concurrent
+	// double-submits (separate goroutines) cannot both miss the cache and both
+	// generate. Admin batch invoicing is a rare manual action, so holding the
+	// guard across the DB work is operationally free and makes dedup trivially
+	// correct. Failures are NOT cached — a retry must still be able to succeed.
+	gkey := strings.TrimSpace(acctID) + "\x00" + key
+	g := s.invoiceGuard
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := s.clock.Now()
+	g.pruneLocked(now)
+	if invs, ok := g.seen[gkey]; ok {
+		return invs.invoices, nil
+	}
+	invs, err := s.generateAccountInvoices(ctx, acctID, rng)
+	if err != nil {
+		return nil, err
+	}
+	g.seen[gkey] = invoiceBatchEntry{invoices: invs, at: now}
+	return invs, nil
+}
+
+func (s *ConsoleService) generateAccountInvoices(ctx context.Context, acctID string, rng ConsumptionRange) ([]invoice.Invoice, error) {
 	if s.invoices == nil {
 		return nil, ErrInvoicesUnavailable
 	}
@@ -312,4 +369,41 @@ func (s *ConsoleService) GenerateAccountInvoices(ctx context.Context, acctID str
 		out = append(out, inv)
 	}
 	return out, nil
+}
+
+// invoiceBatchIdempotencyTTL bounds how long a batch idempotency token is
+// remembered. It is generous relative to the double-submit window it guards (a
+// double click / retry lands within seconds) while keeping the in-memory map
+// small — stale tokens are pruned lazily on the next guarded generation.
+const invoiceBatchIdempotencyTTL = 15 * time.Minute
+
+// invoiceBatchEntry is one remembered batch generation: the invoices it produced
+// and when, so the guard can both replay the result and expire it.
+type invoiceBatchEntry struct {
+	invoices []invoice.Invoice
+	at       time.Time
+}
+
+// invoiceBatchGuard is the process-local, TTL-bounded dedup store for account
+// batch invoice generation (SIN-69184). It is keyed by "<acctID>\x00<token>", so
+// a token only collapses submits for the same account. The mutex is held across
+// the guarded generation (see GenerateAccountInvoices), so no separate reservation
+// state is needed.
+type invoiceBatchGuard struct {
+	mu   sync.Mutex
+	ttl  time.Duration
+	seen map[string]invoiceBatchEntry
+}
+
+func newInvoiceBatchGuard(ttl time.Duration) *invoiceBatchGuard {
+	return &invoiceBatchGuard{ttl: ttl, seen: make(map[string]invoiceBatchEntry)}
+}
+
+// pruneLocked drops entries older than the TTL. The caller MUST hold g.mu.
+func (g *invoiceBatchGuard) pruneLocked(now time.Time) {
+	for k, e := range g.seen {
+		if now.Sub(e.at) > g.ttl {
+			delete(g.seen, k)
+		}
+	}
 }
