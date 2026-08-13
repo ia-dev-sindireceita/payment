@@ -30,7 +30,12 @@ type Server struct {
 	tenantAuth  TenantPrincipalAuthenticator
 	adminAuth   AdminPrincipalAuthenticator
 	webhookAuth WebhookAuthenticator
-	csrf        CSRFGuard
+	// accountResolver upgrades the account id stamped at the tenant choke-point
+	// from the derived self-account to the tenant's REAL owning Account, read from
+	// the tenant store (SIN-69222). When nil the choke-point keeps the self-account
+	// default (retrocompat / single-tier deployments and tests).
+	accountResolver AccountResolver
+	csrf            CSRFGuard
 	// bankResolver resolves and validates which bank a tenant request routes to
 	// (multi-bank selector, SIN-66022). When nil the tenant plane runs single-bank:
 	// no selector is read and every request resolves to the default bank.
@@ -81,6 +86,13 @@ type Config struct {
 	TenantAuth  TenantPrincipalAuthenticator
 	AdminAuth   AdminPrincipalAuthenticator
 	WebhookAuth WebhookAuthenticator
+	// AccountResolver resolves a tenant's REAL owning Account at the tenant auth
+	// choke-point so ledger.account_id reflects the admin grouping (two-level
+	// tenancy "Uso por Conta", SIN-69222). Built over the tenant read store
+	// (NewStoreAccountResolver). When nil the choke-point keeps the self-account
+	// default (acct-<tid>) — used by tests and single-tier deployments; behaviour
+	// is then identical to before this port existed.
+	AccountResolver AccountResolver
 	// BankResolver resolves and validates the per-request bank selector for the
 	// tenant plane (multi-bank routing, SIN-66022). It is built from the wired bank
 	// registry and the credential store. When nil, the tenant plane runs single-bank
@@ -124,6 +136,7 @@ func NewServer(c Config) *Server {
 		tenantAuth:          c.TenantAuth,
 		adminAuth:           c.AdminAuth,
 		webhookAuth:         c.WebhookAuth,
+		accountResolver:     c.AccountResolver,
 		csrf:                NewCSRFGuard(c.SecureCookies),
 		bankResolver:        c.BankResolver,
 		trustedProxyHops:    c.TrustedProxyHops,
@@ -194,7 +207,7 @@ func (s *Server) Router() http.Handler {
 
 	// Tenant API (TB1) — authenticated, tenant-scoped, rate-limited.
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(tenantAuthMiddleware(s.tenantAuth))
+		r.Use(tenantAuthMiddleware(s.tenantAuth, s.accountResolver))
 		// Multi-bank routing (SIN-66022): resolve and validate the per-request bank
 		// selector right after the tenant is authenticated, so the resolved bank is
 		// stamped on the context for the output-port routers. Runs before the limiter

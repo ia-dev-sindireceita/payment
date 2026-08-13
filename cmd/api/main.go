@@ -194,6 +194,12 @@ func run() error {
 		TenantAuth:  auth,
 		AdminAuth:   auth,
 		WebhookAuth: auth,
+		// Two-level tenancy (SIN-69222): resolve each authenticated tenant's REAL
+		// owning Account from the tenant store at the choke-point, so the account
+		// stamped on the ledger reflects the admin grouping (tenants.account_id) and
+		// "Uso por Conta" shows the multi-empresa rollup. A tenant with no assigned
+		// account keeps its self-account default (retrocompat).
+		AccountResolver: httpadapter.NewStoreAccountResolver(store),
 		// Multi-bank selector (SIN-66022): resolve+validate the per-request bank
 		// against the wired registry and the tenant's configured credentials
 		// (deny-by-default, no oracle). The tenant plane reads X-Bank-Id / the DTO
