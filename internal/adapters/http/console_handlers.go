@@ -713,10 +713,27 @@ func (s *Server) consoleConsumptionCSV(w http.ResponseWriter, r *http.Request) {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"endpoint", "chamadas", "total_centavos", "total_reais"})
 	for _, l := range rep.Lines {
-		_ = cw.Write([]string{l.Endpoint, strconv.Itoa(l.Calls), strconv.FormatInt(l.TotalCents, 10), centsDecimal(l.TotalCents)})
+		_ = cw.Write([]string{csvSafe(l.Endpoint), strconv.Itoa(l.Calls), strconv.FormatInt(l.TotalCents, 10), centsDecimal(l.TotalCents)})
 	}
 	_ = cw.Write([]string{"TOTAL", strconv.Itoa(rep.TotalCalls), strconv.FormatInt(rep.TotalCents, 10), centsDecimal(rep.TotalCents)})
 	cw.Flush()
+}
+
+// csvSafe neutraliza CSV formula injection (CWE-1236): encoding/csv só escapa a
+// estrutura CSV (vírgula/aspas/quebra de linha), não neutraliza fórmula. Uma
+// célula começando com '=', '+', '-', '@', TAB (0x09) ou CR (0x0D) é interpretada
+// como fórmula por Excel/LibreOffice/Sheets. Prefixamos essas células de texto-livre
+// com uma aspa simples (padrão OWASP); a aspa fica visível na célula (risco residual
+// aceito). Colunas numéricas (strconv/centsDecimal) não passam por aqui.
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', 0x09, 0x0D:
+		return "'" + s
+	}
+	return s
 }
 
 // centsDecimal renders integer centavos as a locale-neutral decimal string
@@ -811,7 +828,7 @@ func (s *Server) consoleInvoiceCSV(w http.ResponseWriter, r *http.Request) {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"endpoint", "chamadas", "total_centavos", "total_reais"})
 	for _, l := range inv.Lines() {
-		_ = cw.Write([]string{l.Endpoint(), strconv.Itoa(l.Calls()), strconv.FormatInt(l.SubtotalCents(), 10), centsDecimal(l.SubtotalCents())})
+		_ = cw.Write([]string{csvSafe(l.Endpoint()), strconv.Itoa(l.Calls()), strconv.FormatInt(l.SubtotalCents(), 10), centsDecimal(l.SubtotalCents())})
 	}
 	_ = cw.Write([]string{"TOTAL", strconv.Itoa(inv.TotalCalls()), strconv.FormatInt(inv.TotalCents(), 10), centsDecimal(inv.TotalCents())})
 	cw.Flush()

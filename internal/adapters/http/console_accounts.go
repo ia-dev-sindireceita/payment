@@ -293,7 +293,7 @@ func (s *Server) consoleAccountConsumptionCSV(w http.ResponseWriter, r *http.Req
 		if name == "" {
 			name = tc.TenantID
 		}
-		_ = cw.Write([]string{tc.TenantID, name, strconv.Itoa(tc.TotalCalls), strconv.FormatInt(tc.TotalCents, 10), centsDecimal(tc.TotalCents)})
+		_ = cw.Write([]string{tc.TenantID, csvSafe(name), strconv.Itoa(tc.TotalCalls), strconv.FormatInt(tc.TotalCents, 10), centsDecimal(tc.TotalCents)})
 	}
 	_ = cw.Write([]string{"TOTAL", "", strconv.Itoa(rep.TotalCalls), strconv.FormatInt(rep.TotalCents, 10), centsDecimal(rep.TotalCents)})
 	cw.Flush()

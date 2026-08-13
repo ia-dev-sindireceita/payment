@@ -247,6 +247,33 @@ func TestConsoleAccountInvoicesBatch(t *testing.T) {
 	}
 }
 
+// TestConsoleAccountConsumptionCSVFormulaInjectionNeutralized is the regression
+// guard for SIN-69183 (CWE-1236): an empresa-cliente whose free-text name begins
+// with a formula-trigger character must be neutralized (prefixed with a single
+// quote) in the exported CSV, so a spreadsheet app does not evaluate it as a
+// formula on open. Fails on the pre-fix code (bare "=1+1"), passes after.
+func TestConsoleAccountConsumptionCSVFormulaInjectionNeutralized(t *testing.T) {
+	t.Parallel()
+	f := newAccountFixture(t)
+	if _, err := createTenantUnder(f, "t-evil", `=1+1`); err != nil {
+		t.Fatal(err)
+	}
+	seedAcctLedger(t, f.store, "verz-1", "t-evil", "POST /v1/charges", 250, time.Unix(10, 0).UTC())
+
+	csv := consoleGet(t, f.handler, "/console/accounts/verz-1/consumption.csv?start_date=1970-01-01&end_date=1970-01-01", operatorToken)
+	if csv.Code != http.StatusOK {
+		t.Fatalf("csv = %d", csv.Code)
+	}
+	body := csv.Body.String()
+	if !strings.Contains(body, `'=1+1`) {
+		t.Fatalf("formula not neutralized; want cell prefixed with single quote, got:\n%s", body)
+	}
+	// Defence-in-depth: the raw formula cell must never appear unprefixed as a field.
+	if strings.Contains(body, ",=1+1,") {
+		t.Fatalf("raw formula cell leaked unneutralized:\n%s", body)
+	}
+}
+
 // createTenantUnder provisions a tenant already-bound to verz-1 via the store, for
 // invoice-batch setup (bypasses the handler to control the tenant id).
 func createTenantUnder(f *accountFixture, id, name string) (string, error) {
