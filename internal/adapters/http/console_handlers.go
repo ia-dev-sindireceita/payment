@@ -16,6 +16,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
 	"github.com/ia-dev-sindireceita/payment/internal/app"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
@@ -131,10 +132,29 @@ func (s *Server) consoleTenantDetail(w http.ResponseWriter, r *http.Request) {
 		s.consoleError(w, err)
 		return
 	}
+	tv := adminweb.ToTenantView(t)
+	s.populateTenantAccount(r.Context(), &tv, t.AccountID())
 	s.ui.Page(w, r, "tenant_detail", http.StatusOK, adminweb.DetailView{
 		Base:   s.consoleBase(r, t.Name(), "tenants"),
-		Tenant: adminweb.ToTenantView(t),
+		Tenant: tv,
 	})
+}
+
+// populateTenantAccount resolves the owning Conta of a tenant into the view so the
+// detail can link to it (§5.3). A legacy/self-account tenant (empty or "acct-"
+// owner) is left unlinked — the card renders "Conta própria (legado)". A real
+// account whose name cannot be resolved falls back to its id (never blank).
+func (s *Server) populateTenantAccount(ctx context.Context, tv *adminweb.TenantView, accountID string) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" || account.IsSelfAccountID(accountID) {
+		return
+	}
+	tv.AccountID = accountID
+	if a, err := s.console.GetAccount(ctx, accountID); err == nil {
+		tv.AccountName = a.Name()
+	} else {
+		tv.AccountName = accountID
+	}
 }
 
 func (s *Server) consoleSuspendTenant(w http.ResponseWriter, r *http.Request) {
@@ -830,7 +850,7 @@ func (s *Server) consoleError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, shared.ErrValidation):
 		http.Error(w, "invalid request", http.StatusBadRequest)
-	case errors.Is(err, app.ErrInvoicesUnavailable):
+	case errors.Is(err, app.ErrInvoicesUnavailable), errors.Is(err, app.ErrAccountsUnavailable):
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "internal error", http.StatusInternalServerError)

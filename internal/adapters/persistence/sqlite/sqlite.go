@@ -248,6 +248,32 @@ func (r repo) FindAccountByID(ctx context.Context, id string) (*account.Account,
 	return account.Rehydrate(gotID, name, active != 0, parseTime(createdAt)), nil
 }
 
+// ListAccounts returns every account, newest-first (created_at desc, id desc as a
+// deterministic tie-break), mirroring ListTenants. Used by the admin console Contas
+// listing (SIN-69157). The per-tenant self-accounts backfilled by migration 0007 are
+// returned too; the app layer filters them out by default.
+func (s *Store) ListAccounts(ctx context.Context) ([]*account.Account, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, active, created_at FROM accounts ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("query accounts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*account.Account
+	for rows.Next() {
+		var id, name, createdAt string
+		var active int
+		if err := rows.Scan(&id, &name, &active, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan account: %w", err)
+		}
+		out = append(out, account.Rehydrate(id, name, active != 0, parseTime(createdAt)))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate accounts: %w", err)
+	}
+	return out, nil
+}
+
 // --- Payments (tenant-scoped) ---
 
 // SavePayment inserts or updates a payment. A second payment reusing a tenant's

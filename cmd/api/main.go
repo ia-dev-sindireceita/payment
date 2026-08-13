@@ -165,6 +165,7 @@ func run() error {
 	}
 	console := app.NewConsoleService(app.ConsoleDeps{
 		Tenants:         store,
+		Accounts:        store,
 		Pricing:         store,
 		Ledger:          store,
 		CredWriter:      creds,

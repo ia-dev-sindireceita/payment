@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/bankcert"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
@@ -28,6 +29,7 @@ import (
 // exactly the capabilities it uses and nothing more.
 type ConsoleService struct {
 	tenants       TenantStore
+	accounts      AccountStore
 	pricing       PricingStore
 	ledger        LedgerReader
 	credWriter    ports.CredentialWriter
@@ -78,6 +80,19 @@ type TenantStore interface {
 	ListTenants(ctx context.Context) ([]*tenant.Tenant, error)
 }
 
+// AccountStore is the account (API user / reseller) capability the console needs
+// for the two-level tenancy admin plane (SIN-69157, spec SIN-69122): the
+// write/lookup pair from the canonical AccountRepository plus a cross-account
+// listing for the Contas screen. It is a narrow app-level port (like TenantStore)
+// so the console declares exactly the account capabilities it uses. The concrete
+// sqlite/inmemory stores satisfy it. An account is attribution-only — it never
+// carries a bank credential and never touches money (model (a), ADR-0009).
+type AccountStore interface {
+	SaveAccount(ctx context.Context, a *account.Account) error
+	FindAccountByID(ctx context.Context, id string) (*account.Account, error)
+	ListAccounts(ctx context.Context) ([]*account.Account, error)
+}
+
 // PricingStore is the pricing capability the console needs.
 type PricingStore interface {
 	UpsertEndpointPrice(ctx context.Context, p billing.EndpointPricing) error
@@ -96,7 +111,11 @@ type LedgerReader interface {
 // ConsoleDeps bundles the console's dependencies. The fields reuse the same
 // concrete adapters wired in Deps, narrowed to the console's ports.
 type ConsoleDeps struct {
-	Tenants    TenantStore
+	Tenants TenantStore
+	// Accounts is the two-level tenancy account plane (SIN-69157). Optional: a nil
+	// store disables the account use-cases (they return ErrAccountsUnavailable, mapped
+	// to 503) so wiring-light tests that don't exercise the Contas screens keep working.
+	Accounts   AccountStore
 	Pricing    PricingStore
 	Ledger     LedgerReader
 	CredWriter ports.CredentialWriter
@@ -148,6 +167,7 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 	}
 	return &ConsoleService{
 		tenants:       d.Tenants,
+		accounts:      d.Accounts,
 		pricing:       d.Pricing,
 		ledger:        d.Ledger,
 		credWriter:    d.CredWriter,

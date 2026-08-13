@@ -1,6 +1,10 @@
 {{define "body"}}
 {{with .Tenant}}
-<p class="breadcrumb"><a href="/console/tenants" hx-get="/console/tenants" hx-target="#main" hx-push-url="true">‹ Tenants</a> / {{.Name}}</p>
+{{if and .HasAccount (not .AccountIsSelf)}}
+<p class="breadcrumb"><a href="/console/accounts" hx-get="/console/accounts" hx-target="#main" hx-push-url="true">‹ Contas</a> / <a href="/console/accounts/{{.AccountID}}" hx-get="/console/accounts/{{.AccountID}}" hx-target="#main" hx-push-url="true">{{.AccountName}}</a> / {{.Name}}</p>
+{{else}}
+<p class="breadcrumb"><a href="/console/tenants" hx-get="/console/tenants" hx-target="#main" hx-push-url="true">‹ Empresas-clientes</a> / {{.Name}}</p>
+{{end}}
 <div class="topbar">
   <div>
     <h1>{{.Name}} <span id="tenant-status">{{template "status_badge" .}}</span></h1>
@@ -29,6 +33,14 @@
       <dt>Identificador</dt><dd><code>{{.ID}}</code></dd>
       <dt>Status</dt><dd>{{template "status_badge" .}}</dd>
       <dt>Criado em</dt><dd>{{.CreatedAtBR}}</dd>
+      <dt>Conta</dt>
+      <dd>
+        {{- if and .HasAccount (not .AccountIsSelf) -}}
+        <a class="row-link" href="/console/accounts/{{.AccountID}}" hx-get="/console/accounts/{{.AccountID}}" hx-target="#main" hx-push-url="true">{{.AccountName}}</a>
+        {{- else -}}
+        <span class="muted">Conta própria (legado)</span>
+        {{- end -}}
+      </dd>
     </dl>
   </div>
   <div class="card">
