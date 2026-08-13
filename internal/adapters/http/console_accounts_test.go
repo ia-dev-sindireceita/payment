@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,62 @@ func TestConsoleAccountInvoicesBatch(t *testing.T) {
 	// Missing required dates → 400.
 	if bad := consolePost(t, f.handler, "/console/accounts/verz-1/invoices", adminToken, url.Values{}, csrf); bad.Code != http.StatusBadRequest {
 		t.Fatalf("no-period batch = %d, want 400", bad.Code)
+	}
+}
+
+var idemNonceRe = regexp.MustCompile(`name="idempotency_key" value="([0-9a-f]+)"`)
+
+// TestConsoleAccountInvoicesBatch_DoubleSubmitDeduped is the SIN-69184 regression:
+// a double-submit of the batch-generation form (same hidden idempotency nonce, as
+// a double click / retry produces) must NOT append duplicate Faturas — the second
+// POST returns the first submission's invoices. A fresh render (new nonce) still
+// appends, preserving the append-only invariant.
+func TestConsoleAccountInvoicesBatch_DoubleSubmitDeduped(t *testing.T) {
+	t.Parallel()
+	f := newAccountFixture(t)
+	csrf := acctCSRF(t, f.handler, adminToken)
+	if _, err := createTenantUnder(f, "t-child", "Filho"); err != nil {
+		t.Fatal(err)
+	}
+	seedAcctLedger(t, f.store, "verz-1", "t-child", "POST /v1/charges", 500, time.Date(2026, 8, 3, 0, 0, 0, 0, time.UTC))
+
+	// Render the invoices page and lift the per-render nonce out of the form — this
+	// is exactly the token a browser resubmits on a double click.
+	page := consoleGet(t, f.handler, "/console/accounts/verz-1/invoices", adminToken)
+	m := idemNonceRe.FindStringSubmatch(page.Body.String())
+	if m == nil || m[1] == "" {
+		t.Fatalf("no idempotency nonce rendered in form: %s", page.Body.String())
+	}
+	nonce := m[1]
+
+	form := url.Values{"start_date": {"2026-08-01"}, "end_date": {"2026-08-06"}, "idempotency_key": {nonce}}
+	if rec := consolePost(t, f.handler, "/console/accounts/verz-1/invoices", adminToken, form, csrf); rec.Code != http.StatusOK {
+		t.Fatalf("first submit = %d: %s", rec.Code, rec.Body.String())
+	}
+	// Replay the SAME nonce (the double-submit).
+	if rec := consolePost(t, f.handler, "/console/accounts/verz-1/invoices", adminToken, form, csrf); rec.Code != http.StatusOK {
+		t.Fatalf("replay = %d: %s", rec.Code, rec.Body.String())
+	}
+	invs, err := f.store.ListInvoices(context.Background(), "t-child")
+	if err != nil {
+		t.Fatalf("list invoices: %v", err)
+	}
+	if len(invs) != 1 {
+		t.Fatalf("double-submit produced %d invoices, want 1 (no duplicate Fatura)", len(invs))
+	}
+
+	// A deliberate regeneration = a fresh page render = a fresh nonce → appends.
+	page2 := consoleGet(t, f.handler, "/console/accounts/verz-1/invoices", adminToken)
+	m2 := idemNonceRe.FindStringSubmatch(page2.Body.String())
+	if m2 == nil || m2[1] == nonce {
+		t.Fatalf("second render must mint a fresh nonce, got %v (prev %s)", m2, nonce)
+	}
+	form2 := url.Values{"start_date": {"2026-08-01"}, "end_date": {"2026-08-06"}, "idempotency_key": {m2[1]}}
+	if rec := consolePost(t, f.handler, "/console/accounts/verz-1/invoices", adminToken, form2, csrf); rec.Code != http.StatusOK {
+		t.Fatalf("regenerate = %d: %s", rec.Code, rec.Body.String())
+	}
+	if invs, _ := f.store.ListInvoices(context.Background(), "t-child"); len(invs) != 2 {
+		t.Fatalf("fresh nonce must append: %d invoices, want 2", len(invs))
 	}
 }
 

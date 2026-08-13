@@ -53,6 +53,12 @@ type ConsoleService struct {
 	audit    ports.AuditLog
 	clock    ports.Clock
 	ids      ports.IDProvider
+	// invoiceGuard collapses accidental double-submits of the account-level batch
+	// invoice generation (SIN-69184) keyed by a caller-supplied idempotency token.
+	// See GenerateAccountInvoices for the semantics; a fresh render always
+	// carries a fresh token, so a deliberate regeneration is never collapsed and
+	// the append-only invariant (SIN-69121) stands.
+	invoiceGuard *invoiceBatchGuard
 }
 
 // ErrInvoicesUnavailable is returned by the invoice use-cases when the console
@@ -180,6 +186,7 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 		audit:         a,
 		clock:         d.Clock,
 		ids:           d.IDs,
+		invoiceGuard:  newInvoiceBatchGuard(invoiceBatchIdempotencyTTL),
 	}
 }
 

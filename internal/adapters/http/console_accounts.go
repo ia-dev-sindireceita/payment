@@ -2,7 +2,9 @@ package http
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -335,7 +337,12 @@ func (s *Server) consoleGenerateAccountInvoices(w http.ResponseWriter, r *http.R
 		s.consoleError(w, err)
 		return
 	}
-	gen, err := s.console.GenerateAccountInvoices(r.Context(), a.ID(), rng)
+	// Idempotency token from the hidden form nonce (SIN-69184): a double-submit
+	// resubmits the same token and is deduped into the first submission's invoices,
+	// so a double click never appends duplicate Faturas. A fresh render carries a
+	// fresh token, so a deliberate regeneration still appends.
+	idemKey := strings.TrimSpace(r.PostFormValue("idempotency_key"))
+	gen, err := s.console.GenerateAccountInvoices(r.Context(), a.ID(), rng, app.WithIdempotencyKey(idemKey))
 	if err != nil {
 		s.consoleError(w, err)
 		return
@@ -366,5 +373,23 @@ func (s *Server) accountInvoicesView(r *http.Request, a *account.Account) (admin
 	if err != nil {
 		return adminweb.AccountInvoicesView{}, err
 	}
-	return adminweb.ToAccountInvoicesView(adminweb.ToAccountView(a), invs, names), nil
+	view := adminweb.ToAccountInvoicesView(adminweb.ToAccountView(a), invs, names)
+	// Mint a fresh per-render idempotency nonce for the batch-generation form
+	// (SIN-69184). Both the list render and the post-generation re-render pass
+	// through here, so each rendered form carries its own token.
+	view.IdempotencyToken = newIdempotencyToken()
+	return view, nil
+}
+
+// newIdempotencyToken mints an unguessable per-render nonce (128 bits, hex) for
+// the batch-invoice form's double-submit guard. On the vanishingly unlikely event
+// the CSPRNG fails, it returns "" — an empty token simply disables the guard for
+// that render (fail-open to today's append-only behaviour), never blocking the
+// admin from generating invoices.
+func newIdempotencyToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b)
 }

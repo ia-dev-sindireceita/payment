@@ -571,6 +571,10 @@ type AccountInvoicesView struct {
 	TotalCents int64
 	StartDate  string
 	EndDate    string
+	// IdempotencyToken is a per-render nonce embedded in the batch-generation form
+	// (SIN-69184). A double-submit resubmits the same nonce and is deduped; a fresh
+	// render mints a new one, so a deliberate regeneration still appends.
+	IdempotencyToken string
 }
 
 // TotalReais renders the account invoices grand total in Brazilian currency.

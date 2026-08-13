@@ -278,6 +278,59 @@ func TestConsoleAccountInvoices_ListAndBatchGenerate(t *testing.T) {
 	}
 }
 
+// TestGenerateAccountInvoices_IdempotencyGuard proves the double-submit guard
+// (SIN-69184): a batch generation carrying an idempotency token, resubmitted with
+// the SAME token, returns the FIRST submission's invoices instead of appending
+// duplicate Faturas — while a FRESH token (a deliberate regeneration) still
+// appends, preserving the append-only invariant (SIN-69121).
+func TestGenerateAccountInvoices_IdempotencyGuard(t *testing.T) {
+	t.Parallel()
+	svc, store := newAccountConsole()
+	ctx := context.Background()
+	seedAccount(t, store, "acct-A", "Account A", true, 100)
+	t1, _ := svc.CreateTenantUnderAccount(ctx, "acct-A", "Cliente Ativo")
+	appendLedgerAt(t, store, t1.ID(), "POST /v1/charges", 250, aug(3))
+
+	rng := app.ConsumptionRange{Start: aug(1), End: aug(6)}
+
+	// First submit with token "tok-1" generates one invoice for t1.
+	gen1, err := svc.GenerateAccountInvoices(ctx, "acct-A", rng, app.WithIdempotencyKey("tok-1"))
+	if err != nil || len(gen1) != 1 {
+		t.Fatalf("first submit = %+v, %v", gen1, err)
+	}
+	// Double-submit with the SAME token returns the SAME invoice ids, generating
+	// nothing new — no duplicate Fatura.
+	gen2, err := svc.GenerateAccountInvoices(ctx, "acct-A", rng, app.WithIdempotencyKey("tok-1"))
+	if err != nil {
+		t.Fatalf("replay err: %v", err)
+	}
+	if len(gen2) != 1 || gen2[0].ID() != gen1[0].ID() {
+		t.Fatalf("replay must return first invoices, got %+v (want id %s)", gen2, gen1[0].ID())
+	}
+	list, _ := svc.ListInvoicesByAccount(ctx, "acct-A")
+	if len(list) != 1 {
+		t.Fatalf("double-submit appended a duplicate: list = %d, want 1", len(list))
+	}
+
+	// A FRESH token is a deliberate regeneration and appends (append-only stands).
+	gen3, err := svc.GenerateAccountInvoices(ctx, "acct-A", rng, app.WithIdempotencyKey("tok-2"))
+	if err != nil || len(gen3) != 1 || gen3[0].ID() == gen1[0].ID() {
+		t.Fatalf("fresh token must append a new invoice, got %+v, %v", gen3, err)
+	}
+	if list, _ := svc.ListInvoicesByAccount(ctx, "acct-A"); len(list) != 2 {
+		t.Fatalf("append-only after fresh token: list = %d, want 2", len(list))
+	}
+
+	// An EMPTY token disables the guard entirely — the bare call path is unchanged
+	// (this is why the existing append-only test keeps passing).
+	if g, err := svc.GenerateAccountInvoices(ctx, "acct-A", rng, app.WithIdempotencyKey("  ")); err != nil || len(g) != 1 {
+		t.Fatalf("empty token must generate normally, got %+v, %v", g, err)
+	}
+	if list, _ := svc.ListInvoicesByAccount(ctx, "acct-A"); len(list) != 3 {
+		t.Fatalf("empty token appended: list = %d, want 3", len(list))
+	}
+}
+
 // TestConsoleAccountsUnavailable proves the account use-cases fail closed when the
 // console is wired without an AccountStore (a production misconfiguration).
 func TestConsoleAccountsUnavailable(t *testing.T) {
