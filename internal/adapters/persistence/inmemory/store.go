@@ -28,7 +28,7 @@ import (
 type Store struct {
 	mu        sync.RWMutex
 	tenants   map[string]*tenant.Tenant
-	accounts  map[string]*account.Account // two-level tenancy accounts (ADR-0009)
+	accounts  map[string]*account.Account        // two-level tenancy accounts (ADR-0009)
 	payments  map[string]*payment.Payment        // keyed by tenantID+"\x00"+id
 	pricing   map[string]billing.EndpointPricing // keyed by tenantID+"\x00"+endpoint
 	ledger    []billing.LedgerEntry
