@@ -280,6 +280,18 @@ func (s *Server) Router() http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(requireRole(RoleAdmin, RoleOperator))
 				r.Get("/", s.consoleRedirect)
+				// Contas (two-level tenancy admin, SIN-69157 / spec SIN-69122). Reads
+				// admit Operator+Admin; the account rollup and Faturas never leak another
+				// account's tenants (resolved server-side, account-scoped).
+				r.Get("/accounts", s.consoleListAccounts)
+				r.Get("/accounts/rows", s.consoleAccountRows)
+				r.Get("/accounts/new", s.consoleNewAccountForm)
+				r.Get("/accounts/{acctId}", s.consoleAccountDetail)
+				r.Get("/accounts/{acctId}/tenants/new", s.consoleNewAccountTenantForm)
+				r.Get("/accounts/{acctId}/consumption", s.consoleAccountConsumption)
+				r.Get("/accounts/{acctId}/consumption/rows", s.consoleAccountConsumptionRows)
+				r.Get("/accounts/{acctId}/consumption.csv", s.consoleAccountConsumptionCSV)
+				r.Get("/accounts/{acctId}/invoices", s.consoleAccountInvoices)
 				r.Get("/tenants", s.consoleListTenants)
 				r.Get("/tenants/rows", s.consoleTenantRows)
 				r.Get("/tenants/new", s.consoleNewTenantForm)
@@ -298,6 +310,15 @@ func (s *Server) Router() http.Handler {
 
 			r.Group(func(r chi.Router) {
 				r.Use(requireRole(RoleAdmin))
+				// Contas mutations (SIN-69157): create/suspend/activate a Conta, create an
+				// empresa-cliente already-linked, and batch-generate the account's Faturas.
+				// Reassignment of an existing tenant across Contas (C5) is intentionally
+				// NOT here — it mutates the tenant on a new axis and is CTO-gated (spec §7).
+				r.Post("/accounts", s.consoleCreateAccount)
+				r.Post("/accounts/{acctId}/suspend", s.consoleSuspendAccount)
+				r.Post("/accounts/{acctId}/activate", s.consoleActivateAccount)
+				r.Post("/accounts/{acctId}/tenants", s.consoleCreateAccountTenant)
+				r.Post("/accounts/{acctId}/invoices", s.consoleGenerateAccountInvoices)
 				r.Post("/tenants", s.consoleCreateTenant)
 				r.Post("/tenants/{id}/suspend", s.consoleSuspendTenant)
 				r.Post("/tenants/{id}/activate", s.consoleActivateTenant)

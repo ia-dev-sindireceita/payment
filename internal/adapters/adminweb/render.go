@@ -36,6 +36,13 @@ var screenFiles = map[string]string{
 	"pricing":       "templates/pricing.html",
 	"consumption":   "templates/consumption.html",
 	"invoices":      "templates/invoices.html",
+	// Accounts (two-level tenancy admin, SIN-69157 / spec SIN-69122).
+	"accounts_list":       "templates/accounts_list.html",
+	"account_new":         "templates/account_new.html",
+	"account_detail":      "templates/account_detail.html",
+	"account_tenant_new":  "templates/account_tenant_new.html",
+	"account_consumption": "templates/account_consumption.html",
+	"account_invoices":    "templates/account_invoices.html",
 }
 
 // Renderer holds the parsed template sets. base carries the layout and all

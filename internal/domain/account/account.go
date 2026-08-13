@@ -72,6 +72,17 @@ func SelfAccountID(tenantID string) string {
 	return selfAccountPrefix + tenantID
 }
 
+// IsSelfAccountID reports whether id is a derived self-account id (the
+// "acct-<tenantID>" convention from migration 0007's backfill, ADR-0009 §4). The
+// admin console uses it to distinguish an implicit legacy self-account (one
+// empresa-cliente, 1:1) from a real reseller account created explicitly — so the
+// Contas list can hide the per-tenant self-accounts by default (§6). Classifying
+// by the same prefix constant SelfAccountID emits keeps the derivation in one
+// place. A real account minted from an opaque id provider never carries the prefix.
+func IsSelfAccountID(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), selfAccountPrefix)
+}
+
 // ID returns the account identifier.
 func (a *Account) ID() string { return a.id }
 

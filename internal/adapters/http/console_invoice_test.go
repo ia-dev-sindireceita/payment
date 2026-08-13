@@ -136,3 +136,30 @@ func TestConsoleInvoiceCSVUnknown404(t *testing.T) {
 		t.Fatalf("unknown invoice csv = %d, want 404", rec.Code)
 	}
 }
+
+// TestConsoleInvoiceCSVFormulaInjectionNeutralized is the defence-in-depth
+// regression for SIN-69183 (CWE-1236) on the frozen-invoice export: an endpoint
+// label beginning with a formula-trigger character must be neutralized
+// (single-quote prefix) in the downloaded CSV. Fails on pre-fix code, passes after.
+func TestConsoleInvoiceCSVFormulaInjectionNeutralized(t *testing.T) {
+	t.Parallel()
+	h, store := newInvoiceConsoleHandler(t)
+	seedLedgerAt(t, store, "t1", "@SUM(1+1)", 250, time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC))
+
+	csrf := csrfToken(t, h, adminToken)
+	form := url.Values{"start_date": {"2026-08-01"}, "end_date": {"2026-08-05"}}
+	if rec := consolePost(t, h, "/console/tenants/t1/invoices", adminToken, form, csrf); rec.Code != http.StatusOK {
+		t.Fatalf("generate = %d: %s", rec.Code, rec.Body.String())
+	}
+	invs, err := store.ListInvoices(context.Background(), "t1")
+	if err != nil || len(invs) != 1 {
+		t.Fatalf("persisted invoices = %d, %v", len(invs), err)
+	}
+	dl := consoleGet(t, h, "/console/tenants/t1/invoices/"+invs[0].ID()+".csv", operatorToken)
+	if dl.Code != http.StatusOK {
+		t.Fatalf("csv = %d", dl.Code)
+	}
+	if body := dl.Body.String(); !strings.Contains(body, `'@SUM(1+1)`) {
+		t.Fatalf("formula not neutralized in invoice CSV:\n%s", body)
+	}
+}

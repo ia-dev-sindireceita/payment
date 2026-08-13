@@ -57,6 +57,88 @@
 </table>
 {{end}}
 
+{{/* account_badge marks a self-account (legacy 1:1) vs a real reseller account.
+     Data is an AccountView. */}}
+{{define "account_badge"}}
+{{- if .IsSelf -}}
+<span class="badge badge--muted"><span class="dot" aria-hidden="true"></span>Conta própria (legado)</span>
+{{- else -}}
+{{template "status_badge" .}}
+{{- end -}}
+{{end}}
+
+{{/* account_row renders one account in the Contas list table. Data is an AccountView. */}}
+{{define "account_row"}}
+<tr id="account-{{.ID}}">
+  <td><a class="row-link" href="/console/accounts/{{.ID}}" hx-get="/console/accounts/{{.ID}}" hx-target="#main" hx-push-url="true">{{.Name}}</a></td>
+  <td>{{template "account_badge" .}}</td>
+  <td>{{.TenantCount}}</td>
+  <td>{{.CreatedAtBR}}</td>
+</tr>
+{{end}}
+
+{{/* account_rows renders the Contas list body or its empty state. Data is an
+     AccountListView / AccountRowsView (both carry Accounts + Search). */}}
+{{define "account_rows"}}
+{{- if .Accounts -}}
+{{- range .Accounts}}{{template "account_row" .}}{{end -}}
+{{- else -}}
+<tr class="empty-row"><td colspan="4">
+  {{- if .Search -}}
+  <div class="empty"><h2>Nada encontrado para «{{.Search}}»</h2><p><a class="btn btn--ghost" href="/console/accounts" hx-get="/console/accounts" hx-target="#main" hx-push-url="true">Limpar filtro</a></p></div>
+  {{- else -}}
+  <div class="empty"><h2>Nenhuma conta ainda</h2><p class="muted">Cadastre a primeira Conta (usuário-API / revenda) para aninhar suas empresas-clientes.</p><p><a class="btn btn--primary" href="/console/accounts/new" hx-get="/console/accounts/new" hx-target="#main" hx-push-url="true">+ Nova conta</a></p></div>
+  {{- end -}}
+</td></tr>
+{{- end -}}
+{{end}}
+
+{{/* account_tenant_rows renders the empresas-clientes nested in an account detail.
+     Data is an AccountDetailView (Account + Tenants). */}}
+{{define "account_tenant_rows"}}
+{{- if .Tenants -}}
+{{- range .Tenants}}{{template "tenant_row" .}}{{end -}}
+{{- else -}}
+<tr class="empty-row"><td colspan="3">
+  <div class="empty"><h2>Nenhuma empresa-cliente nesta Conta</h2><p class="muted">Provisione a primeira empresa-cliente sob esta Conta.</p><p><a class="btn btn--primary" href="/console/accounts/{{.Account.ID}}/tenants/new" hx-get="/console/accounts/{{.Account.ID}}/tenants/new" hx-target="#main" hx-push-url="true">+ Nova empresa-cliente</a></p></div>
+</td></tr>
+{{- end -}}
+{{end}}
+
+{{/* account_consumption_rows renders the account usage rollup (one row per
+     empresa-cliente). Data is an AccountConsumptionView. */}}
+{{define "account_consumption_rows"}}
+<table class="data">
+  <caption class="sr-only">Uso por empresa-cliente da Conta {{.Account.Name}}</caption>
+  <thead><tr><th scope="col">Empresa-cliente</th><th scope="col">Chamadas</th><th scope="col">Total</th></tr></thead>
+  <tbody>
+  {{- if .Rows -}}
+  {{range .Rows}}<tr><td><a class="row-link" href="/console/tenants/{{.TenantID}}/consumption" hx-get="/console/tenants/{{.TenantID}}/consumption" hx-target="#main" hx-push-url="true">{{.TenantName}}</a></td><td>{{.Calls}}</td><td>{{.TotalReais}}</td></tr>{{end}}
+  {{- else -}}
+  <tr class="empty-row"><td colspan="3"><div class="empty"><p class="muted">Sem consumo registrado para as empresas-clientes desta Conta no período.</p></div></td></tr>
+  {{- end -}}
+  </tbody>
+  {{if .Rows}}<tfoot><tr><th scope="row">Total da Conta</th><td>{{.TotalCalls}}</td><td>{{.TotalReais}}</td></tr></tfoot>{{end}}
+</table>
+{{end}}
+
+{{/* account_invoice_rows renders the account Faturas list (per empresa-cliente,
+     grouped under the Conta). Data is an AccountInvoicesView. */}}
+{{define "account_invoice_rows"}}
+<table class="data">
+  <caption class="sr-only">Faturas das empresas-clientes da Conta {{.Account.Name}}</caption>
+  <thead><tr><th scope="col">Empresa-cliente</th><th scope="col">Período</th><th scope="col">Gerada em</th><th scope="col">Chamadas</th><th scope="col">Total</th><th scope="col">Documento</th></tr></thead>
+  <tbody>
+  {{- if .Rows -}}
+  {{range .Rows}}<tr><td>{{.TenantName}}</td><td>{{.PeriodFrom}} — {{.PeriodTo}}</td><td>{{.Generated}}</td><td>{{.TotalCalls}}</td><td>{{.TotalReais}}</td><td><a class="btn btn--secondary" href="{{.CSVHref}}" download>Baixar CSV</a></td></tr>{{end}}
+  {{- else -}}
+  <tr class="empty-row"><td colspan="6"><div class="empty"><p class="muted">Nenhuma fatura nas empresas-clientes desta Conta. Escolha um período e gere o lote.</p></div></td></tr>
+  {{- end -}}
+  </tbody>
+  {{if .Rows}}<tfoot><tr><th scope="row" colspan="4">Total da Conta</th><td>{{.TotalReais}}</td><td></td></tr></tfoot>{{end}}
+</table>
+{{end}}
+
 {{define "toast_oob"}}
 <div id="toasts" hx-swap-oob="afterbegin">
   <div class="toast toast--{{.Kind}}" role="status">{{.Message}}</div>
@@ -215,6 +297,29 @@
 {{define "status_header_oob"}}
 <span id="tenant-status" hx-swap-oob="true">{{template "status_badge" .}}</span>
 <span id="tenant-status-action" hx-swap-oob="true">{{template "status_action" .}}</span>
+{{end}}
+
+{{/* account_status_header_oob updates the account detail header (badge + toggle)
+     out-of-band after a suspend/activate. Data is an AccountView. */}}
+{{define "account_status_header_oob"}}
+<span id="account-status" hx-swap-oob="true">{{template "account_badge" .}}</span>
+<span id="account-status-action" hx-swap-oob="true">{{template "account_status_action" .}}</span>
+{{end}}
+
+{{/* account_status_action is the suspend/activate toggle on the account detail. v1:
+     suspending a Conta is an administrative label with no effect on the
+     empresas-clientes' auth/tokens (spec §7). A self-account has no lifecycle toggle. */}}
+{{define "account_status_action"}}
+{{- if .IsSelf -}}
+{{- else if .Active -}}
+<button class="btn btn--secondary" type="button"
+  hx-post="/console/accounts/{{.ID}}/suspend" hx-target="#main" hx-swap="none"
+  hx-confirm="Suspender a Conta {{.Name}}? (rótulo administrativo; não afeta a autenticação das empresas-clientes na v1)">Suspender</button>
+{{- else -}}
+<button class="btn btn--primary" type="button"
+  hx-post="/console/accounts/{{.ID}}/activate" hx-target="#main" hx-swap="none"
+  hx-confirm="Reativar a Conta {{.Name}}?">Reativar</button>
+{{- end -}}
 {{end}}
 
 {{define "status_action"}}

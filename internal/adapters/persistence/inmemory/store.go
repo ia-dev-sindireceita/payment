@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/access"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/audit"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/invoice"
@@ -27,6 +28,7 @@ import (
 type Store struct {
 	mu        sync.RWMutex
 	tenants   map[string]*tenant.Tenant
+	accounts  map[string]*account.Account        // two-level tenancy accounts (ADR-0009)
 	payments  map[string]*payment.Payment        // keyed by tenantID+"\x00"+id
 	pricing   map[string]billing.EndpointPricing // keyed by tenantID+"\x00"+endpoint
 	ledger    []billing.LedgerEntry
@@ -43,6 +45,7 @@ type Store struct {
 func NewStore() *Store {
 	return &Store{
 		tenants:   make(map[string]*tenant.Tenant),
+		accounts:  make(map[string]*account.Account),
 		payments:  make(map[string]*payment.Payment),
 		pricing:   make(map[string]billing.EndpointPricing),
 		processed: make(map[string]struct{}),
@@ -54,6 +57,7 @@ func NewStore() *Store {
 var (
 	_ ports.PaymentRepository   = (*Store)(nil)
 	_ ports.TenantRepository    = (*Store)(nil)
+	_ ports.AccountRepository   = (*Store)(nil)
 	_ ports.PricingRepository   = (*Store)(nil)
 	_ ports.LedgerRepository    = (*Store)(nil)
 	_ ports.ProcessedEventStore = (*Store)(nil)
@@ -105,6 +109,48 @@ func (s *Store) ListTenants(ctx context.Context) ([]*tenant.Tenant, error) {
 	out := make([]*tenant.Tenant, 0, len(s.tenants))
 	for _, t := range s.tenants {
 		out = append(out, t)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ci, cj := out[i].CreatedAt(), out[j].CreatedAt()
+		if ci.Equal(cj) {
+			return out[i].ID() > out[j].ID()
+		}
+		return ci.After(cj)
+	})
+	return out, nil
+}
+
+// --- Accounts (two-level tenancy, ADR-0009) ---
+
+// SaveAccount stores an account (upsert by id). An account carries no bank
+// credential and no money; it is attribution-only. Not part of the unit of work
+// (the Repository bundle excludes AccountRepository), mirroring the sqlite adapter.
+func (s *Store) SaveAccount(ctx context.Context, a *account.Account) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accounts[a.ID()] = a
+	return nil
+}
+
+// FindAccountByID returns an account or ErrNotFound.
+func (s *Store) FindAccountByID(ctx context.Context, id string) (*account.Account, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	a, ok := s.accounts[id]
+	if !ok {
+		return nil, shared.ErrNotFound
+	}
+	return a, nil
+}
+
+// ListAccounts returns every account, newest-first (created_at desc, id desc as a
+// deterministic tie-break). Mirrors the SQLite adapter's ordering.
+func (s *Store) ListAccounts(ctx context.Context) ([]*account.Account, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*account.Account, 0, len(s.accounts))
+	for _, a := range s.accounts {
+		out = append(out, a)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		ci, cj := out[i].CreatedAt(), out[j].CreatedAt()

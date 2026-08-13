@@ -391,6 +391,26 @@ func TestConsoleConsumptionCSV(t *testing.T) {
 	}
 }
 
+// TestConsoleConsumptionCSVFormulaInjectionNeutralized is the defence-in-depth
+// regression for SIN-69183 (CWE-1236) on the per-endpoint consumption export: an
+// endpoint label beginning with a formula-trigger character must be neutralized
+// (single-quote prefix) so a spreadsheet does not evaluate it. Fails on pre-fix
+// code (bare "@evil"), passes after.
+func TestConsoleConsumptionCSVFormulaInjectionNeutralized(t *testing.T) {
+	t.Parallel()
+	f := newConsoleFixture(t)
+	seedLedger(t, f, "t1", "@evil", 250, 500)
+
+	rec := consoleGet(t, f.handler, "/console/tenants/t1/consumption.csv", adminToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("csv = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `'@evil`) {
+		t.Fatalf("formula not neutralized in consumption CSV:\n%s", body)
+	}
+}
+
 // TestConsoleConsumptionBadDate asserts a malformed date is rejected at the
 // boundary (400) rather than silently falling back to a default window.
 func TestConsoleConsumptionBadDate(t *testing.T) {

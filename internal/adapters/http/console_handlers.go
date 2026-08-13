@@ -16,6 +16,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/adminweb"
 	"github.com/ia-dev-sindireceita/payment/internal/app"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/shared"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 	"github.com/ia-dev-sindireceita/payment/internal/ports"
@@ -131,10 +132,29 @@ func (s *Server) consoleTenantDetail(w http.ResponseWriter, r *http.Request) {
 		s.consoleError(w, err)
 		return
 	}
+	tv := adminweb.ToTenantView(t)
+	s.populateTenantAccount(r.Context(), &tv, t.AccountID())
 	s.ui.Page(w, r, "tenant_detail", http.StatusOK, adminweb.DetailView{
 		Base:   s.consoleBase(r, t.Name(), "tenants"),
-		Tenant: adminweb.ToTenantView(t),
+		Tenant: tv,
 	})
+}
+
+// populateTenantAccount resolves the owning Conta of a tenant into the view so the
+// detail can link to it (§5.3). A legacy/self-account tenant (empty or "acct-"
+// owner) is left unlinked — the card renders "Conta própria (legado)". A real
+// account whose name cannot be resolved falls back to its id (never blank).
+func (s *Server) populateTenantAccount(ctx context.Context, tv *adminweb.TenantView, accountID string) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" || account.IsSelfAccountID(accountID) {
+		return
+	}
+	tv.AccountID = accountID
+	if a, err := s.console.GetAccount(ctx, accountID); err == nil {
+		tv.AccountName = a.Name()
+	} else {
+		tv.AccountName = accountID
+	}
 }
 
 func (s *Server) consoleSuspendTenant(w http.ResponseWriter, r *http.Request) {
@@ -693,10 +713,27 @@ func (s *Server) consoleConsumptionCSV(w http.ResponseWriter, r *http.Request) {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"endpoint", "chamadas", "total_centavos", "total_reais"})
 	for _, l := range rep.Lines {
-		_ = cw.Write([]string{l.Endpoint, strconv.Itoa(l.Calls), strconv.FormatInt(l.TotalCents, 10), centsDecimal(l.TotalCents)})
+		_ = cw.Write([]string{csvSafe(l.Endpoint), strconv.Itoa(l.Calls), strconv.FormatInt(l.TotalCents, 10), centsDecimal(l.TotalCents)})
 	}
 	_ = cw.Write([]string{"TOTAL", strconv.Itoa(rep.TotalCalls), strconv.FormatInt(rep.TotalCents, 10), centsDecimal(rep.TotalCents)})
 	cw.Flush()
+}
+
+// csvSafe neutraliza CSV formula injection (CWE-1236): encoding/csv só escapa a
+// estrutura CSV (vírgula/aspas/quebra de linha), não neutraliza fórmula. Uma
+// célula começando com '=', '+', '-', '@', TAB (0x09) ou CR (0x0D) é interpretada
+// como fórmula por Excel/LibreOffice/Sheets. Prefixamos essas células de texto-livre
+// com uma aspa simples (padrão OWASP); a aspa fica visível na célula (risco residual
+// aceito). Colunas numéricas (strconv/centsDecimal) não passam por aqui.
+func csvSafe(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', 0x09, 0x0D:
+		return "'" + s
+	}
+	return s
 }
 
 // centsDecimal renders integer centavos as a locale-neutral decimal string
@@ -791,7 +828,7 @@ func (s *Server) consoleInvoiceCSV(w http.ResponseWriter, r *http.Request) {
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{"endpoint", "chamadas", "total_centavos", "total_reais"})
 	for _, l := range inv.Lines() {
-		_ = cw.Write([]string{l.Endpoint(), strconv.Itoa(l.Calls()), strconv.FormatInt(l.SubtotalCents(), 10), centsDecimal(l.SubtotalCents())})
+		_ = cw.Write([]string{csvSafe(l.Endpoint()), strconv.Itoa(l.Calls()), strconv.FormatInt(l.SubtotalCents(), 10), centsDecimal(l.SubtotalCents())})
 	}
 	_ = cw.Write([]string{"TOTAL", strconv.Itoa(inv.TotalCalls()), strconv.FormatInt(inv.TotalCents(), 10), centsDecimal(inv.TotalCents())})
 	cw.Flush()
@@ -830,7 +867,7 @@ func (s *Server) consoleError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, shared.ErrValidation):
 		http.Error(w, "invalid request", http.StatusBadRequest)
-	case errors.Is(err, app.ErrInvoicesUnavailable):
+	case errors.Is(err, app.ErrInvoicesUnavailable), errors.Is(err, app.ErrAccountsUnavailable):
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "internal error", http.StatusInternalServerError)
