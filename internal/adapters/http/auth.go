@@ -16,6 +16,7 @@ import (
 
 	"github.com/ia-dev-sindireceita/payment/internal/app"
 	"github.com/ia-dev-sindireceita/payment/internal/domain/account"
+	"github.com/ia-dev-sindireceita/payment/internal/domain/tenant"
 )
 
 type ctxKey int
@@ -71,6 +72,73 @@ type Principal struct {
 // H2), identically to AuthenticateTenant.
 type TenantPrincipalAuthenticator interface {
 	AuthenticateTenantPrincipal(token string) (Principal, bool)
+}
+
+// AccountResolver resolves an already-authenticated tenant to its owning Account
+// id at the auth choke-point (two-level tenancy, ADR-0009 / SIN-69222). It is a
+// READ-ONLY port and never participates in access control: the tenant id it
+// receives is already authoritative (resolved from the credential, never from
+// client input), and it only reads which Account the tenant was grouped under in
+// the admin plane (tenants.account_id) so the account dimension stamped on the
+// ledger reflects that grouping — the input to "Uso por Conta".
+//
+// Contract: return the tenant's REAL owning account id, or "" for a tenant with
+// no explicitly-assigned account (a legacy self-account, NULL account_id). A ""
+// return leaves the choke-point's derived self-account default in place, so the
+// backfill 1:1 case (migration 0007) is unchanged (retrocompat). It MUST NEVER
+// return a tenant id and MUST NEVER widen the tenant isolation scope — the
+// isolation boundary stays keyed on the tenant id.
+type AccountResolver interface {
+	ResolveAccountID(ctx context.Context, tenantID string) string
+}
+
+// tenantAccountFinder is the narrow slice of the tenant read store the account
+// resolver depends on: look up one tenant to read its owning account. Declared
+// here (accept-narrow) so StoreAccountResolver depends on an interface, not the
+// whole repository; satisfied by ports.TenantRepository and both persistence
+// adapters.
+type tenantAccountFinder interface {
+	FindTenantByID(ctx context.Context, id string) (*tenant.Tenant, error)
+}
+
+// StoreAccountResolver backs AccountResolver by reading the owning Account from
+// the tenant store. This is the piece the static token authenticator cannot do
+// on its own: PAYMENT_TENANT_TOKENS maps token→tenant with no store access, so
+// the choke-point defaulted every tenant to its self-account (acct-<tid>) and the
+// "Uso por Conta" rollup on ledger.account_id found nothing for multi-empresa
+// accounts. Resolving the parent here — behind a read port, no SQL in the
+// middleware (hexagonal) — makes the stamped account_id match the admin grouping.
+type StoreAccountResolver struct {
+	tenants tenantAccountFinder
+}
+
+// NewStoreAccountResolver builds a StoreAccountResolver over the tenant read
+// store. Passing a nil finder yields a resolver that always returns "" (the
+// choke-point then keeps the self-account default), so wiring it is safe even in
+// stripped-down deployments.
+func NewStoreAccountResolver(finder tenantAccountFinder) *StoreAccountResolver {
+	return &StoreAccountResolver{tenants: finder}
+}
+
+// ResolveAccountID reads the tenant's owning account from the store. It is
+// fail-safe: an empty tenant id, a missing finder, or ANY store error returns ""
+// so the choke-point falls back to the derived self-account and never widens the
+// scope on a transient read failure. A found tenant returns its AccountID(),
+// which is "" for a legacy self-account (unassigned) and the real parent Account
+// id once the admin plane has grouped it.
+func (r *StoreAccountResolver) ResolveAccountID(ctx context.Context, tenantID string) string {
+	if r == nil || r.tenants == nil {
+		return ""
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return ""
+	}
+	t, err := r.tenants.FindTenantByID(ctx, tenantID)
+	if err != nil {
+		return "" // fail-safe: keep the self-account default, never widen scope
+	}
+	return t.AccountID()
 }
 
 // AdminAuthenticator authenticates an admin token and resolves its role (admin
@@ -332,11 +400,23 @@ func bearerToken(r *http.Request) string {
 
 // tenantAuthMiddleware enforces tenant authentication and injects the resolved
 // principal: the tenant id (ctxTenantID, unchanged — still authoritative for the
-// isolation boundary) AND the owning account id (ctxAccountID, new — attribution
-// for the metering/billing rollup). Both come from the same single choke-point,
+// isolation boundary) AND the owning account id (ctxAccountID — attribution for
+// the metering/billing rollup). Both come from the same single choke-point,
 // derived server-side from the token and never from client input. Deny-by-default:
 // an unresolved token is rejected before any handler runs.
-func tenantAuthMiddleware(auth TenantPrincipalAuthenticator) func(http.Handler) http.Handler {
+//
+// The account id defaults to what the authenticator resolves — the tenant's
+// self-account (acct-<tid>), the dark-ship default. An optional AccountResolver
+// (zero or one; variadic keeps the single-arg call sites and tests unchanged)
+// upgrades that to the tenant's REAL owning Account read from the store, so a
+// tenant grouped under a multi-empresa Account in the admin plane stamps
+// ledger.account_id = <that Account> and "Uso por Conta" sees the rollup
+// (SIN-69222). The resolver runs with the REQUEST context (cancellation /
+// deadline propagate to the store read) and only overrides when it returns a
+// non-empty real parent — an unassigned (self-account) tenant or a transient read
+// failure keeps the self-account default (retrocompat, fail-safe). The tenant id
+// is never sourced from the resolver, so the isolation boundary is unchanged.
+func tenantAuthMiddleware(auth TenantPrincipalAuthenticator, resolver ...AccountResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, ok := auth.AuthenticateTenantPrincipal(bearerToken(r))
@@ -344,8 +424,18 @@ func tenantAuthMiddleware(auth TenantPrincipalAuthenticator) func(http.Handler) 
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
+			accountID := p.AccountID
+			for _, res := range resolver {
+				if res == nil {
+					continue
+				}
+				if parent := res.ResolveAccountID(r.Context(), p.TenantID); parent != "" {
+					accountID = parent
+					break
+				}
+			}
 			ctx := context.WithValue(r.Context(), ctxTenantID, p.TenantID)
-			ctx = context.WithValue(ctx, ctxAccountID, p.AccountID)
+			ctx = context.WithValue(ctx, ctxAccountID, accountID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
