@@ -78,9 +78,16 @@ func (s *AdminService) recordAudit(ctx context.Context, action audit.Action, ten
 // is the credential-specific sibling of recordAudit: it carries the non-secret
 // bankID so the trail records which bank's credential was set, while still
 // deriving the operator server-side and never recording the secret/client id. The
-// append is fail-closed (an error surfaces rather than dropping the record).
-func (s *AdminService) recordCredentialAudit(ctx context.Context, tenantID, bankID string) error {
-	e, err := audit.NewCredentialSetEntry(s.ids.NewID(), OperatorIDFromContext(ctx), tenantID, bankID, s.clock.Now())
+// selfServe flag selects the origin the entry is stamped with (self-serve when the
+// tenant rotated its own credential via the tenant-plane intake, SIN-69196; admin
+// otherwise) — the sole difference between the two write surfaces at the trail.
+// The append is fail-closed (an error surfaces rather than dropping the record).
+func (s *AdminService) recordCredentialAudit(ctx context.Context, tenantID, bankID string, selfServe bool) error {
+	build := audit.NewCredentialSetEntry
+	if selfServe {
+		build = audit.NewSelfServeCredentialSetEntry
+	}
+	e, err := build(s.ids.NewID(), OperatorIDFromContext(ctx), tenantID, bankID, s.clock.Now())
 	if err != nil {
 		return fmt.Errorf("build audit entry: %w", err)
 	}
@@ -136,6 +143,31 @@ func (s *AdminService) SetEndpointPrice(ctx context.Context, tenantID, endpoint 
 // admin crosses tenants by design but every credential write names exactly one
 // (tenant, bank).
 func (s *AdminService) SetBankCredential(ctx context.Context, tenantID, bank, clientID, secret string) error {
+	return s.setBankCredential(ctx, tenantID, bank, clientID, secret, false)
+}
+
+// SetBankCredentialSelfServe stores an empresa-cliente's OWN bank credential
+// through the self-serve intake (SIN-69196 / trilha E2). It is byte-for-byte the
+// same write as SetBankCredential — same (tenant, bank) key, same CredentialWriter
+// port, same token-cache eviction, same never-leak-the-secret guarantee — with two
+// deliberate distinctions: (1) the HTTP boundary derives tenantID from the
+// authenticated tenant context, NEVER from client input (so a token can only ever
+// write its own credential — the broken-access-control class A01 is designed out,
+// there is no tenant selector to abuse); and (2) the audit entry is stamped
+// origin=self-serve so the forensic trail separates a tenant self-rotation from an
+// admin-driven write. The bank allow-list is enforced at the HTTP boundary (a
+// dedicated self-serve allow-list, currently {c6}); this method re-validates the
+// bank against the platform-wide known set as defense-in-depth, identically to the
+// admin path.
+func (s *AdminService) SetBankCredentialSelfServe(ctx context.Context, tenantID, bank, clientID, secret string) error {
+	return s.setBankCredential(ctx, tenantID, bank, clientID, secret, true)
+}
+
+// setBankCredential is the shared implementation behind the admin and self-serve
+// credential writes. selfServe selects only the audit origin; every port
+// interaction (validate → resolve tenant → write → evict → audit) is identical, so
+// the two surfaces can never diverge in what they persist or evict.
+func (s *AdminService) setBankCredential(ctx context.Context, tenantID, bank, clientID, secret string, selfServe bool) error {
 	bank = ports.NormalizeBankID(bank)
 	if !ports.IsKnownBankID(bank) {
 		// Reject an unknown bank without echoing any input back (deny-by-default).
@@ -155,8 +187,8 @@ func (s *AdminService) SetBankCredential(ctx context.Context, tenantID, bank, cl
 	s.credEvictor.InvalidateToken(tenantID)
 	// Audit records who set a credential for which tenant AND which bank — the
 	// bank id is a non-secret routing slug; the secret and client id are NEVER
-	// recorded (threat C1/C4).
-	if err := s.recordCredentialAudit(ctx, tenantID, bank); err != nil {
+	// recorded (threat C1/C4). The origin distinguishes the write surface.
+	if err := s.recordCredentialAudit(ctx, tenantID, bank, selfServe); err != nil {
 		return err
 	}
 	return nil

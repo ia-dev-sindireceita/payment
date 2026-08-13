@@ -201,6 +201,8 @@ func run() error {
 		BankResolver:     httpadapter.NewBankResolver(registry.Banks(), creds),
 		SecureCookies:    cfg.SecureCookies,
 		TrustedProxyHops: cfg.TrustedProxyHops,
+		// Self-serve credential intake (SIN-69196), default-off dark-ship.
+		SelfServeCredIntake: cfg.SelfServeCredIntake,
 	})
 
 	httpServer := &stdhttp.Server{

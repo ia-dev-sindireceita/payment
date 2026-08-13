@@ -134,7 +134,27 @@ type Entry struct {
 	expectedCents int64
 	receivedCents int64
 	bankID        string
+	// origin labels WHICH surface performed the action: OriginAdmin (an admin
+	// operator on the admin plane / console) or OriginSelfServe (an empresa-cliente
+	// rotating its own credential via the tenant-plane self-serve intake, SIN-69196).
+	// It is a closed, non-secret label. The zero value ("") is read back as
+	// OriginAdmin by Origin(), so every existing constructor keeps its prior meaning
+	// without a code or test change (matches the DB DEFAULT 'admin' of migration 0010).
+	origin string
 }
+
+const (
+	// OriginAdmin marks an action performed by an admin operator (the admin JSON
+	// plane or the HTML console). It is the default surface and the value the audit
+	// column defaults to (migration 0010), so pre-existing entries and every code
+	// path that does not opt into another origin read back as admin.
+	OriginAdmin = "admin"
+	// OriginSelfServe marks an action a tenant performed on itself through the
+	// self-serve intake (SIN-69196): the credential.set on PUT /v1/bank-credential,
+	// authenticated by the tenant's own token (never an admin operator). It lets the
+	// forensic trail separate a tenant self-rotation from an admin-driven write.
+	OriginSelfServe = "self-serve"
+)
 
 // NewEntry builds an audit entry, enforcing invariants: a non-empty id, a known
 // action and a target tenant. The operator id is intentionally allowed to be
@@ -190,6 +210,24 @@ func NewCredentialSetEntry(id, operatorID, tenantID, bankID string, at time.Time
 		at:         at,
 		bankID:     bankID,
 	}, nil
+}
+
+// NewSelfServeCredentialSetEntry builds the audit record for a bank credential
+// write a tenant performed on ITSELF through the self-serve intake (SIN-69196):
+// the credential.set on PUT /v1/bank-credential, authenticated by the tenant's own
+// token. It is identical to NewCredentialSetEntry — same ActionSetBankCredential,
+// same invariants, same never-records-the-secret guarantee (it has no secret
+// parameter, threat C1/C4) — EXCEPT it stamps OriginSelfServe, so the forensic
+// trail distinguishes a tenant self-rotation from an admin-driven write. Keeping
+// NewCredentialSetEntry untouched means the admin path (and its tests) are
+// unchanged; only this new surface opts into the self-serve origin.
+func NewSelfServeCredentialSetEntry(id, operatorID, tenantID, bankID string, at time.Time) (Entry, error) {
+	e, err := NewCredentialSetEntry(id, operatorID, tenantID, bankID, at)
+	if err != nil {
+		return Entry{}, err
+	}
+	e.origin = OriginSelfServe
+	return e, nil
 }
 
 // NewCreditorKeySetEntry builds the audit record for a PIX creditor-key write
@@ -409,3 +447,16 @@ func (e Entry) ReceivedCents() int64 { return e.receivedCents }
 // BankID returns the non-secret bank slug for a credential.set event, or "" for
 // any other action.
 func (e Entry) BankID() string { return e.bankID }
+
+// Origin returns the surface that performed the action: OriginSelfServe for a
+// tenant self-rotation via the self-serve intake (SIN-69196), else OriginAdmin.
+// The zero value ("") reads back as OriginAdmin, so every constructor that does
+// not opt into another origin — i.e. all of them except
+// NewSelfServeCredentialSetEntry — reports admin, matching the DB DEFAULT 'admin'
+// of migration 0010 and preserving the prior admin-only semantics.
+func (e Entry) Origin() string {
+	if e.origin == "" {
+		return OriginAdmin
+	}
+	return e.origin
+}

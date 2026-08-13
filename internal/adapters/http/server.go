@@ -38,6 +38,11 @@ type Server struct {
 	// trustedProxyHops selects the spoof-resistant client-IP middleware installed
 	// by Router (replaces chi middleware.RealIP). See Config.TrustedProxyHops.
 	trustedProxyHops int
+	// selfServeCredIntake gates the self-serve credential intake route
+	// (PUT /v1/bank-credential, SIN-69196). Default false: the route is NOT
+	// registered and the handler is inert unless this is explicitly enabled, so a
+	// rollback is a config flip. See Config.SelfServeCredIntake.
+	selfServeCredIntake bool
 }
 
 // Config wires a Server's dependencies. Console and UI back the HTML admin
@@ -93,28 +98,36 @@ type Config struct {
 	// See config.Config.TrustedProxyHops — this replaces the spoofable
 	// middleware.RealIP (GO-2026-5775).
 	TrustedProxyHops int
+	// SelfServeCredIntake enables the self-serve credential intake route
+	// (PUT /v1/bank-credential, SIN-69196 / trilha E2). Default false (secure /
+	// dark-ship): when off the route is not registered at all — the feature is
+	// inert and rollback is a config flip. Wired from PAYMENT_SELFSERVE_CRED_INTAKE.
+	// It does NOT block the go-live (go-live provisions credentials via the admin
+	// intake); it is a fast-follow tenant convenience.
+	SelfServeCredIntake bool
 }
 
 // NewServer builds a Server from its config.
 func NewServer(c Config) *Server {
 	return &Server{
-		charges:          c.Charges,
-		pix:              c.Pix,
-		pixCobV:          c.PixCobV,
-		checkout:         c.Checkout,
-		boleto:           c.Boleto,
-		dda:              c.DDA,
-		statement:        c.Statement,
-		admin:            c.Admin,
-		console:          c.Console,
-		ui:               c.UI,
-		webhooks:         c.Webhooks,
-		tenantAuth:       c.TenantAuth,
-		adminAuth:        c.AdminAuth,
-		webhookAuth:      c.WebhookAuth,
-		csrf:             NewCSRFGuard(c.SecureCookies),
-		bankResolver:     c.BankResolver,
-		trustedProxyHops: c.TrustedProxyHops,
+		charges:             c.Charges,
+		pix:                 c.Pix,
+		pixCobV:             c.PixCobV,
+		checkout:            c.Checkout,
+		boleto:              c.Boleto,
+		dda:                 c.DDA,
+		statement:           c.Statement,
+		admin:               c.Admin,
+		console:             c.Console,
+		ui:                  c.UI,
+		webhooks:            c.Webhooks,
+		tenantAuth:          c.TenantAuth,
+		adminAuth:           c.AdminAuth,
+		webhookAuth:         c.WebhookAuth,
+		csrf:                NewCSRFGuard(c.SecureCookies),
+		bankResolver:        c.BankResolver,
+		trustedProxyHops:    c.TrustedProxyHops,
+		selfServeCredIntake: c.SelfServeCredIntake,
 	}
 }
 
@@ -238,6 +251,28 @@ func (s *Server) Router() http.Handler {
 		// The tenant is derived from the credential, never the query — no parameter
 		// selects which tenant's extrato is read (threat H1/P1).
 		r.Get("/statement", s.handleGetStatement)
+
+		// Self-serve credential intake (SIN-69196 / trilha E2, flag-gated). An
+		// empresa-cliente rotates its OWN bank credential with its tenant token; the
+		// tenant is the authenticated caller (no selector → A01 designed out). It is
+		// registered ONLY when the flag is on, so with the flag off the route does not
+		// exist (rollback = config flip). It carries its OWN dedicated inbound limiter
+		// (Q1): a tight per-tenant bucket (burst 5, ~1 req/min) that emits Retry-After
+		// on a 429 and fails open on an internal fault — deliberately separate from the
+		// tenant-plane limiter above and from the outbound C6 limiter (SIN-68742), so a
+		// rare high-value credential write cannot be masked by ordinary traffic and
+		// vice versa.
+		if s.selfServeCredIntake {
+			r.Group(func(r chi.Router) {
+				const (
+					selfServeBurst      = 5          // ≤5 rotations in a burst
+					selfServeRefillPS   = 1.0 / 60.0 // ~1 token/minute sustained
+					selfServeRetryAfter = 60         // seconds advertised on a 429
+				)
+				r.Use(newRateLimiter(selfServeBurst, selfServeRefillPS, nil).middlewareSelfServeCred(selfServeRetryAfter))
+				r.Put("/bank-credential", s.handleTenantSetBankCredential)
+			})
+		}
 	})
 
 	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route

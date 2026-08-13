@@ -59,6 +59,14 @@ type Config struct {
 	// Defaults to 0 (secure-by-default). A negative or unparseable value falls
 	// back to 0 so a typo cannot silently start trusting client headers.
 	TrustedProxyHops int
+	// SelfServeCredIntake enables the self-serve credential intake route
+	// (PUT /v1/bank-credential, SIN-69196 / trilha E2). It lets an empresa-cliente
+	// rotate its OWN bank credential with its tenant token, in addition to the
+	// admin-plane write. Defaults to false (secure / dark-ship): when off the route
+	// is not registered, so rollback is a config flip. It does NOT gate the go-live
+	// (production credentials are provisioned via the admin intake); it is a
+	// fast-follow convenience. Set PAYMENT_SELFSERVE_CRED_INTAKE truthy to enable.
+	SelfServeCredIntake bool
 	// C6 holds the C6 bank adapter transport configuration. Endpoints are
 	// per-environment and resolved from config (never hard-coded). The per-tenant
 	// OAuth2 credentials live in BankCreds / the secret store, not here.
@@ -104,16 +112,17 @@ func FromEnv() Config {
 	bankCreds := mergeCreditorKeys(parseBankCreds(os.Getenv("PAYMENT_BANK_CREDS"), logger), os.Getenv("PAYMENT_BANK_CREDITOR_KEYS"), logger)
 	logLoadedBankCreds(bankCreds, logger)
 	return Config{
-		HTTPAddr:         getenv("PAYMENT_HTTP_ADDR", ":8080"),
-		DBPath:           getenv("PAYMENT_DB_PATH", "payment.db"),
-		TenantTokens:     parseKV(os.Getenv("PAYMENT_TENANT_TOKENS")),
-		AdminTokens:      splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
-		OperatorTokens:   splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
-		WebhookRefs:      parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
-		BankCreds:        bankCreds,
-		RabbitURL:        os.Getenv("PAYMENT_RABBIT_URL"),
-		SecureCookies:    getenvBool("PAYMENT_SECURE_COOKIES", true),
-		TrustedProxyHops: getenvInt("PAYMENT_TRUSTED_PROXY_HOPS", 0),
+		HTTPAddr:            getenv("PAYMENT_HTTP_ADDR", ":8080"),
+		DBPath:              getenv("PAYMENT_DB_PATH", "payment.db"),
+		TenantTokens:        parseKV(os.Getenv("PAYMENT_TENANT_TOKENS")),
+		AdminTokens:         splitNonEmpty(os.Getenv("PAYMENT_ADMIN_TOKENS")),
+		OperatorTokens:      splitNonEmpty(os.Getenv("PAYMENT_OPERATOR_TOKENS")),
+		WebhookRefs:         parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
+		BankCreds:           bankCreds,
+		RabbitURL:           os.Getenv("PAYMENT_RABBIT_URL"),
+		SecureCookies:       getenvBool("PAYMENT_SECURE_COOKIES", true),
+		TrustedProxyHops:    getenvInt("PAYMENT_TRUSTED_PROXY_HOPS", 0),
+		SelfServeCredIntake: getenvBool("PAYMENT_SELFSERVE_CRED_INTAKE", false),
 		C6: C6Config{
 			BaseURL:        os.Getenv("PAYMENT_C6_BASE_URL"),
 			TokenURL:       os.Getenv("PAYMENT_C6_TOKEN_URL"),
