@@ -7,10 +7,21 @@
   (Aceito — **Opção A**).
 - **Lentes:** secure-by-default, least privilege, defense-in-depth.
 
-> ⚠️ **Bloqueio de go-live.** As três premissas abaixo são **pré-requisito
-> não-negociável** para colocar o console em produção. A Opção A do ADR-0001 só é
-> segura sob elas. Se qualquer uma não puder ser garantida pelo edge, **o go-live
-> não acontece** até ser resolvida ou até o ADR ser revisto (ver §4).
+> 🔀 **PIVOT (2026-08-14, direção do board — SIN-69265):** o transporte de auth do
+> browser passou da **Opção A** (edge injeta `Authorization: Bearer`) para a
+> **Opção B** — **login self-contained na aplicação** (usuário + senha + TOTP 2FA,
+> cookie de sessão de primeira parte). Ver [`../security/adr-0010-console-self-contained-login.md`](../security/adr-0010-console-self-contained-login.md),
+> que **supersede** a Opção A do ADR-0001. **O que muda para o operador de infra:**
+> o edge **não precisa mais injetar o bearer** nem autenticar a sessão — o app faz
+> o login. As seções da Opção A abaixo (§0–§5, §8) ficam como **fallback histórico**;
+> a operação vigente está na **§9**. **O que NÃO muda:** TLS termina na borda e
+> **nunca** se loga segredo (senha, token de bootstrap, cookie de sessão, path do
+> webhook C6). O plano JSON `/admin` (Bearer) segue intacto.
+
+> ⚠️ **Bloqueio de go-live (Opção A — histórico).** As três premissas abaixo eram
+> **pré-requisito não-negociável** da Opção A. Sob a Opção B (§9) elas deixam de
+> bloquear (a fronteira de confiança volta para a aplicação), mas o app continua
+> só devendo ser servido sobre TLS e nunca em claro.
 
 ## 0. Por que isto importa
 
@@ -384,9 +395,67 @@ cunhar token novo, adicioná-lo a `PAYMENT_ADMIN_TOKENS` (CSV, lado a lado), tro
 valor no `map`, `nginx -s reload` + restart do app, confirmar acesso, então remover o
 token antigo do CSV e redeployar. Zero downtime pela janela de overlap.
 
+## 9. Opção B — login self-contained (VIGENTE, SIN-69265)
+
+A aplicação agora tem **login próprio**: `/console/login` (usuário + senha + TOTP
+2FA) emite um **cookie de sessão de primeira parte** (`console_session`, HttpOnly,
+`Secure` dirigido por `PAYMENT_SECURE_COOKIES`, `SameSite=Lax`, escopo `/console`).
+O middleware do console aceita **OU** o Bearer admin existente (retrocompat)
+**OU** um cookie de sessão válido. Deny-by-default; só `/console/login`,
+`/console/bootstrap` e os estáticos são públicos. Toda mutação continua sob CSRF
+double-submit (agora *load-bearing*) e o plano `/admin` JSON segue Bearer-only.
+
+### 9.1 O que o edge precisa fazer (mínimo)
+
+- Terminar TLS e encaminhar para o app no loopback (§8.4 continua válido).
+- **NÃO** precisa mais de Basic Auth, `map` operador→token, nem injeção de
+  `Authorization` (aquilo era da Opção A). Um `server` que só faz TLS + `proxy_pass`
+  para `127.0.0.1:8080` basta. Basic Auth de borda pode ser mantido como camada
+  extra, mas não é mais requisito.
+- Continuar **mascarando o path do webhook C6** no access log (§6 / Premissa D) e
+  **nunca** logar `Authorization`, `Cookie` nem corpo de POST de `/console/login`
+  ou `/console/bootstrap` (carregam senha / token de bootstrap).
+
+### 9.2 Flags de configuração (app)
+
+| Env | Efeito | Default |
+|-----|--------|---------|
+| `PAYMENT_CONSOLE_USERNAME` | login fixo do operador | `pericles.luz` |
+| `PAYMENT_CONSOLE_BOOTSTRAP_TOKEN` | **segredo** que libera o provisionamento de 1º acesso; **vazio ⇒ bootstrap DESABILITADO** (failure-closed) | `` (vazio) |
+| `PAYMENT_SECURE_COOKIES` | `Secure` no cookie de sessão e no de CSRF | `true` |
+
+### 9.3 Primeiro acesso (bootstrap) — provisionamento
+
+1. No deploy, o operador de infra gera um token forte (32 bytes CSPRNG, base64url)
+   e o exporta em `PAYMENT_CONSOLE_BOOTSTRAP_TOKEN` no ambiente do app. **Entregue
+   esse token ao Pericles por canal seguro fora de banda** (gerenciador de senhas /
+   mensagem efêmera) — **nunca** em comentário de PR, issue pública, URL ou log.
+2. Pericles abre `https://payment.lmhost.com.br/console/bootstrap`, informa o token,
+   e a aplicação exibe **UMA vez**: a senha gerada + o segredo TOTP (`otpauth://` para
+   QR). Ele cadastra o TOTP no autenticador (Google Authenticator / Authy / 1Password)
+   e guarda a senha no gerenciador. A tela não reexibe esses dados.
+3. Feito o set, o bootstrap **trava** (uso único): novas tentativas retornam 409.
+   Para desabilitar de vez, remova `PAYMENT_CONSOLE_BOOTSTRAP_TOKEN` do ambiente.
+
+> **Trade-off de reinício (1ª entrega):** o store de credencial/sessão é
+> **in-memory** (atrás de porta hexagonal). Um restart do app **derruba as sessões
+> ativas** (operadores relogam) **e a credencial provisionada** (é preciso repetir o
+> bootstrap com o token). O token permanece no ambiente, então o re-bootstrap é
+> imediato, mas é operacionalmente ruidoso. O adaptador durável (sqlite, cripto em
+> repouso) atrás das MESMAS portas é o follow-up planejado — a troca é só fiação.
+
+### 9.4 Rotação / revogação
+
+- **Senha/TOTP do operador:** re-provisionar exige derrubar a credencial atual.
+  Enquanto não há tela de troca de senha, a rotação é: remover a credencial
+  (restart limpa o in-memory) e re-bootstrap. A tela de rotação é follow-up.
+- **Sessão:** `POST /console/logout` revoga a sessão corrente; um restart revoga
+  todas. A expiração é absoluta (12h) + idle (30min), rotação de id a cada login.
+
 ## Referências
 
-- ADR-0001 — [`../security/adr-0001-console-browser-auth-transport.md`](../security/adr-0001-console-browser-auth-transport.md)
+- ADR-0010 (VIGENTE) — [`../security/adr-0010-console-self-contained-login.md`](../security/adr-0010-console-self-contained-login.md)
+- ADR-0001 (histórico, superseded) — [`../security/adr-0001-console-browser-auth-transport.md`](../security/adr-0001-console-browser-auth-transport.md)
 - Baseline de segurança — [`../security/secure-baseline.md`](../security/secure-baseline.md)
   (segredos, "no secrets in URLs", logging)
 - Cookie `Secure` proxy-aware / TLS termina no proxy — [SIN-64731](/SIN/issues/SIN-64731)
