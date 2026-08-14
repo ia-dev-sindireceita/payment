@@ -54,7 +54,7 @@ func TestAccountKeyChokepointGuard(t *testing.T) {
 	tests := []struct {
 		name        string
 		bearer      string
-		selector    string        // X-Client-Tenant; "" means header omitted
+		selector    string // X-Client-Tenant; "" means header omitted
 		resolver    AccountResolver
 		wantStatus  int
 		wantRan     bool
