@@ -55,6 +55,14 @@ type Server struct {
 	// registered and the handler is inert unless this is explicitly enabled, so a
 	// rollback is a config flip. See Config.SelfServeCredIntake.
 	selfServeCredIntake bool
+	// accountKeyAuth authenticates an Account bearer key (model (b), ADR-0011 §2 /
+	// SIN-69279). When nil OR accountKeySelector is false, the tenant choke-point
+	// runs the unchanged model (a) path (tenant tokens only). See Config.AccountKeyAuth.
+	accountKeyAuth AccountKeyAuthenticator
+	// accountKeySelector gates the model (b) account-key + per-request selector auth
+	// path. Default false (dark-ship): the key/selector are ignored and the
+	// choke-point behaves exactly as today. See Config.AccountKeySelector.
+	accountKeySelector bool
 }
 
 // Config wires a Server's dependencies. Console and UI back the HTML admin
@@ -129,6 +137,20 @@ type Config struct {
 	// It does NOT block the go-live (go-live provisions credentials via the admin
 	// intake); it is a fast-follow tenant convenience.
 	SelfServeCredIntake bool
+	// AccountKeyAuth authenticates an Account's rotatable bearer key at the tenant
+	// choke-point (model (b), ADR-0011 §2 / SIN-69279). Built over the account-key
+	// store (ports.AccountKeyStore). It is consulted ONLY when AccountKeySelector is
+	// true and the presented bearer has the account-key shape; otherwise it is
+	// inert. When nil the account-key path stays off regardless of the flag
+	// (fail-closed). Optional: tests and model (a) deployments leave it nil.
+	AccountKeyAuth AccountKeyAuthenticator
+	// AccountKeySelector enables the model (b) account-key + per-request client
+	// selector auth path (ADR-0011 §2 / SIN-69279). Default false (secure /
+	// dark-ship): the choke-point ignores the key/selector and behaves EXACTLY as
+	// model (a). It deliberately reintroduces the A01/IDOR surface model (a)
+	// designed out, so the per-request guard is load-bearing — keep it off until the
+	// guard is security-reviewed for a deployment. Wired from PAYMENT_ACCOUNT_KEY_SELECTOR.
+	AccountKeySelector bool
 }
 
 // NewServer builds a Server from its config.
@@ -154,6 +176,8 @@ func NewServer(c Config) *Server {
 		bankResolver:        c.BankResolver,
 		trustedProxyHops:    c.TrustedProxyHops,
 		selfServeCredIntake: c.SelfServeCredIntake,
+		accountKeyAuth:      c.AccountKeyAuth,
+		accountKeySelector:  c.AccountKeySelector,
 	}
 }
 
@@ -226,7 +250,16 @@ func (s *Server) Router() http.Handler {
 
 	// Tenant API (TB1) — authenticated, tenant-scoped, rate-limited.
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(tenantAuthMiddleware(s.tenantAuth, s.accountResolver))
+		// Model (b) account-key + per-request selector (ADR-0011 §2 / SIN-69279):
+		// when the flag is on AND a key authenticator is wired, install the
+		// selector-aware choke-point so an Account bearer key + X-Client-Tenant is
+		// authorized by the load-bearing §2 guard. Default (flag off / no key auth):
+		// the plain model (a) choke-point, byte-for-byte unchanged.
+		if s.accountKeySelector && s.accountKeyAuth != nil {
+			r.Use(tenantAuthMiddlewareWithSelector(s.tenantAuth, accountKeyGuard{enabled: true, keyAuth: s.accountKeyAuth}, s.accountResolver))
+		} else {
+			r.Use(tenantAuthMiddleware(s.tenantAuth, s.accountResolver))
+		}
 		// Multi-bank routing (SIN-66022): resolve and validate the per-request bank
 		// selector right after the tenant is authenticated, so the resolved bank is
 		// stamped on the context for the output-port routers. Runs before the limiter

@@ -55,6 +55,11 @@ func run() error {
 	}
 
 	store := sqlite.NewStore(db)
+	// Account-key store (ADR-0011 §3, B1/SIN-69278): durable, hash-at-rest bearer
+	// keys keyed by Account. Wired as the choke-point's AccountKeyAuth; it only ever
+	// runs when the PAYMENT_ACCOUNT_KEY_SELECTOR flag is on (model (b)), so building
+	// it here is inert in the default model (a) deployment.
+	accountKeys := sqlite.NewAccountKeyStore(db, system.Clock{})
 	creds := secret.NewStore(cfg.BankCreds)
 	// Per-(tenant,bank) mTLS certificate vault (SIN-66087): the admin console writes
 	// the cert/key here as write-only material with public metadata exposed. It is
@@ -247,6 +252,11 @@ func run() error {
 		TrustedProxyHops: cfg.TrustedProxyHops,
 		// Self-serve credential intake (SIN-69196), default-off dark-ship.
 		SelfServeCredIntake: cfg.SelfServeCredIntake,
+		// Model (b) account-key + per-request client selector (ADR-0011 §2 /
+		// SIN-69279), default-off dark-ship: consulted only when AccountKeySelector
+		// is on and the bearer has the ak_ shape; otherwise inert (model (a)).
+		AccountKeyAuth:     accountKeys,
+		AccountKeySelector: cfg.AccountKeySelector,
 	})
 
 	httpServer := &stdhttp.Server{
