@@ -235,6 +235,155 @@ isso habilita rotação sem downtime.
 - Se o tenant continua ativo, cunhar+registrar um ref novo e atualizar o C6
   (rotação acima). O ref nunca é logado em nenhuma etapa.
 
+## 8. Configuração de referência — nginx para `payment.lmhost.com.br` (Opção A, pronta para aplicar)
+
+> **Objetivo:** tornar `/console` acessível pelo browser ao board/Verz **sem violar
+> o ADR-0001**. Esta é a configuração mínima que satisfaz as premissas A, B, C e D
+> acima. Origem: [SIN-69261](/SIN/issues/SIN-69261) (o deploy em `payment.lmhost.com.br`
+> subiu sem o proxy de borda).
+>
+> **Quem aplica:** dono do host/deploy (Pericles, ver [SIN-69225](/SIN/issues/SIN-69225)).
+> Ação de operador — o app **não muda**. O CTO fornece esta config; o operador a
+> aplica, provisiona o htpasswd + `PAYMENT_ADMIN_TOKENS`, e entrega credenciais ao
+> board por canal seguro.
+
+### 8.1 Modelo desta config
+
+- **Borda autentica o operador** por **HTTP Basic Auth** (diálogo nativo do browser
+  — satisfaz Premissa C: identidade estabelecida no edge antes de qualquer injeção).
+- **Injeção do bearer é consequência da auth** — um `map $remote_user → token`
+  mapeia cada operador Basic-Auth para um admin-token de `PAYMENT_ADMIN_TOKENS`.
+  Usuário desconhecido → `$admin_token` vazio → `403` no edge, **nunca** passa ao
+  upstream (Premissa C, deny-by-default).
+- **O proxy SEMPRE sobrescreve `Authorization`** no salto upstream — o cliente nunca
+  controla o header que chega ao app; o `Authorization: Basic` consumido pelo
+  `auth_basic` é substituído pelo `Bearer` (Premissa B: token só existe no salto
+  edge→app, nunca ecoa ao browser).
+- **App só escuta em loopback** (`PAYMENT_HTTP_ADDR=127.0.0.1:8080`) — inalcançável
+  fora do proxy (Premissa A).
+
+### 8.2 Provisionar credenciais (operador, canal seguro)
+
+```sh
+# 1. Cunhar o admin-token (32 bytes CSPRNG, base64url) — é o valor de PAYMENT_ADMIN_TOKENS
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+#    → exporte no ambiente do app: PAYMENT_ADMIN_TOKENS=<token-gerado>
+#    (múltiplos tokens = CSV; ver splitNonEmpty em config.go)
+
+# 2. Criar o htpasswd do operador de borda (uma senha por pessoa do board)
+#    -B = bcrypt. NUNCA versionar este arquivo.
+htpasswd -B -c /etc/nginx/payment.htpasswd board
+#    (repetir sem -c para adicionar mais operadores: htpasswd -B /etc/nginx/payment.htpasswd verz)
+chmod 640 /etc/nginx/payment.htpasswd && chown root:nginx /etc/nginx/payment.htpasswd
+```
+
+O mapa `operador→token` fica num arquivo separado com permissão restrita, **fora do
+git**:
+
+```nginx
+# /etc/nginx/conf.d/payment-admin-token.map   (chmod 600, root:root — contém segredo)
+map $remote_user $admin_token {
+    default   "";                 # operador não mapeado → 403 (deny-by-default)
+    "board"   "<PAYMENT_ADMIN_TOKEN>";   # o MESMO valor que está em PAYMENT_ADMIN_TOKENS
+    "verz"    "<PAYMENT_ADMIN_TOKEN>";
+}
+```
+
+### 8.3 Server block
+
+```nginx
+# Mascaramento do path do webhook C6 no access log (Premissa D, §6)
+map $uri $payment_safe_uri {
+    default          $request_uri;
+    ~^/webhooks/c6/  "/webhooks/c6/***";
+}
+log_format payment_masked
+    '$remote_addr [$time_local] "$request_method $payment_safe_uri $server_protocol" '
+    '$status $body_bytes_sent "$http_user_agent"';
+# NB: nunca usar $request/$request_uri crus aqui; $http_authorization NÃO é logado.
+
+include /etc/nginx/conf.d/payment-admin-token.map;
+
+server {
+    listen 443 ssl http2;
+    server_name payment.lmhost.com.br;
+
+    ssl_certificate     /etc/letsencrypt/live/payment.lmhost.com.br/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/payment.lmhost.com.br/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    access_log /var/log/nginx/payment.access.log payment_masked;
+
+    # ---- Plano admin / console: Basic Auth na borda + injeção do bearer ----
+    location / {
+        auth_basic           "Payment Console — Sindireceita";
+        auth_basic_user_file /etc/nginx/payment.htpasswd;
+
+        # Consequência da auth: operador desconhecido não tem token → 403, não sobe.
+        if ($admin_token = "") { return 403; }
+
+        # SEMPRE sobrescreve Authorization no salto upstream (client nunca controla).
+        proxy_set_header Authorization "Bearer $admin_token";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;   # TLS termina aqui; app lê p/ Secure cookies
+
+        proxy_pass http://127.0.0.1:8080;   # app em loopback — Premissa A
+    }
+
+    # ---- Webhook C6: SEM Basic Auth (autentica pelo tenantRef no path), path mascarado ----
+    location /webhooks/c6/ {
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # NÃO injetar Authorization aqui; NÃO herdar auth_basic.
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+
+# Redirect 80→443 (nunca servir o console em claro)
+server {
+    listen 80;
+    server_name payment.lmhost.com.br;
+    return 301 https://$host$request_uri;
+}
+```
+
+### 8.4 Bind do app em loopback (Premissa A — obrigatório)
+
+No ambiente do processo da app em `lmhost`:
+
+```
+PAYMENT_HTTP_ADDR=127.0.0.1:8080
+```
+
+Default do binário é `:8080` (todas as interfaces) — **isso é inseguro atrás deste
+modelo**: permitiria bater direto no app e injetar o próprio `Authorization: Bearer`,
+contornando a Basic Auth (OWASP A01). Fixar em loopback (ou rede privada + firewall
+que só admite o nginx) é pré-requisito. Verificar com o checklist da Premissa A (§1).
+
+### 8.5 Verificação pós-apply (rodar antes de liberar ao board)
+
+- [ ] `curl -k https://payment.lmhost.com.br/console` **sem** `-u` → `401` com
+      `WWW-Authenticate: Basic` (diálogo do browser).
+- [ ] `curl -k -u board:<senha> https://payment.lmhost.com.br/console` → `200`, HTML
+      do console.
+- [ ] DevTools → Network numa navegação real: nenhum header/corpo de resposta contém
+      o admin-token (Premissa B).
+- [ ] De fora do host: `curl http://<ip-lmhost>:8080/console` → connection refused /
+      timeout (Premissa A; app em loopback).
+- [ ] `grep -E 'Bearer |PAYMENT_ADMIN_TOKEN' /var/log/nginx/payment.access.log` →
+      vazio (Authorization não é logado).
+- [ ] `grep -E '/webhooks/c6/[A-Za-z0-9_-]{43}' /var/log/nginx/payment.access.log` →
+      vazio (Premissa D; path mascarado).
+
+### 8.6 Rotação do admin-token
+
+O `map` operador→token e `PAYMENT_ADMIN_TOKENS` compartilham o valor. Para rotacionar:
+cunhar token novo, adicioná-lo a `PAYMENT_ADMIN_TOKENS` (CSV, lado a lado), trocar o
+valor no `map`, `nginx -s reload` + restart do app, confirmar acesso, então remover o
+token antigo do CSV e redeployar. Zero downtime pela janela de overlap.
+
 ## Referências
 
 - ADR-0001 — [`../security/adr-0001-console-browser-auth-transport.md`](../security/adr-0001-console-browser-auth-transport.md)
