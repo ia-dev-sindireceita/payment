@@ -263,6 +263,12 @@ func run() error {
 		// hash-at-rest account-key store; the plaintext is returned once and never
 		// stored/logged (display-once).
 		AccountKeyMint: app.NewAccountKeyService(accountKeys, system.Clock{}),
+		// Model (b) empresa-cliente provisioning (ADR-0011 §4 / SIN-69281): a reseller
+		// Conta creates a new empresa-cliente via POST /v1/clients, bound to the Account
+		// resolved from its account-key (server-side, never the body — A01/T6). Backed by
+		// the same durable tenant repository as the admin plane; Idempotency-Key dedups
+		// retries so a lost-response retry does not create a duplicate empresa-cliente.
+		ClientProvisioner: app.NewClientProvisioningService(deps.Tenants, deps.IDs, system.Clock{}),
 	})
 
 	httpServer := &stdhttp.Server{
