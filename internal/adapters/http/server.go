@@ -63,6 +63,12 @@ type Server struct {
 	// path. Default false (dark-ship): the key/selector are ignored and the
 	// choke-point behaves exactly as today. See Config.AccountKeySelector.
 	accountKeySelector bool
+	// accountKeyMint mints/rotates an Account's bearer key for the emission routes
+	// (POST /v1/account-key self-serve + POST /admin/accounts/{id}/account-key
+	// bootstrap, model (b) / SIN-69280). Consulted only when model (b) is enabled
+	// (accountKeySelector on AND accountKeyAuth wired); when nil the /v1 route is not
+	// registered and the admin route fails closed (503). See Config.AccountKeyMint.
+	accountKeyMint AccountKeyMinter
 }
 
 // Config wires a Server's dependencies. Console and UI back the HTML admin
@@ -151,6 +157,14 @@ type Config struct {
 	// designed out, so the per-request guard is load-bearing — keep it off until the
 	// guard is security-reviewed for a deployment. Wired from PAYMENT_ACCOUNT_KEY_SELECTOR.
 	AccountKeySelector bool
+	// AccountKeyMint mints/rotates an Account's bearer key for the model (b) emission
+	// routes (POST /v1/account-key self-rotate + POST /admin/accounts/{id}/account-key
+	// bootstrap, ADR-0011 §3 / SIN-69280). Built over app.NewAccountKeyService atop
+	// the account-key store. The /v1 self-rotate route is registered ONLY when model
+	// (b) is enabled (AccountKeySelector && AccountKeyAuth != nil); the admin
+	// bootstrap route is always registered but fails closed (503) when this is nil.
+	// Optional: tests and model (a) deployments leave it nil.
+	AccountKeyMint AccountKeyMinter
 }
 
 // NewServer builds a Server from its config.
@@ -178,6 +192,7 @@ func NewServer(c Config) *Server {
 		selfServeCredIntake: c.SelfServeCredIntake,
 		accountKeyAuth:      c.AccountKeyAuth,
 		accountKeySelector:  c.AccountKeySelector,
+		accountKeyMint:      c.AccountKeyMint,
 	}
 }
 
@@ -250,94 +265,121 @@ func (s *Server) Router() http.Handler {
 
 	// Tenant API (TB1) — authenticated, tenant-scoped, rate-limited.
 	r.Route("/v1", func(r chi.Router) {
-		// Model (b) account-key + per-request selector (ADR-0011 §2 / SIN-69279):
-		// when the flag is on AND a key authenticator is wired, install the
-		// selector-aware choke-point so an Account bearer key + X-Client-Tenant is
-		// authorized by the load-bearing §2 guard. Default (flag off / no key auth):
-		// the plain model (a) choke-point, byte-for-byte unchanged.
+		// Account-key self-rotation (model (b), ADR-0011 §3 / SIN-69280): the Account
+		// rotates its OWN bearer key using its EXISTING key. It is authenticated by the
+		// account-key bearer itself (accountKeyAuthMiddleware) with NO tenant selector —
+		// this is the account plane acting on itself, not a tenant-scoped resource — so
+		// it lives in its OWN group that does NOT inherit the tenant choke-point below.
+		// Registered only in model (b) (flag on AND a key authenticator wired), so with
+		// the flag off the route does not exist (rollback = config flip). It carries a
+		// dedicated inbound limiter keyed on the Account (429 + Retry-After, fail-open),
+		// mirroring the self-serve credential intake: a rare, high-value credential
+		// write must not be masked by ordinary traffic and vice versa.
 		if s.accountKeySelector && s.accountKeyAuth != nil {
-			r.Use(tenantAuthMiddlewareWithSelector(s.tenantAuth, accountKeyGuard{enabled: true, keyAuth: s.accountKeyAuth}, s.accountResolver))
-		} else {
-			r.Use(tenantAuthMiddleware(s.tenantAuth, s.accountResolver))
-		}
-		// Multi-bank routing (SIN-66022): resolve and validate the per-request bank
-		// selector right after the tenant is authenticated, so the resolved bank is
-		// stamped on the context for the output-port routers. Runs before the limiter
-		// so an unknown/unconfigured explicit bank is rejected with the uniform
-		// not-found error. Omitted in single-bank deployments (nil resolver).
-		if s.bankResolver != nil {
-			r.Use(bankRouteMiddleware(s.bankResolver))
-		}
-		r.Use(tenantLimiter.middleware(tenantOrIPKey))
-		r.Post("/charges", s.handleCreateCharge)
-		r.Get("/charges/{id}", s.handleGetCharge)
-		// Immediate PIX charges (cobrança imediata, roteiro 7.1–7.4). Create reserves
-		// idempotently and bills; get/list reconcile from the PSP. List by date window
-		// (?start&end) is registered before the {txid} read so chi routes them apart.
-		r.Post("/pix", s.handleCreatePix)
-		r.Get("/pix", s.handleListPix)
-		// PIX cobrança com vencimento (cobv, roteiro 7.5–7.8): criar (7.5), consultar
-		// (7.6), alterar (7.7). The static "/pix/cobv" segment is registered before the
-		// immediate-charge "/pix/{txid}" read so chi routes the literal "cobv" segment
-		// apart from a txid. Create generates the txid server-side (like immediate pix);
-		// get/update address it. Settlement notification (7.8) is reconciled through the
-		// shared C6 webhook (/webhooks/c6/{tenantRef}, C6-D), not a per-charge endpoint.
-		r.Post("/pix/cobv", s.handleCreatePixCobV)
-		r.Get("/pix/cobv/{txid}", s.handleGetPixCobV)
-		r.Put("/pix/cobv/{txid}", s.handleUpdatePixCobV)
-		r.Get("/pix/{txid}", s.handleGetPix)
-		// Unified hosted checkout — open a session (roteiro 9.a–9.c), reconcile it
-		// (grupo 10, GET) and cancel it (grupo 11, DELETE). The status webhook (grupo
-		// 12) reuses the shared /webhooks/c6/{tenantRef} handler below.
-		r.Post("/checkout", s.handleCreateCheckout)
-		r.Get("/checkout/{id}", s.handleGetCheckout)
-		r.Delete("/checkout/{id}", s.handleCancelCheckout)
-		// BolePix boletos — full lifecycle: register with fine/interest/discount
-		// variants (grupos 1–3), read by id (6.a), baixa/cancelamento (DELETE, grupo
-		// 4) and alteração de vencimento/validade/valor (PUT, grupo 5).
-		r.Post("/boletos", s.handleCreateBoleto)
-		r.Get("/boletos/{id}", s.handleGetBoleto)
-		r.Delete("/boletos/{id}", s.handleDeleteBoleto)
-		r.Put("/boletos/{id}", s.handleUpdateBoleto)
-		// DDA / agendamento de pagamentos (roteiro grupo 8): list the boletos open in
-		// the tenant's DDA (8.1), submit a payment group for the initial consult (8.2),
-		// read its items (8.3), trim items as a list (8.4) or one at a time (8.5) and
-		// submit the group for approval (8.6). The {id}/{itemID} path params are
-		// tenant-scoped in the use-case (a group owned by another tenant is 404, never a
-		// cross-tenant existence oracle).
-		r.Get("/dda/boletos", s.handleListDDABoletos)
-		r.Post("/dda/payment-groups", s.handleCreateDDAGroup)
-		r.Get("/dda/payment-groups/{id}/items", s.handleGetDDAGroupItems)
-		r.Delete("/dda/payment-groups/{id}/items", s.handleRemoveDDAGroupItems)
-		r.Delete("/dda/payment-groups/{id}/items/{itemID}", s.handleRemoveDDAGroupItem)
-		r.Post("/dda/payment-groups/{id}/submit", s.handleSubmitDDAGroup)
-		// Account statement (extrato, roteiro grupo 13): read the entries posted to the
-		// authenticated tenant's account over a period (inicio/fim, máx. 30 dias, 13.a).
-		// The tenant is derived from the credential, never the query — no parameter
-		// selects which tenant's extrato is read (threat H1/P1).
-		r.Get("/statement", s.handleGetStatement)
-
-		// Self-serve credential intake (SIN-69196 / trilha E2, flag-gated). An
-		// empresa-cliente rotates its OWN bank credential with its tenant token; the
-		// tenant is the authenticated caller (no selector → A01 designed out). It is
-		// registered ONLY when the flag is on, so with the flag off the route does not
-		// exist (rollback = config flip). It carries its OWN dedicated inbound limiter
-		// (Q1): a tight per-tenant bucket (burst 5, ~1 req/min) that emits Retry-After
-		// on a 429 and fails open on an internal fault — deliberately separate from the
-		// tenant-plane limiter above and from the outbound C6 limiter (SIN-68742), so a
-		// rare high-value credential write cannot be masked by ordinary traffic and
-		// vice versa.
-		if s.selfServeCredIntake {
 			r.Group(func(r chi.Router) {
 				const (
-					selfServeBurst      = 5          // ≤5 rotations in a burst
-					selfServeRefillPS   = 1.0 / 60.0 // ~1 token/minute sustained
-					selfServeRetryAfter = 60         // seconds advertised on a 429
+					akRotateBurst      = 5          // ≤5 rotations in a burst
+					akRotateRefillPS   = 1.0 / 60.0 // ~1 token/minute sustained
+					akRotateRetryAfter = 60         // seconds advertised on a 429
 				)
-				r.Use(newRateLimiter(selfServeBurst, selfServeRefillPS, nil).middlewareSelfServeCred(selfServeRetryAfter))
-				r.Put("/bank-credential", s.handleTenantSetBankCredential)
+				r.Use(accountKeyAuthMiddleware(s.accountKeyAuth))
+				r.Use(newRateLimiter(akRotateBurst, akRotateRefillPS, nil).middlewareAccountKeyRotate(akRotateRetryAfter))
+				r.Post("/account-key", s.handleRotateAccountKey)
 			})
 		}
+
+		// Tenant-scoped routes — their own group so the tenant choke-point middleware is
+		// scoped here and does NOT apply to the account-key group above.
+		r.Group(func(r chi.Router) {
+			// Model (b) account-key + per-request selector (ADR-0011 §2 / SIN-69279):
+			// when the flag is on AND a key authenticator is wired, install the
+			// selector-aware choke-point so an Account bearer key + X-Client-Tenant is
+			// authorized by the load-bearing §2 guard. Default (flag off / no key auth):
+			// the plain model (a) choke-point, byte-for-byte unchanged.
+			if s.accountKeySelector && s.accountKeyAuth != nil {
+				r.Use(tenantAuthMiddlewareWithSelector(s.tenantAuth, accountKeyGuard{enabled: true, keyAuth: s.accountKeyAuth}, s.accountResolver))
+			} else {
+				r.Use(tenantAuthMiddleware(s.tenantAuth, s.accountResolver))
+			}
+			// Multi-bank routing (SIN-66022): resolve and validate the per-request bank
+			// selector right after the tenant is authenticated, so the resolved bank is
+			// stamped on the context for the output-port routers. Runs before the limiter
+			// so an unknown/unconfigured explicit bank is rejected with the uniform
+			// not-found error. Omitted in single-bank deployments (nil resolver).
+			if s.bankResolver != nil {
+				r.Use(bankRouteMiddleware(s.bankResolver))
+			}
+			r.Use(tenantLimiter.middleware(tenantOrIPKey))
+			r.Post("/charges", s.handleCreateCharge)
+			r.Get("/charges/{id}", s.handleGetCharge)
+			// Immediate PIX charges (cobrança imediata, roteiro 7.1–7.4). Create reserves
+			// idempotently and bills; get/list reconcile from the PSP. List by date window
+			// (?start&end) is registered before the {txid} read so chi routes them apart.
+			r.Post("/pix", s.handleCreatePix)
+			r.Get("/pix", s.handleListPix)
+			// PIX cobrança com vencimento (cobv, roteiro 7.5–7.8): criar (7.5), consultar
+			// (7.6), alterar (7.7). The static "/pix/cobv" segment is registered before the
+			// immediate-charge "/pix/{txid}" read so chi routes the literal "cobv" segment
+			// apart from a txid. Create generates the txid server-side (like immediate pix);
+			// get/update address it. Settlement notification (7.8) is reconciled through the
+			// shared C6 webhook (/webhooks/c6/{tenantRef}, C6-D), not a per-charge endpoint.
+			r.Post("/pix/cobv", s.handleCreatePixCobV)
+			r.Get("/pix/cobv/{txid}", s.handleGetPixCobV)
+			r.Put("/pix/cobv/{txid}", s.handleUpdatePixCobV)
+			r.Get("/pix/{txid}", s.handleGetPix)
+			// Unified hosted checkout — open a session (roteiro 9.a–9.c), reconcile it
+			// (grupo 10, GET) and cancel it (grupo 11, DELETE). The status webhook (grupo
+			// 12) reuses the shared /webhooks/c6/{tenantRef} handler below.
+			r.Post("/checkout", s.handleCreateCheckout)
+			r.Get("/checkout/{id}", s.handleGetCheckout)
+			r.Delete("/checkout/{id}", s.handleCancelCheckout)
+			// BolePix boletos — full lifecycle: register with fine/interest/discount
+			// variants (grupos 1–3), read by id (6.a), baixa/cancelamento (DELETE, grupo
+			// 4) and alteração de vencimento/validade/valor (PUT, grupo 5).
+			r.Post("/boletos", s.handleCreateBoleto)
+			r.Get("/boletos/{id}", s.handleGetBoleto)
+			r.Delete("/boletos/{id}", s.handleDeleteBoleto)
+			r.Put("/boletos/{id}", s.handleUpdateBoleto)
+			// DDA / agendamento de pagamentos (roteiro grupo 8): list the boletos open in
+			// the tenant's DDA (8.1), submit a payment group for the initial consult (8.2),
+			// read its items (8.3), trim items as a list (8.4) or one at a time (8.5) and
+			// submit the group for approval (8.6). The {id}/{itemID} path params are
+			// tenant-scoped in the use-case (a group owned by another tenant is 404, never a
+			// cross-tenant existence oracle).
+			r.Get("/dda/boletos", s.handleListDDABoletos)
+			r.Post("/dda/payment-groups", s.handleCreateDDAGroup)
+			r.Get("/dda/payment-groups/{id}/items", s.handleGetDDAGroupItems)
+			r.Delete("/dda/payment-groups/{id}/items", s.handleRemoveDDAGroupItems)
+			r.Delete("/dda/payment-groups/{id}/items/{itemID}", s.handleRemoveDDAGroupItem)
+			r.Post("/dda/payment-groups/{id}/submit", s.handleSubmitDDAGroup)
+			// Account statement (extrato, roteiro grupo 13): read the entries posted to the
+			// authenticated tenant's account over a period (inicio/fim, máx. 30 dias, 13.a).
+			// The tenant is derived from the credential, never the query — no parameter
+			// selects which tenant's extrato is read (threat H1/P1).
+			r.Get("/statement", s.handleGetStatement)
+
+			// Self-serve credential intake (SIN-69196 / trilha E2, flag-gated). An
+			// empresa-cliente rotates its OWN bank credential with its tenant token; the
+			// tenant is the authenticated caller (no selector → A01 designed out). It is
+			// registered ONLY when the flag is on, so with the flag off the route does not
+			// exist (rollback = config flip). It carries its OWN dedicated inbound limiter
+			// (Q1): a tight per-tenant bucket (burst 5, ~1 req/min) that emits Retry-After
+			// on a 429 and fails open on an internal fault — deliberately separate from the
+			// tenant-plane limiter above and from the outbound C6 limiter (SIN-68742), so a
+			// rare high-value credential write cannot be masked by ordinary traffic and
+			// vice versa.
+			if s.selfServeCredIntake {
+				r.Group(func(r chi.Router) {
+					const (
+						selfServeBurst      = 5          // ≤5 rotations in a burst
+						selfServeRefillPS   = 1.0 / 60.0 // ~1 token/minute sustained
+						selfServeRetryAfter = 60         // seconds advertised on a 429
+					)
+					r.Use(newRateLimiter(selfServeBurst, selfServeRefillPS, nil).middlewareSelfServeCred(selfServeRetryAfter))
+					r.Put("/bank-credential", s.handleTenantSetBankCredential)
+				})
+			}
+		})
 	})
 
 	// Admin plane (TB6) — admin auth, segregated from tenant plane. Every route
@@ -358,6 +400,15 @@ func (s *Server) Router() http.Handler {
 			r.Post("/tenants/{tenantID}/pricing", s.handleSetPrice)
 			r.Put("/tenants/{tenantID}/bank-credential", s.handleSetBankCredential)
 			r.Put("/tenants/{tenantID}/bank-certificate", s.handleSetBankCertificate)
+			// Account-key bootstrap (model (b), ADR-0011 §3 / SIN-69280): an admin mints
+			// the FIRST bearer key for a named Account — how the board provisions Verz's
+			// initial key, then hands it over a secure channel (never a public comment,
+			// same discipline as PAYMENT_CONSOLE_BOOTSTRAP_TOKEN). After that the Account
+			// self-rotates via POST /v1/account-key. It uses the same create==rotate path
+			// (Idempotency-Key required, display-once), and fails closed (503) when the
+			// minter is not wired. It is registered unconditionally on the admin plane so
+			// the first key can be provisioned before the tenant-facing flag is flipped.
+			r.Post("/accounts/{accountID}/account-key", s.handleAdminMintAccountKey)
 		})
 	})
 

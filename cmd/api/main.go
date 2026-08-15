@@ -257,6 +257,12 @@ func run() error {
 		// is on and the bearer has the ak_ shape; otherwise inert (model (a)).
 		AccountKeyAuth:     accountKeys,
 		AccountKeySelector: cfg.AccountKeySelector,
+		// Model (b) key emission/rotation (ADR-0011 §3 / SIN-69280): mints/rotates an
+		// Account's bearer key for POST /v1/account-key (self-rotate) and POST
+		// /admin/accounts/{id}/account-key (bootstrap). Backed by the same durable,
+		// hash-at-rest account-key store; the plaintext is returned once and never
+		// stored/logged (display-once).
+		AccountKeyMint: app.NewAccountKeyService(accountKeys, system.Clock{}),
 	})
 
 	httpServer := &stdhttp.Server{
