@@ -69,6 +69,12 @@ type Server struct {
 	// (accountKeySelector on AND accountKeyAuth wired); when nil the /v1 route is not
 	// registered and the admin route fails closed (503). See Config.AccountKeyMint.
 	accountKeyMint AccountKeyMinter
+	// clientProvisioner provisions an empresa-cliente (tenant) owned by the calling
+	// Account for the account-plane self-serve route (POST /v1/clients, model (b) /
+	// SIN-69281). Consulted only when model (b) is enabled (accountKeySelector on AND
+	// accountKeyAuth wired); when nil the route is registered under that gate but
+	// fails closed (503). See Config.ClientProvisioner.
+	clientProvisioner ClientProvisioner
 }
 
 // Config wires a Server's dependencies. Console and UI back the HTML admin
@@ -165,6 +171,13 @@ type Config struct {
 	// bootstrap route is always registered but fails closed (503) when this is nil.
 	// Optional: tests and model (a) deployments leave it nil.
 	AccountKeyMint AccountKeyMinter
+	// ClientProvisioner provisions an empresa-cliente (tenant) already bound to the
+	// calling Account for the model (b) self-serve route (POST /v1/clients, ADR-0011
+	// §4 / SIN-69281). Built over app.NewClientProvisioningService atop the tenant
+	// repository. The route is registered ONLY when model (b) is enabled
+	// (AccountKeySelector && AccountKeyAuth != nil); when this is nil the route fails
+	// closed (503). Optional: tests and model (a) deployments leave it nil.
+	ClientProvisioner ClientProvisioner
 }
 
 // NewServer builds a Server from its config.
@@ -193,6 +206,7 @@ func NewServer(c Config) *Server {
 		accountKeyAuth:      c.AccountKeyAuth,
 		accountKeySelector:  c.AccountKeySelector,
 		accountKeyMint:      c.AccountKeyMint,
+		clientProvisioner:   c.ClientProvisioner,
 	}
 }
 
@@ -285,6 +299,28 @@ func (s *Server) Router() http.Handler {
 				r.Use(accountKeyAuthMiddleware(s.accountKeyAuth))
 				r.Use(newRateLimiter(akRotateBurst, akRotateRefillPS, nil).middlewareAccountKeyRotate(akRotateRetryAfter))
 				r.Post("/account-key", s.handleRotateAccountKey)
+			})
+
+			// Empresa-cliente provisioning (model (b), ADR-0011 §4 / SIN-69281): a reseller
+			// Conta creates a new empresa-cliente (tenant) bound to ITS OWN Account and gets
+			// back the tenant id for the X-Client-Tenant selector. Like the account-key
+			// route it is authenticated by the account-key bearer itself
+			// (accountKeyAuthMiddleware) with NO tenant selector — the Account acts on itself
+			// to create a tenant that does not exist yet — so it lives in its OWN group that
+			// does NOT inherit the tenant choke-point below. The owning Account is taken from
+			// the authenticated context, never the body (A01/T6). Registered only in model
+			// (b) (flag on AND a key authenticator wired); a dedicated inbound limiter keyed
+			// on the Account (429 + Retry-After, fail-open) keeps this rare, high-value write
+			// from being masked by ordinary traffic and vice versa.
+			r.Group(func(r chi.Router) {
+				const (
+					clientProvBurst      = 10         // ≤10 provisions in a burst (onboarding)
+					clientProvRefillPS   = 1.0 / 60.0 // ~1 token/minute sustained
+					clientProvRetryAfter = 60         // seconds advertised on a 429
+				)
+				r.Use(accountKeyAuthMiddleware(s.accountKeyAuth))
+				r.Use(newRateLimiter(clientProvBurst, clientProvRefillPS, nil).middlewareClientProvision(clientProvRetryAfter))
+				r.Post("/clients", s.handleProvisionClient)
 			})
 		}
 
