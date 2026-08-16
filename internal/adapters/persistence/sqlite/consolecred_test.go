@@ -255,6 +255,32 @@ func TestConsoleReplayStoreRoundTripSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestConsoleAdaptersSurfaceDBErrors ensures every port method fails closed (returns
+// an error, never a silent success) when the underlying DB is unavailable — a closed
+// handle stands in for any transient store fault so the use-case layer's fail-closed
+// paths (Provisioned=true on read error, replay=replayed on error) are reachable.
+func TestConsoleAdaptersSurfaceDBErrors(t *testing.T) {
+	_, db := openVaultDB(t)
+	clk := fixedClock{t: time.Unix(1700000000, 0).UTC()}
+	cv := sqlite.NewConsoleCredentialVault(db, testCipher(t), clk)
+	rs := sqlite.NewConsoleReplayStore(db, clk)
+	_ = db.Close() // force every subsequent query/exec to error
+
+	hash, _ := domain.HashPassword("pw")
+	if err := cv.SaveCredential(context.Background(), domain.NewCredential("op", hash, "GEZDGNBVGY3TQOJQ")); err == nil {
+		t.Error("SaveCredential on closed DB = nil; want error")
+	}
+	if _, _, err := cv.GetCredential(context.Background()); err == nil {
+		t.Error("GetCredential on closed DB = nil; want error")
+	}
+	if err := rs.SetLastStep(context.Background(), "op", 7); err == nil {
+		t.Error("SetLastStep on closed DB = nil; want error")
+	}
+	if _, err := rs.LastStep(context.Background(), "op"); err == nil {
+		t.Error("LastStep on closed DB = nil; want error")
+	}
+}
+
 // buildConsoleService wires a ConsoleAuthService over the durable adapters at a given
 // clock (sessions stay in-memory — losing a session on restart is acceptable).
 func buildConsoleService(t *testing.T, db *sql.DB, clk fixedClock) *app.ConsoleAuthService {
