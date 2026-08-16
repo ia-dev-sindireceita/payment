@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/ia-dev-sindireceita/payment/internal/adapters/secret"
@@ -30,13 +31,55 @@ func openForReseal(oldCipher *secret.Cipher, sealed, aad []byte) ([]byte, error)
 	return nil, fmt.Errorf("reseal: cannot open blob with previous key: %w", err)
 }
 
+// ResealAll re-encrypts BOTH the bank_credentials and bank_certificates tables from
+// oldCipher to the new cipher inside a SINGLE transaction, so the two tables rotate
+// all-or-nothing (SIN-69372). If the certificate rewrite fails after the credential
+// rewrite has already been staged, the shared transaction is rolled back and NEITHER
+// table is committed — the vault stays fully readable with the OLD key (fail-closed,
+// reversible), and the operator can simply retry with the same (new, previous) pair.
+//
+// This is the path the vault-reseal command uses. The two vaults MUST share the same
+// *sql.DB (they do when wired from one handle in cmd/vault-reseal); a mismatch is a
+// wiring bug and is rejected fail-closed rather than silently splitting the rotation
+// back into two transactions. Returns the rows rewritten in each table.
+func ResealAll(ctx context.Context, cred *CredentialVault, cert *CertificateVault, oldCipher *secret.Cipher) (credN, certN int, err error) {
+	if oldCipher == nil {
+		return 0, 0, fmt.Errorf("reseal: previous cipher is required")
+	}
+	if cred == nil || cert == nil {
+		return 0, 0, fmt.Errorf("reseal: both credential and certificate vaults are required")
+	}
+	if cred.db != cert.db {
+		return 0, 0, fmt.Errorf("reseal: credential and certificate vaults must share one database handle for atomic rotation")
+	}
+
+	tx, err := cred.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("reseal: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	credN, err = cred.resealCredentialsTx(ctx, tx, oldCipher)
+	if err != nil {
+		return 0, 0, err
+	}
+	certN, err = cert.resealCertificatesTx(ctx, tx, oldCipher)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("reseal: commit: %w", err)
+	}
+	return credN, certN, nil
+}
+
 // Reseal re-encrypts every bank_credentials row from oldCipher to this vault's own
-// cipher, preserving the plaintext. It is the KEK-rotation and AAD-migration path
-// (SIN-69369): each sealed column is opened with oldCipher (via openForReseal, so
-// pre-row-binding blobs are upgraded) and re-sealed with the current cipher, bound
-// to the row's RowAAD(tenant, bank). The rewrite runs in ONE transaction: on any
-// error nothing is committed, so a failed rotation leaves the vault fully readable
-// with the OLD key (fail-closed, reversible). Returns the number of rows rewritten.
+// cipher, preserving the plaintext, in ONE transaction: on any error nothing is
+// committed, so a failed rotation leaves the vault fully readable with the OLD key
+// (fail-closed, reversible). It rotates only the credential table; to rotate the
+// credential and certificate tables atomically together use ResealAll. Returns the
+// number of rows rewritten.
 //
 // Operationally: set PAYMENT_BANK_VAULT_KEY to the NEW key and
 // PAYMENT_BANK_VAULT_KEY_PREVIOUS to the CURRENT key, then run the re-seal command
@@ -53,6 +96,23 @@ func (v *CredentialVault) Reseal(ctx context.Context, oldCipher *secret.Cipher) 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	n, err := v.resealCredentialsTx(ctx, tx, oldCipher)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("reseal credentials: commit: %w", err)
+	}
+	return n, nil
+}
+
+// resealCredentialsTx rewrites every bank_credentials row within the caller's
+// transaction, opening each sealed column with oldCipher (via openForReseal, so
+// pre-row-binding blobs are upgraded) and re-sealing with the current cipher, bound
+// to the row's RowAAD(tenant, bank). It never begins, commits, or rolls back tx —
+// the caller owns the transaction lifecycle so this rewrite can share one atomic
+// transaction with the certificate rewrite. Returns the number of rows rewritten.
+func (v *CredentialVault) resealCredentialsTx(ctx context.Context, tx *sql.Tx, oldCipher *secret.Cipher) (int, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT tenant_id, bank_id, secret_sealed, creditor_key_sealed FROM bank_credentials`)
 	if err != nil {
@@ -105,15 +165,14 @@ func (v *CredentialVault) Reseal(ctx context.Context, oldCipher *secret.Cipher) 
 		}
 		n++
 	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("reseal credentials: commit: %w", err)
-	}
 	return n, nil
 }
 
 // Reseal re-encrypts every bank_certificates row's sealed private key from
 // oldCipher to this vault's own cipher (see CredentialVault.Reseal for the full
-// contract). cert_pem is public and left untouched. Returns the rows rewritten.
+// contract) in ONE transaction. cert_pem is public and left untouched. To rotate the
+// certificate and credential tables atomically together use ResealAll. Returns the
+// rows rewritten.
 func (v *CertificateVault) Reseal(ctx context.Context, oldCipher *secret.Cipher) (int, error) {
 	if oldCipher == nil {
 		return 0, fmt.Errorf("reseal: previous cipher is required")
@@ -124,6 +183,21 @@ func (v *CertificateVault) Reseal(ctx context.Context, oldCipher *secret.Cipher)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	n, err := v.resealCertificatesTx(ctx, tx, oldCipher)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("reseal certificates: commit: %w", err)
+	}
+	return n, nil
+}
+
+// resealCertificatesTx rewrites every bank_certificates row's sealed private key
+// within the caller's transaction. Like resealCredentialsTx it never begins, commits,
+// or rolls back tx — the caller owns the lifecycle so both tables can share one atomic
+// transaction. Returns the number of rows rewritten.
+func (v *CertificateVault) resealCertificatesTx(ctx context.Context, tx *sql.Tx, oldCipher *secret.Cipher) (int, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT tenant_id, bank_id, key_pem_sealed FROM bank_certificates`)
 	if err != nil {
@@ -165,9 +239,6 @@ func (v *CertificateVault) Reseal(ctx context.Context, oldCipher *secret.Cipher)
 			return 0, fmt.Errorf("reseal certificates: write row: %w", err)
 		}
 		n++
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("reseal certificates: commit: %w", err)
 	}
 	return n, nil
 }

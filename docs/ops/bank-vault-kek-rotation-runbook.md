@@ -61,7 +61,8 @@ were sealed with a nil AAD; the re-seal upgrades them transparently — see §5)
    `cp "$PAYMENT_DB_PATH" "$PAYMENT_DB_PATH.pre-rotate.$(date -u +%Y%m%dT%H%M%SZ)"`
    (do this while the service is stopped so the file is consistent).
 3. **Run the re-seal** — decrypts every row with the OLD key and re-encrypts with
-   the NEW key, in one transaction per table (all-or-nothing):
+   the NEW key. Both tables (credentials AND certificates) are rewritten inside a
+   **single transaction** — all-or-nothing across the whole vault (SIN-69372):
 
    ```sh
    PAYMENT_DB_PATH=/data/payment.db \
@@ -99,9 +100,13 @@ the hot read path, so a genuine authentication failure at runtime stays fatal.
 
 ## 6. Rollback
 
-- **Re-seal failed / aborted:** nothing was committed. The vault is still
-  readable with the OLD key. Restore nothing; just fix the cause and re-run, or
-  restart the service with the OLD `PAYMENT_BANK_VAULT_KEY`.
+- **Re-seal failed / aborted:** nothing was committed — the tool rewrites BOTH
+  the credential and certificate tables in one transaction (SIN-69372), so a
+  failure anywhere (including a certificate error after the credential rows were
+  already staged) rolls the whole rotation back. The vault stays fully readable
+  with the OLD key, never half-rotated. Restore nothing; just fix the cause and
+  re-run with the same `(new, previous)` pair, or restart the service with the OLD
+  `PAYMENT_BANK_VAULT_KEY`.
 - **Re-seal succeeded but the new key is wrong/lost after cut-over:** stop the
   service, restore the pre-rotate backup from step 2 over `PAYMENT_DB_PATH`, set
   `PAYMENT_BANK_VAULT_KEY` back to the OLD value, and start. You are back to the

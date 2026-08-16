@@ -254,3 +254,138 @@ func TestResealNilPreviousCipher(t *testing.T) {
 		t.Fatal("nil previous cipher must be rejected (cert)")
 	}
 }
+
+// TestResealAllRotatesBothTables: the happy path rotates credentials AND
+// certificates together to the new KEK; afterwards both open with the new cipher and
+// no longer with the old one, and the returned counts reflect both tables.
+func TestResealAllRotatesBothTables(t *testing.T) {
+	t.Parallel()
+	_, db := openVaultDB(t)
+	ctx := context.Background()
+	oldC := cipherWithKey(t, 0x08)
+	newC := cipherWithKey(t, 0x09)
+	nb := time.Unix(1700000000, 0).UTC()
+	certPEM, keyPEM := genCertKeyPEM(t, "payment.verz.example", nb, nb.Add(365*24*time.Hour))
+
+	if err := credVaultWith(t, db, oldC).SetBankCredential(ctx, "tnt", "c6", "cid", "the-secret"); err != nil {
+		t.Fatalf("set cred: %v", err)
+	}
+	if err := certVaultWith(t, db, oldC).SetBankCertificate(ctx, ports.BankCertificate{
+		TenantID: "tnt", BankID: "c6", CertPEM: certPEM, KeyPEM: keyPEM,
+	}); err != nil {
+		t.Fatalf("set cert: %v", err)
+	}
+
+	credV := credVaultWith(t, db, newC)
+	certV := certVaultWith(t, db, newC)
+	credN, certN, err := sqlite.ResealAll(ctx, credV, certV, oldC)
+	if err != nil {
+		t.Fatalf("reseal all: %v", err)
+	}
+	if credN != 1 || certN != 1 {
+		t.Fatalf("want 1 cred + 1 cert resealed, got %d + %d", credN, certN)
+	}
+
+	got, err := credV.GetBankCredential(ctx, "tnt", "c6")
+	if err != nil || got.Secret != "the-secret" {
+		t.Fatalf("credential not preserved under new key: %+v err=%v", got, err)
+	}
+	if _, err := certV.GetBankCertificateMeta(ctx, "tnt", "c6"); err != nil {
+		t.Fatalf("certificate not readable under new key: %v", err)
+	}
+	// The old cipher must no longer open either table.
+	if _, err := credVaultWith(t, db, oldC).GetBankCredential(ctx, "tnt", "c6"); err == nil {
+		t.Fatal("old key must not open credentials after ResealAll")
+	}
+}
+
+// TestResealAllCertFailureRollsBackCredentials is the SIN-69372 acceptance criterion:
+// when the certificate rewrite fails AFTER the credential rewrite has been staged in
+// the shared transaction, NOTHING is committed — the credential row still opens with
+// the OLD key. This proves the two tables rotate all-or-nothing and the tool can be
+// retried with the same (new, previous) pair instead of leaving a half-rotated vault.
+func TestResealAllCertFailureRollsBackCredentials(t *testing.T) {
+	t.Parallel()
+	dsn, db := openVaultDB(t)
+	ctx := context.Background()
+	oldC := cipherWithKey(t, 0x0A)
+	newC := cipherWithKey(t, 0x0B)
+	wrongC := cipherWithKey(t, 0xAB) // seals the cert key with a key ResealAll cannot open
+
+	// A credential row that ResealAll CAN open (sealed with the real old key).
+	if err := credVaultWith(t, db, oldC).SetBankCredential(ctx, "tnt", "c6", "cid", "keep-me"); err != nil {
+		t.Fatalf("set cred: %v", err)
+	}
+
+	// A certificate row whose sealed private key is sealed with the WRONG key, so the
+	// certificate leg of ResealAll fails its openForReseal — after the credential leg
+	// has already staged its UPDATE in the shared transaction.
+	poison, err := wrongC.SealWithAAD([]byte("bad-key-pem"), secret.RowAAD("tnt", "c6"))
+	if err != nil {
+		t.Fatalf("seal poison: %v", err)
+	}
+	rdb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer func() { _ = rdb.Close() }()
+	if _, err := rdb.ExecContext(ctx,
+		`INSERT INTO bank_certificates (tenant_id, bank_id, cert_pem, key_pem_sealed, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"tnt", "c6", "public-cert-pem", poison, "2023-11-14T22:13:20Z"); err != nil {
+		t.Fatalf("raw insert poisoned cert: %v", err)
+	}
+
+	credV := credVaultWith(t, db, newC)
+	certV := certVaultWith(t, db, newC)
+	if _, _, err := sqlite.ResealAll(ctx, credV, certV, oldC); err == nil {
+		t.Fatal("ResealAll must fail when the certificate leg cannot open its blob")
+	}
+
+	// The credential row must be UNCHANGED: it still opens with the OLD key, proving
+	// the staged credential UPDATE was rolled back with the failed certificate leg.
+	got, err := credVaultWith(t, db, oldC).GetBankCredential(ctx, "tnt", "c6")
+	if err != nil {
+		t.Fatalf("credential must be unchanged after aborted ResealAll (old key must still open): %v", err)
+	}
+	if got.Secret != "keep-me" {
+		t.Fatalf("credential plaintext changed: %q", got.Secret)
+	}
+	// And it must NOT open with the new key (never partially rotated).
+	if _, err := credVaultWith(t, db, newC).GetBankCredential(ctx, "tnt", "c6"); err == nil {
+		t.Fatal("credential must not open with the new key after an aborted ResealAll")
+	}
+}
+
+// TestResealAllRejectsMismatchedDBs: the two vaults must share one *sql.DB, else the
+// rotation cannot be atomic — a mismatch is rejected fail-closed before any write.
+func TestResealAllRejectsMismatchedDBs(t *testing.T) {
+	t.Parallel()
+	_, db1 := openVaultDB(t)
+	_, db2 := openVaultDB(t)
+	ctx := context.Background()
+	c := cipherWithKey(t, 0x0C)
+	credV := credVaultWith(t, db1, c)
+	certV := certVaultWith(t, db2, c)
+	if _, _, err := sqlite.ResealAll(ctx, credV, certV, cipherWithKey(t, 0x0D)); err == nil {
+		t.Fatal("ResealAll with vaults on different DB handles must be rejected")
+	}
+}
+
+// TestResealAllNilArgs: nil previous cipher and nil vaults are rejected (fail-closed).
+func TestResealAllNilArgs(t *testing.T) {
+	t.Parallel()
+	_, db := openVaultDB(t)
+	ctx := context.Background()
+	credV := newCredentialVault(t, db)
+	certV := newCertificateVault(t, db)
+	if _, _, err := sqlite.ResealAll(ctx, credV, certV, nil); err == nil {
+		t.Fatal("nil previous cipher must be rejected")
+	}
+	if _, _, err := sqlite.ResealAll(ctx, nil, certV, cipherWithKey(t, 0x0E)); err == nil {
+		t.Fatal("nil credential vault must be rejected")
+	}
+	if _, _, err := sqlite.ResealAll(ctx, credV, nil, cipherWithKey(t, 0x0E)); err == nil {
+		t.Fatal("nil certificate vault must be rejected")
+	}
+}
