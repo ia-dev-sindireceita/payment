@@ -378,6 +378,21 @@ table.data th.num {
   color: var(--color-warning);
 }
 
+/* code-block displays a one-off secret (the generated chave-de-Conta) so it can be
+   selected and copied. It wraps on any character since the token has no spaces. */
+.code-block {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2, #f4f6f8);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.95rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+
 /* --- EmptyState --- */
 .empty {
   text-align: center;

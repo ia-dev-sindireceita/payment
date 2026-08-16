@@ -35,6 +35,24 @@ func TestNewAccountActionEntry(t *testing.T) {
 	}
 }
 
+func TestNewAccountActionEntry_MintAccountKey(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(1700000000, 0).UTC()
+	// account.key_mint (SIN-69379) is an account-scoped action: it is accepted by
+	// NewAccountActionEntry, records the account id explicitly and leaves the tenant
+	// empty. It carries no secret by construction (the constructor has no such param).
+	e, err := audit.NewAccountActionEntry("id-k", "op", audit.ActionMintAccountKey, "reseller-1", at)
+	if err != nil {
+		t.Fatalf("mint action rejected: %v", err)
+	}
+	if e.Action() != audit.ActionMintAccountKey {
+		t.Fatalf("action = %q, want %q", e.Action(), audit.ActionMintAccountKey)
+	}
+	if e.AccountID() != "reseller-1" || e.TenantID() != "" {
+		t.Fatalf("account=%q tenant=%q", e.AccountID(), e.TenantID())
+	}
+}
+
 func TestNewAccountActionEntry_Invariants(t *testing.T) {
 	t.Parallel()
 	at := time.Unix(1, 0).UTC()

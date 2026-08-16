@@ -27,6 +27,8 @@
   {{if not .Account.IsSelf}}{{template "account_rename_form" .}}{{end}}
 </div>
 
+{{if not .Account.IsSelf}}{{template "account_key_card" .AccountKey}}{{end}}
+
 <div class="topbar">
   <h2>Empresas-clientes</h2>
   <a class="btn btn--primary" href="/console/accounts/{{.Account.ID}}/tenants/new"

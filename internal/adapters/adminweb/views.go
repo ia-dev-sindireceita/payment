@@ -488,6 +488,32 @@ type AccountDetailView struct {
 	// Errors carries per-field validation messages for the inline rename form
 	// (ADR-0012 §1); nil on a normal render (a nil map indexes to "" in templates).
 	Errors map[string]string
+	// AccountKey backs the "Chave-de-Conta (API)" card (SIN-69379). It is rendered
+	// only for a real (non-self) Conta and, on a normal detail render, carries no
+	// secret — only the CSRF token and a fresh idempotency nonce for the generate
+	// action. The secret is populated only on the dedicated mint response's card
+	// swap (display-once), never here.
+	AccountKey AccountKeyCardView
+}
+
+// AccountKeyCardView backs the "Chave-de-Conta (API)" card on the account detail
+// (SIN-69379): the admin action that mints/rotates an Account's rotatable bearer key
+// (model (b), ADR-0011 §3 / SIN-69280). It is rendered ONLY for a real (non-self)
+// Conta.
+//
+// Secret is non-empty EXACTLY on the render immediately after a successful mint
+// (display-once, ADR-0010) and is NEVER carried by any other view or persisted — a
+// normal detail render, and every replay, leave it "". IdempotencyToken is a fresh
+// per-render nonce the generate form submits, so an accidental double-submit is
+// collapsed by the account-key service's idempotency guard (it never mints twice and
+// never re-shows the secret). Replayed marks that display-once replay outcome so the
+// card can explain why no secret is shown rather than silently blanking it.
+type AccountKeyCardView struct {
+	Account          AccountView
+	CSRF             string
+	IdempotencyToken string
+	Secret           string
+	Replayed         bool
 }
 
 // NewAccountTenantView backs the "create empresa-cliente under this account" form.

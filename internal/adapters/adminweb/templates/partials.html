@@ -342,6 +342,47 @@
 <span id="account-name" hx-swap-oob="true">{{.Name}}</span>
 {{end}}
 
+{{/* account_key_card renders the "Chave-de-Conta (API)" card on the account detail
+     (SIN-69379): the admin action that mints/rotates an Account's rotatable bearer
+     key (model (b), ADR-0011 §3). Rendered ONLY for a real (non-self) Conta. The
+     generate form posts to the account-key route and swaps ONLY #account-key-card
+     (outerHTML), so minting never disturbs the rest of the screen. The secret is
+     shown exactly ONCE, right after a mint (display-once, ADR-0010): a normal detail
+     load never re-renders it. hx-disabled-elt disables the button in-flight so a
+     rapid double-click cannot fire twice, and a per-render idempotency nonce guards a
+     double-submit server-side (the service never mints twice nor re-shows the
+     secret). Output is auto-escaped by html/template. Data is an AccountKeyCardView. */}}
+{{define "account_key_card"}}
+<div id="account-key-card" class="card">
+  <h2>Chave-de-Conta (API)</h2>
+  {{if .Secret}}
+  <div class="banner banner--success" role="status">
+    Chave gerada. <strong>Copie agora</strong> — por segurança ela é exibida uma única vez e não pode ser recuperada depois.
+  </div>
+  <div class="field">
+    <label for="account-key-secret">Chave (bearer)</label>
+    <pre class="code-block"><code id="account-key-secret">{{.Secret}}</code></pre>
+    <span class="help">Envie-a por um canal seguro. Ela substitui qualquer chave anterior desta Conta.</span>
+  </div>
+  {{else if .Replayed}}
+  <div class="banner banner--warning" role="status">
+    A chave já foi gerada nesta ação e, por segurança, é exibida uma única vez. Se você não a copiou, gere uma nova abaixo — a anterior deixa de valer.
+  </div>
+  {{end}}
+  <p class="muted">A Chave-de-Conta autentica esta Conta na API (modelo revenda). Gerar uma nova chave <strong>invalida imediatamente</strong> a chave anterior desta Conta.</p>
+  <form method="post" action="/console/accounts/{{.Account.ID}}/account-key"
+        hx-post="/console/accounts/{{.Account.ID}}/account-key"
+        hx-target="#account-key-card" hx-swap="outerHTML" hx-disabled-elt="find button"
+        hx-confirm="Gerar uma nova Chave-de-Conta para {{.Account.Name}}? A chave atual (se houver) deixa de funcionar imediatamente.">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="hidden" name="idempotency_key" value="{{.IdempotencyToken}}">
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">{{if .Secret}}Rotacionar chave{{else}}Gerar chave-de-Conta{{end}}</button>
+    </div>
+  </form>
+</div>
+{{end}}
+
 {{define "status_header_oob"}}
 <span id="tenant-status" hx-swap-oob="true">{{template "status_badge" .}}</span>
 <span id="tenant-status-action" hx-swap-oob="true">{{template "status_action" .}}</span>

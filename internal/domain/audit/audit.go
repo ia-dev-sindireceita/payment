@@ -102,6 +102,14 @@ const (
 	// generated a statement for WHICH empresa-cliente and WHEN. It carries no
 	// secret and no PII — an invoice is ids + endpoints + money only.
 	ActionInvoiceGenerated Action = "invoice.generated"
+
+	// ActionMintAccountKey records the mint/rotation of an Account's rotatable
+	// bearer key from the admin console (model (b), ADR-0011 §3 / SIN-69280,
+	// SIN-69379). It is account-scoped like ActionRenameAccount: the target is an
+	// Account (there is no tenant), so it names WHO minted a key for WHICH Account
+	// and WHEN — never the secret plaintext itself, which is display-once and never
+	// stored or logged (the constructor has no secret parameter, threat C1/C4).
+	ActionMintAccountKey Action = "account.key_mint"
 )
 
 // recurrenceActionByStatus maps a recurrence.RecStatus string to the audit Action
@@ -128,7 +136,7 @@ func (a Action) valid() bool {
 		ActionActivateAccount, ActionRemoveBankConfig,
 		ActionSettlementAmountMismatch, ActionRecCreated, ActionRecApproved,
 		ActionRecRejected, ActionRecExpired, ActionRecCancelled, ActionCobRCreated,
-		ActionSetBankCertificate, ActionInvoiceGenerated:
+		ActionSetBankCertificate, ActionInvoiceGenerated, ActionMintAccountKey:
 		return true
 	default:
 		return false
@@ -217,7 +225,7 @@ func NewEntry(id, operatorID string, action Action, tenantID string, at time.Tim
 // account constructor and land with an empty tenant_id).
 func accountActionValid(action Action) bool {
 	switch action {
-	case ActionRenameAccount, ActionSuspendAccount, ActionActivateAccount:
+	case ActionRenameAccount, ActionSuspendAccount, ActionActivateAccount, ActionMintAccountKey:
 		return true
 	default:
 		return false

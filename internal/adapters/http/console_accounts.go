@@ -100,8 +100,9 @@ func (s *Server) consoleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	av := adminweb.ToAccountView(a)
 	s.ui.BodyWithOOB(w, http.StatusOK, "account_detail",
-		adminweb.AccountDetailView{Base: s.consoleBase(r, a.Name(), "accounts"), Account: adminweb.ToAccountView(a)},
+		adminweb.AccountDetailView{Base: s.consoleBase(r, a.Name(), "accounts"), Account: av, AccountKey: s.newAccountKeyCard(r, av)},
 		adminweb.OOBPart{Name: "toast_oob", Data: adminweb.ToastData{Kind: "success", Message: "Conta criada."}})
 }
 
@@ -119,11 +120,64 @@ func (s *Server) consoleAccountDetail(w http.ResponseWriter, r *http.Request) {
 		s.consoleError(w, err)
 		return
 	}
+	av := adminweb.ToAccountView(a)
 	s.ui.Page(w, r, "account_detail", http.StatusOK, adminweb.AccountDetailView{
-		Base:    s.consoleBase(r, a.Name(), "accounts"),
-		Account: adminweb.ToAccountView(a),
-		Tenants: adminweb.ToTenantViews(tenants),
+		Base:       s.consoleBase(r, a.Name(), "accounts"),
+		Account:    av,
+		Tenants:    adminweb.ToTenantViews(tenants),
+		AccountKey: s.newAccountKeyCard(r, av),
 	})
+}
+
+// newAccountKeyCard builds the "Chave-de-Conta (API)" card view-model for a real
+// (non-self) account: the CSRF token plus a FRESH per-render idempotency nonce for
+// the generate action (SIN-69379). It never carries a secret — the plaintext is set
+// only on the dedicated mint response's card swap (display-once).
+func (s *Server) newAccountKeyCard(r *http.Request, av adminweb.AccountView) adminweb.AccountKeyCardView {
+	return adminweb.AccountKeyCardView{
+		Account:          av,
+		CSRF:             CSRFToken(r.Context()),
+		IdempotencyToken: newIdempotencyToken(),
+	}
+}
+
+// consoleGenerateAccountKey mints (create==rotate) the Account's rotatable bearer
+// key from the console and swaps the card with the plaintext shown ONCE (display-
+// once, ADR-0010; SIN-69379). It reuses the same emission use-case as the JSON
+// routes (SIN-69280): the previous key is invalidated immediately, and the mandatory
+// per-render idempotency nonce collapses an accidental double-submit into
+// ErrAccountKeyAlreadyRotated — which is rendered as the display-once notice (no
+// second secret) rather than an error. A missing/absent account yields the clean
+// consoleError mapping (404 / 503); a self-account is refused by the use-case (400).
+// RBAC (RoleAdmin) + CSRF are inherited from the console admin mutation group.
+func (s *Server) consoleGenerateAccountKey(w http.ResponseWriter, r *http.Request) {
+	acctID := chi.URLParam(r, "acctId")
+	a, err := s.console.GetAccount(r.Context(), acctID)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	av := adminweb.ToAccountView(a)
+	idemKey := strings.TrimSpace(r.PostFormValue("idempotency_key"))
+	secret, err := s.console.GenerateAccountKey(r.Context(), a.ID(), idemKey)
+	if errors.Is(err, app.ErrAccountKeyAlreadyRotated) {
+		// Idempotent replay (double-submit): the key was already minted under this
+		// nonce and shown once. Never re-show it — render the display-once notice with
+		// a fresh nonce so a deliberate regeneration still works.
+		card := s.newAccountKeyCard(r, av)
+		card.Replayed = true
+		s.ui.Partial(w, http.StatusOK, "account_key_card", card)
+		return
+	}
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	// Render the card ONCE with the secret + a fresh nonce for a later rotation. The
+	// secret is written straight into the (auto-escaped) HTML and never logged.
+	card := s.newAccountKeyCard(r, av)
+	card.Secret = secret
+	s.ui.Partial(w, http.StatusOK, "account_key_card", card)
 }
 
 func (s *Server) consoleSuspendAccount(w http.ResponseWriter, r *http.Request) {

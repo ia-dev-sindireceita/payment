@@ -223,6 +223,59 @@ func (s *ConsoleService) accountTransition(ctx context.Context, id string, actio
 	return a, nil
 }
 
+// GenerateAccountKey mints (create==rotate) an Account's rotatable bearer key from
+// the admin console and returns the plaintext ONCE (display-once, ADR-0010). It is
+// the console-plane sibling of the admin JSON bootstrap route (POST
+// /admin/accounts/{id}/account-key, SIN-69280): the SAME create==rotate use-case
+// (AccountKeyService), so the previous key is invalidated immediately, the secret is
+// returned exactly once, and the mandatory idempotency key collapses a double-submit
+// into no second mint — only the driving surface differs (session + CSRF console vs.
+// an admin Bearer).
+//
+// The account must exist (clean 404, no enumeration oracle). A derived self-account
+// is refused: a chave-de-Conta belongs to a real Conta, not the legacy 1:1
+// "acct-<tenantID>" backfill (mirrors the rename refusal, keeps the invariant that
+// only real Contas authenticate under model (b)). idemKey is mandatory (the service
+// also enforces it, defense-in-depth); on replay the service returns
+// ErrAccountKeyAlreadyRotated with NO plaintext and this method propagates it so the
+// handler can render the display-once notice instead of a second secret.
+//
+// The mint is audited (account.key_mint records who/which-account/when — NEVER the
+// secret, which has no audit parameter, threat C1/C4). Fail-closed: an audit-append
+// error surfaces rather than silently dropping the forensic trail, matching the
+// console's other privileged account mutations (accountTransition). The audit runs
+// only AFTER a successful mint, so a replay (which mints nothing) records nothing.
+func (s *ConsoleService) GenerateAccountKey(ctx context.Context, acctID, idemKey string) (string, error) {
+	if s.accounts == nil {
+		return "", ErrAccountsUnavailable
+	}
+	if s.accountKeys == nil {
+		return "", ErrAccountKeysUnavailable
+	}
+	acctID = strings.TrimSpace(acctID)
+	a, err := s.accounts.FindAccountByID(ctx, acctID)
+	if err != nil {
+		return "", fmt.Errorf("resolve account: %w", err)
+	}
+	if account.IsSelfAccountID(a.ID()) {
+		return "", shared.NewValidationError("account", "cannot mint a key for a self-account")
+	}
+	secret, err := s.accountKeys.RotateAccountKey(ctx, a.ID(), idemKey)
+	if err != nil {
+		// Includes ErrAccountKeyAlreadyRotated (replay): propagate so the handler
+		// renders the display-once notice; no mint happened, so nothing to audit.
+		return "", err
+	}
+	e, err := audit.NewAccountActionEntry(s.ids.NewID(), OperatorIDFromContext(ctx), audit.ActionMintAccountKey, a.ID(), s.clock.Now())
+	if err != nil {
+		return "", fmt.Errorf("build audit entry: %w", err)
+	}
+	if err := s.audit.Append(ctx, e); err != nil {
+		return "", fmt.Errorf("append audit entry: %w", err)
+	}
+	return secret, nil
+}
+
 // ListTenantsByAccount returns the empresas-clientes owned by an account,
 // newest-first. It filters the cross-tenant listing by each tenant's effective
 // account, so a self-account resolves to exactly its 1:1 legacy tenant and a real

@@ -552,6 +552,12 @@ func (s *Server) Router() http.Handler {
 				// derived self-account. CSRF rides the global body hx-headers.
 				r.Patch("/accounts/{acctId}", s.consoleRenameAccount)
 				r.Post("/accounts/{acctId}/tenants", s.consoleCreateAccountTenant)
+				// Generate/rotate the Conta's rotatable bearer key (chave-de-Conta) from
+				// the console (SIN-69379). Same create==rotate + display-once emission as
+				// the JSON routes (SIN-69280); the plaintext is shown once and never
+				// logged. Registered unconditionally like the admin bootstrap route so the
+				// first key can be provisioned before the model (b) flag is flipped.
+				r.Post("/accounts/{acctId}/account-key", s.consoleGenerateAccountKey)
 				r.Post("/accounts/{acctId}/invoices", s.consoleGenerateAccountInvoices)
 				r.Post("/tenants", s.consoleCreateTenant)
 				r.Post("/tenants/{id}/suspend", s.consoleSuspendTenant)

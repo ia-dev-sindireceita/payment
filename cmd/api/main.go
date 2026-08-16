@@ -178,6 +178,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Account-key emission use-case (model (b), ADR-0011 §3 / SIN-69280): mints/
+	// rotates an Account's rotatable bearer key (create==rotate, display-once). One
+	// instance backs BOTH the JSON routes (Config.AccountKeyMint) and the console
+	// "gerar chave-de-Conta" action (ConsoleDeps.AccountKeys), so the idempotency
+	// guard and the display-once discipline are shared across surfaces (SIN-69379).
+	accountKeyService := app.NewAccountKeyService(accountKeys, system.Clock{})
+
 	console := app.NewConsoleService(app.ConsoleDeps{
 		Tenants:         store,
 		Accounts:        store,
@@ -195,6 +202,7 @@ func run() error {
 		Audit:           store,
 		Clock:           system.Clock{},
 		IDs:             system.IDProvider{},
+		AccountKeys:     accountKeyService,
 	})
 
 	// Self-contained console login (ADR-0001 Opção B, SIN-69265): username +
@@ -272,7 +280,7 @@ func run() error {
 		// /admin/accounts/{id}/account-key (bootstrap). Backed by the same durable,
 		// hash-at-rest account-key store; the plaintext is returned once and never
 		// stored/logged (display-once).
-		AccountKeyMint: app.NewAccountKeyService(accountKeys, system.Clock{}),
+		AccountKeyMint: accountKeyService,
 		// Model (b) empresa-cliente provisioning (ADR-0011 §4 / SIN-69281): a reseller
 		// Conta creates a new empresa-cliente via POST /v1/clients, bound to the Account
 		// resolved from its account-key (server-side, never the body — A01/T6). Backed by

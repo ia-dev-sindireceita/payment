@@ -66,6 +66,25 @@ type ConsoleService struct {
 	// carries a fresh token, so a deliberate regeneration is never collapsed and
 	// the append-only invariant (SIN-69121) stands.
 	invoiceGuard *invoiceBatchGuard
+	// accountKeys mints/rotates an Account's rotatable bearer key for the console
+	// "gerar chave-de-Conta" action (model (b), ADR-0011 §3 / SIN-69280, SIN-69379).
+	// Optional: a nil minter disables the console emission path (GenerateAccountKey
+	// returns ErrAccountKeysUnavailable, mapped to 503) so wiring-light tests that
+	// don't exercise it keep working. It reuses the SAME create==rotate +
+	// display-once + idempotency-guard use-case as the /v1 and admin JSON routes; the
+	// console adds only the session/CSRF surface and the account-scoped audit entry.
+	accountKeys AccountKeyMinter
+}
+
+// AccountKeyMinter mints (create==rotate) an Account's rotatable bearer key and
+// returns the plaintext ONCE (display-once, ADR-0010; model (b), ADR-0011 §3 /
+// SIN-69280). The console depends on this narrow port (accept-narrow) so the admin
+// "gerar chave-de-Conta" action reuses the exact emission path — including the
+// mandatory idempotency key and the never-returned-twice guarantee — that backs the
+// /v1 self-rotate and the admin-plane bootstrap routes. Satisfied by
+// *AccountKeyService.
+type AccountKeyMinter interface {
+	RotateAccountKey(ctx context.Context, accountID, idemKey string) (string, error)
 }
 
 // ErrInvoicesUnavailable is returned by the invoice use-cases when the console
@@ -170,6 +189,11 @@ type ConsoleDeps struct {
 	Audit ports.AuditLog
 	Clock ports.Clock
 	IDs   ports.IDProvider
+	// AccountKeys mints/rotates an Account's bearer key for the console "gerar
+	// chave-de-Conta" action (SIN-69379). Optional: nil disables the console
+	// emission path (GenerateAccountKey returns ErrAccountKeysUnavailable). Wired in
+	// production from the same *AccountKeyService that backs the JSON emission routes.
+	AccountKeys AccountKeyMinter
 }
 
 // NewConsoleService wires a ConsoleService from its dependencies. A nil
@@ -202,6 +226,7 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 		clock:         d.Clock,
 		ids:           d.IDs,
 		invoiceGuard:  newInvoiceBatchGuard(invoiceBatchIdempotencyTTL),
+		accountKeys:   d.AccountKeys,
 	}
 }
 
