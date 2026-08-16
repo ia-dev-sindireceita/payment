@@ -47,8 +47,11 @@ func run() error {
 	if cfg.BankVaultKeyPrevious == "" {
 		return fmt.Errorf("PAYMENT_BANK_VAULT_KEY_PREVIOUS (the OLD key) is required")
 	}
+	// Identical keys are the one-time AAD migration case (§5 of the runbook): the
+	// KEK does not change but every row is re-sealed to upgrade its AAD binding.
+	// A genuine KEK rotation supplies two different keys. Both are valid work.
 	if cfg.BankVaultKey == cfg.BankVaultKeyPrevious {
-		return fmt.Errorf("PAYMENT_BANK_VAULT_KEY and PAYMENT_BANK_VAULT_KEY_PREVIOUS are identical — nothing to rotate")
+		log.Print("vault-reseal: previous and new keys are identical — running the AAD-only migration (no KEK change)")
 	}
 
 	newCipher, err := decodeCipher(cfg.BankVaultKey)
