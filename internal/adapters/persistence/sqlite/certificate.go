@@ -61,7 +61,7 @@ func (v *CertificateVault) SetBankCertificate(ctx context.Context, cert ports.Ba
 		return shared.NewValidationError("key_pem", "is required")
 	}
 	cert.BankID = secret.DefaultBankID(cert.BankID)
-	sealedKey, err := v.cipher.Seal([]byte(cert.KeyPEM))
+	sealedKey, err := v.cipher.SealWithAAD([]byte(cert.KeyPEM), secret.RowAAD(cert.TenantID, cert.BankID))
 	if err != nil {
 		return fmt.Errorf("seal private key: %w", err)
 	}
