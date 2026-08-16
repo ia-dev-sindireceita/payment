@@ -39,7 +39,15 @@ type Config struct {
 	// the boot closed (secret.NewCipher rejects a non-32-byte key) rather than
 	// silently degrading to in-memory. This is a secret — it is never logged.
 	BankVaultKey string
-	RabbitURL    string
+	// BankVaultKeyPrevious is the hex-encoded AES-256 KEK that PROTECTED the vault
+	// rows BEFORE a key rotation. It is consumed ONLY by the offline vault-reseal
+	// command (SIN-69369): to rotate the KEK, set PAYMENT_BANK_VAULT_KEY to the NEW
+	// key and PAYMENT_BANK_VAULT_KEY_PREVIOUS to the outgoing key, then run the
+	// re-seal so every row is decrypted with the old key and re-encrypted with the
+	// new one. The running api process never reads it. Unset in steady state; it is
+	// a secret and is never logged. See docs/ops/bank-vault-kek-rotation-runbook.md.
+	BankVaultKeyPrevious string
+	RabbitURL            string
 	// SecureCookies controls the Secure attribute on cookies the HTTP adapter
 	// sets (CSRF token, and the admin-UI session cookie). It is a deployment fact,
 	// NOT a per-request decision: the service runs plaintext ListenAndServe behind
@@ -162,6 +170,7 @@ func FromEnv() Config {
 		WebhookRefs:           parseKV(os.Getenv("PAYMENT_WEBHOOK_REFS")),
 		BankCreds:             bankCreds,
 		BankVaultKey:          os.Getenv("PAYMENT_BANK_VAULT_KEY"),
+		BankVaultKeyPrevious:  os.Getenv("PAYMENT_BANK_VAULT_KEY_PREVIOUS"),
 		RabbitURL:             os.Getenv("PAYMENT_RABBIT_URL"),
 		SecureCookies:         getenvBool("PAYMENT_SECURE_COOKIES", true),
 		TrustedProxyHops:      getenvInt("PAYMENT_TRUSTED_PROXY_HOPS", 0),
