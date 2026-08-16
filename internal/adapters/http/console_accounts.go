@@ -101,7 +101,12 @@ func (s *Server) consoleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.ui.BodyWithOOB(w, http.StatusOK, "account_detail",
-		adminweb.AccountDetailView{Base: s.consoleBase(r, a.Name(), "accounts"), Account: adminweb.ToAccountView(a)},
+		adminweb.AccountDetailView{
+			Base:                s.consoleBase(r, a.Name(), "accounts"),
+			Account:             adminweb.ToAccountView(a),
+			AccountKeySelector:  s.accountKeySelector,
+			AccountKeyIdemToken: newIdempotencyToken(),
+		},
 		adminweb.OOBPart{Name: "toast_oob", Data: adminweb.ToastData{Kind: "success", Message: "Conta criada."}})
 }
 
@@ -123,6 +128,65 @@ func (s *Server) consoleAccountDetail(w http.ResponseWriter, r *http.Request) {
 		Base:    s.consoleBase(r, a.Name(), "accounts"),
 		Account: adminweb.ToAccountView(a),
 		Tenants: adminweb.ToTenantViews(tenants),
+		// Model (b) account-key emission surface (ADR-0011 / SIN-69280 admin bootstrap),
+		// flag-gated. The section itself is further hidden for self-accounts (ShowAccountKey).
+		AccountKeySelector:  s.accountKeySelector,
+		AccountKeyIdemToken: newIdempotencyToken(),
+	})
+}
+
+// consoleGenerateAccountKey mints (create==rotate, display-once) an Account's
+// rotatable bearer key from the admin console and swaps the "Chave de Acesso" card to
+// show the plaintext exactly once (ADR-0011 §3 / SIN-69280; same mint path as POST
+// /admin/accounts/{id}/account-key). The section — and thus this write — exists only
+// when the model (b) selector flag is on; with it off the route fails closed with the
+// clean 404 (non-discoverable), and a nil mint service yields 503. Admin RBAC + CSRF
+// are inherited from the console mutation group. The hidden idempotency nonce dedups a
+// double-submit into the first mint: the replay returns 409, which htmx does not swap,
+// so the card keeps displaying the first response's key rather than clobbering it.
+func (s *Server) consoleGenerateAccountKey(w http.ResponseWriter, r *http.Request) {
+	if !s.accountKeySelector {
+		// Feature off: behave as if the surface does not exist.
+		s.consoleError(w, shared.ErrNotFound)
+		return
+	}
+	acctID := chi.URLParam(r, "acctId")
+	a, err := s.console.GetAccount(r.Context(), acctID)
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	if s.accountKeyMint == nil {
+		writeError(w, http.StatusServiceUnavailable, "account key issuance unavailable")
+		return
+	}
+	// The nonce is always emitted by a render; a missing one means a hand-crafted
+	// request, so fail closed rather than mint under an empty idempotency key.
+	idemKey := strings.TrimSpace(r.PostFormValue("idempotency_key"))
+	if idemKey == "" {
+		writeError(w, http.StatusBadRequest, "missing idempotency token")
+		return
+	}
+	secret, err := s.accountKeyMint.RotateAccountKey(r.Context(), a.ID(), idemKey)
+	if errors.Is(err, app.ErrAccountKeyAlreadyRotated) {
+		// Double-submit of the same nonce: the key was already minted on the first
+		// request and its plaintext delivered on that response. It is never shown again
+		// (display-once). 409 with no swap keeps the first key on screen.
+		writeError(w, http.StatusConflict, "account key already generated for this action")
+		return
+	}
+	if err != nil {
+		s.consoleError(w, err)
+		return
+	}
+	// Swap just the card to reveal the plaintext ONCE, minting a fresh nonce so a
+	// deliberate follow-up regeneration still rotates. The secret is written straight
+	// into the rendered card and never logged.
+	s.ui.Partial(w, http.StatusOK, "account_key_card", adminweb.AccountDetailView{
+		Account:             adminweb.ToAccountView(a),
+		AccountKeySelector:  true,
+		AccountKeySecret:    secret,
+		AccountKeyIdemToken: newIdempotencyToken(),
 	})
 }
 

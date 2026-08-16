@@ -342,6 +342,38 @@
 <span id="account-name" hx-swap-oob="true">{{.Name}}</span>
 {{end}}
 
+{{/* account_key_card is the admin "Chave de Acesso" section: it mints (create==rotate)
+     the Account's rotatable bearer key for model (b) (ADR-0011 §3 / SIN-69280) and,
+     right after generation, shows the plaintext ONCE (display-once, ADR-0010). Data is
+     an AccountDetailView. It posts to itself and swaps only #account-key-card
+     (outerHTML), so generating a key never disturbs the rest of the screen. CSRF rides
+     the global body hx-headers (X-CSRF-Token), like the suspend/rename controls. The
+     hidden idempotency nonce dedups a double-submit into the first mint so the shown
+     key is never invalidated by a second click; a fresh render mints a fresh nonce, so
+     a deliberate regeneration still rotates. There is NO read surface: the value here is
+     the only time the key is ever shown, and it is never logged. */}}
+{{define "account_key_card"}}
+<div id="account-key-card" class="card">
+  <h2>Chave de Acesso</h2>
+  <p class="muted">Chave-de-Conta do modelo revenda: autentica as chamadas de API desta Conta em conjunto com o seletor <code>X-Client-Tenant</code>. É exibida uma única vez, no momento da geração, e nunca é rearmazenada em texto — guarde-a com segurança.</p>
+  {{if .AccountKeySecret}}
+  <div class="banner banner--success" role="status">
+    <p><strong>Chave gerada.</strong> Copie agora — ela não será exibida novamente.</p>
+    <p><code class="secret">{{.AccountKeySecret}}</code></p>
+    <p class="muted">Entregue esta chave por um canal seguro (nunca em comentário público). A chave anterior, se havia, foi invalidada.</p>
+  </div>
+  {{end}}
+  <form hx-post="/console/accounts/{{.Account.ID}}/account-key"
+        hx-target="#account-key-card" hx-swap="outerHTML"
+        hx-confirm="Gerar uma nova chave-de-Conta para {{.Account.Name}}? Qualquer chave anterior é invalidada imediatamente; integrações que ainda a usam param de autenticar até adotarem a nova.">
+    <input type="hidden" name="idempotency_key" value="{{.AccountKeyIdemToken}}">
+    <div class="form-actions">
+      <button class="btn btn--primary" type="submit">Gerar chave-de-Conta</button>
+    </div>
+  </form>
+</div>
+{{end}}
+
 {{define "status_header_oob"}}
 <span id="tenant-status" hx-swap-oob="true">{{template "status_badge" .}}</span>
 <span id="tenant-status-action" hx-swap-oob="true">{{template "status_action" .}}</span>

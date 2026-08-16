@@ -488,6 +488,27 @@ type AccountDetailView struct {
 	// Errors carries per-field validation messages for the inline rename form
 	// (ADR-0012 §1); nil on a normal render (a nil map indexes to "" in templates).
 	Errors map[string]string
+	// AccountKeySelector gates the "Chave de Acesso" section (model (b) account-key,
+	// ADR-0011 / SIN-69280). The section renders only when the
+	// PAYMENT_ACCOUNT_KEY_SELECTOR flag is on; with it off the account-key emission
+	// surface does not exist in the console at all.
+	AccountKeySelector bool
+	// AccountKeySecret is the freshly-minted account-key plaintext (ak_…), carried
+	// ONLY on the swap response immediately after generation (display-once, ADR-0010).
+	// It is empty on every normal render; the value is never stored or re-fetched.
+	AccountKeySecret string
+	// AccountKeyIdemToken is a per-render nonce embedded in the generate form so a
+	// double-submit is deduped into the first mint (SIN-69184 pattern) and never
+	// invalidates the key just shown.
+	AccountKeyIdemToken string
+}
+
+// ShowAccountKey reports whether the account-key section renders: only when the
+// model (b) selector flag is on and this is a real (non-self) Conta. A derived
+// self-account (legacy 1:1) transacts with its tenant token, so it has no
+// account-key to mint.
+func (v AccountDetailView) ShowAccountKey() bool {
+	return v.AccountKeySelector && !v.Account.IsSelf
 }
 
 // NewAccountTenantView backs the "create empresa-cliente under this account" form.

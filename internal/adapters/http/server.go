@@ -553,6 +553,10 @@ func (s *Server) Router() http.Handler {
 				r.Patch("/accounts/{acctId}", s.consoleRenameAccount)
 				r.Post("/accounts/{acctId}/tenants", s.consoleCreateAccountTenant)
 				r.Post("/accounts/{acctId}/invoices", s.consoleGenerateAccountInvoices)
+				// Mint (create==rotate, display-once) a Conta's model (b) account-key from
+				// the admin console (ADR-0011 §3 / SIN-69280). Flag-gated inside the handler
+				// (PAYMENT_ACCOUNT_KEY_SELECTOR): with the selector off it fails closed 404.
+				r.Post("/accounts/{acctId}/account-key", s.consoleGenerateAccountKey)
 				r.Post("/tenants", s.consoleCreateTenant)
 				r.Post("/tenants/{id}/suspend", s.consoleSuspendTenant)
 				r.Post("/tenants/{id}/activate", s.consoleActivateTenant)
