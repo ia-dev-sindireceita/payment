@@ -421,13 +421,28 @@ func newBankRegistry(cfg config.Config, creds ports.CredentialStore, certs c6.Ce
 	// closed. When PAYMENT_C6_REC_JWKS_URL is unset the verifier stays nil and the
 	// recurrence reads fail secure (ErrUnavailable) — the correct interim until F4
 	// go-live (SIN-66061).
+	//
+	// The JWKS endpoint is process-wide with no natural tenant, so its request stamps
+	// none and the vault mTLS transport would fall back to the §8 bootstrap cert; on a
+	// vault-only deployment that cert is absent and the handshake fails closed
+	// (SIN-69375). PAYMENT_C6_REC_JWKS_MTLS_TENANT designates a tenant whose vault cert
+	// is presented on the fetch so recurrence verification works without a §8 bootstrap
+	// cert. Empty keeps the prior tenantless behaviour.
 	if cfg.C6.RecJWKSURL != "" {
-		verifier, err := c6.NewJWSVerifier(cfg.C6.RecJWKSURL, c6cfg.HTTPClient)
+		var vopts []c6.VerifierOption
+		if cfg.C6.RecJWKSMTLSTenant != "" {
+			vopts = append(vopts, c6.WithMTLSTenant(cfg.C6.RecJWKSMTLSTenant))
+		}
+		verifier, err := c6.NewJWSVerifier(cfg.C6.RecJWKSURL, c6cfg.HTTPClient, vopts...)
 		if err != nil {
 			return nil, err
 		}
 		c6cfg.RecurrenceVerifier = verifier
-		log.Print("api: C6 recurrence JWS verifier configured")
+		if cfg.C6.RecJWKSMTLSTenant != "" {
+			log.Print("api: C6 recurrence JWS verifier configured (JWKS fetch uses designated mTLS tenant)")
+		} else {
+			log.Print("api: C6 recurrence JWS verifier configured")
+		}
 	}
 	c6p, err := c6.New(c6cfg, creds)
 	if err != nil {
