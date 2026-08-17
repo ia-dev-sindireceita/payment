@@ -1,8 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ia-dev-sindireceita/payment/internal/domain/billing"
@@ -89,3 +93,55 @@ func TestResolvePriceOrFree(t *testing.T) {
 func errWrap(err error) error { return errJoin(err) }
 
 func errJoin(err error) error { return errors.Join(errors.New("adapter: query failed"), err) }
+
+// syncBuf is a mutex-guarded io.Writer so swapping the process-wide slog default
+// in this test cannot data-race with other parallel tests in the package that
+// also log to the default logger.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// TestResolvePriceOrFreeEmitsUnpricedLog asserts the observability contract: the
+// free path emits exactly the structured Info line billing.endpoint_unpriced_free
+// with tenant_id+endpoint and nothing else (no PII, no secret), while the priced
+// path emits no such line. Not parallel: it swaps the global slog default.
+func TestResolvePriceOrFreeEmitsUnpricedLog(t *testing.T) {
+	var out syncBuf
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Free path logs.
+	if _, err := resolvePriceOrFree(context.Background(), stubPricing{err: shared.ErrNotFound}, "t-log", "boleto.create"); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	logged := out.String()
+	if !strings.Contains(logged, "billing.endpoint_unpriced_free") {
+		t.Fatalf("want unpriced-free log line, got: %q", logged)
+	}
+	if !strings.Contains(logged, "tenant_id=t-log") || !strings.Contains(logged, "endpoint=boleto.create") {
+		t.Fatalf("log must carry tenant_id+endpoint, got: %q", logged)
+	}
+
+	// Priced path is silent (no unpriced-free line for a configured price).
+	priced, _ := billing.NewEndpointPricing("t-log", "boleto.create", 500)
+	if _, err := resolvePriceOrFree(context.Background(), stubPricing{price: priced}, "t-log", "boleto.create"); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if got := strings.Count(out.String(), "billing.endpoint_unpriced_free"); got != 1 {
+		t.Fatalf("priced path must not emit the unpriced-free log; total occurrences = %d", got)
+	}
+}

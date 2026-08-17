@@ -262,6 +262,10 @@ func TestRegisterBoletoNoPriceIsFree(t *testing.T) {
 	if p == nil || p.TxID() == "" {
 		t.Fatal("boleto not created for unpriced (free) endpoint")
 	}
+	// Payment reserved normally under the free contract.
+	if _, err := h.store.FindPaymentByIdempotencyKey(context.Background(), tn.ID(), "k1"); err != nil {
+		t.Fatalf("free create must reserve a payment, got %v", err)
+	}
 	entries, err := h.store.ListLedgerEntries(context.Background(), tn.ID())
 	if err != nil {
 		t.Fatalf("list ledger: %v", err)
