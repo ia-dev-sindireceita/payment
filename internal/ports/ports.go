@@ -498,6 +498,20 @@ type CreditorKeyWriter interface {
 	SetCreditorKey(ctx context.Context, tenantID, creditorKey string) error
 }
 
+// CredentialEnumerator is the read-only enumeration port for the reconciliation
+// worker (SIN-69585 / B2). It lists tenant IDs that have a C6 credential in the
+// store WITHOUT exposing any secret — only the non-secret tenant id is returned.
+// The single-bank scope (BankIDC6) is intentional: the reconcile sweep is a C6-only
+// operation. It is kept separate from CredentialStore (ISP) so the sweep service
+// needs only the narrowest capability.
+type CredentialEnumerator interface {
+	// ListTenantsWithC6Credential returns every tenant_id for which a C6 bank
+	// credential exists (whether or not the credential also has a creditor key — the
+	// reconciler's TryRegister handles the empty-key case as a silent skip). Order is
+	// unspecified. An empty result is not an error.
+	ListTenantsWithC6Credential(ctx context.Context) ([]string, error)
+}
+
 // CredentialInvalidator is the optional hook the admin plane invokes right after
 // a tenant's bank credential is (re)written, so an adapter that caches state
 // keyed on that credential — notably the C6 OAuth2 client_credentials token
