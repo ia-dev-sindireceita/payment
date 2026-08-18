@@ -383,11 +383,16 @@ func run() error {
 		// resolved from its account-key (server-side, never the body — A01/T6). Backed by
 		// the same durable tenant repository as the admin plane; Idempotency-Key dedups
 		// retries so a lost-response retry does not create a duplicate empresa-cliente.
-		// The webhook-ref minter (SIN-69559 / F1) makes provisioning ALSO mint a durable C6
-		// callback ref (display-once) into webhookRefStore, closing the self-serve settlement
-		// gap (SIN-69557): the new client can receive webhooks immediately, no restart.
-		ClientProvisioner: app.NewClientProvisioningService(deps.Tenants, deps.IDs, system.Clock{}).
-			WithWebhookRefMinter(app.NewWebhookRefMintService(webhookRefStore)),
+		// Client-create does NOT mint a webhook ref (SIN-69584 / B1): the single durable ref
+		// is minted at the in-flow C6 registration convergence below (WebhookRegistrar, F2)
+		// once the client's credential + PIX key complete, so the provisioning response never
+		// exposes a capability secret and no orphan ref is left behind (the Verz orphan).
+		ClientProvisioner: app.NewClientProvisioningService(deps.Tenants, deps.IDs, system.Clock{}),
+		// Tenant-scoped webhook-ref revocation for the admin Bearer plane
+		// (POST /admin/tenants/{id}/webhook-refs/revoke, SIN-69584 / B1): soft-deletes every
+		// active ref for a tenant so a leaked/orphan ref stops authenticating an inbound C6
+		// callback (same-401/404 non-oracle miss). Over the SAME durable ref store F1/F2 use.
+		WebhookRefRevoker: app.NewWebhookRefRevocationService(webhookRefStore),
 		// In-flow C6 webhook registration (SIN-69560 / F2 of SIN-69558): the moment a
 		// self-serve client's credential + PIX key complete (a self-serve credential/
 		// certificate write or an operator PIX-key set), register its PIX settlement

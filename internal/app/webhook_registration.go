@@ -54,6 +54,15 @@ type WebhookRegistrationService struct {
 	logger    *slog.Logger
 }
 
+// webhookRefMinter mints a durable per-tenant C6 webhook callback ref and returns the
+// plaintext ONCE (SIN-69559 / F1). It is the narrow slice of WebhookRefMintService the
+// in-flow registrar needs (accept-narrow); satisfied by *WebhookRefMintService. Since
+// SIN-69584 the in-flow registration convergence (F2) is the SOLE minter — client-create
+// no longer mints — so a tenant converges on exactly one ref here.
+type webhookRefMinter interface {
+	MintWebhookRef(ctx context.Context, tenantID string) (plaintext string, err error)
+}
+
 // NewWebhookRegistrationService wires the in-flow registrar over the credential store
 // (to resolve the PIX key from the vault), the PSP webhook-registrar port, the F1 ref
 // minter, and the public callback base origin. If ANY dependency is missing (nil store/

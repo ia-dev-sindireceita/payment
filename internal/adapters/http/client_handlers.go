@@ -24,17 +24,6 @@ type ClientProvisioner interface {
 	ProvisionClient(ctx context.Context, accountID, name, idemKey string) (*tenant.Tenant, error)
 }
 
-// ClientWebhookProvisioner is the webhook-aware superset of ClientProvisioner
-// (SIN-69559 / F1): it provisions the empresa-cliente AND mints a durable per-tenant C6
-// webhook callback ref, returning the plaintext ref DISPLAY-ONCE. The handler prefers
-// this method when the wired provisioner implements it (so a fresh client can receive
-// webhooks with no operator edit and no restart) and falls back to ProvisionClient
-// otherwise. The ref is a capability secret: it is returned to the caller exactly once
-// and is never logged.
-type ClientWebhookProvisioner interface {
-	ProvisionClientWithWebhook(ctx context.Context, accountID, name, idemKey string) (t *tenant.Tenant, webhookRef string, err error)
-}
-
 // createClientRequest is the (optional) provisioning body. It carries ONLY an
 // optional name: there is deliberately no account_id field, and DisallowUnknownFields
 // makes a body that tries to smuggle one a 400 rather than a silently-ignored field
@@ -44,18 +33,18 @@ type createClientRequest struct {
 }
 
 // clientView is the provisioning response: the new empresa-cliente's tenant id (for
-// the X-Client-Tenant selector), its owning Account (echoed from the key, never
-// client input), its name, and — DISPLAY-ONCE — the minted webhook ref and its callback
-// path (SIN-69559 / F1). WebhookRef is a capability secret: it is present only on the
-// first successful provision (an idempotent replay omits it) and MUST be stored by the
-// caller / registered with C6; the server never returns it again. Both webhook fields
-// are omitempty so the legacy no-webhook wiring (and replays) render an unchanged body.
+// the X-Client-Tenant selector), its owning Account (echoed from the key, never client
+// input) and its name.
+//
+// It deliberately carries NO webhook ref (SIN-69584 / B1). Client-create no longer mints
+// a callback ref — the single durable ref is minted at the in-flow C6 registration
+// convergence (SIN-69560 / F2) and never leaves the process (only its hash is stored).
+// A Conta does not need the ref: the C6 PSP calls the webhook, not the Conta. Removing
+// it from this body closes the double-ref / orphan-ref leak (the Verz orphan).
 type clientView struct {
-	TenantID    string `json:"tenant_id"`
-	AccountID   string `json:"account_id"`
-	Name        string `json:"name"`
-	WebhookRef  string `json:"webhook_ref,omitempty"`
-	WebhookPath string `json:"webhook_path,omitempty"`
+	TenantID  string `json:"tenant_id"`
+	AccountID string `json:"account_id"`
+	Name      string `json:"name"`
 }
 
 // handleProvisionClient is the account-plane self-serve provisioning route (POST
@@ -94,28 +83,14 @@ func (s *Server) handleProvisionClient(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	// Prefer the webhook-aware provisioning path (SIN-69559 / F1): it mints a durable
-	// per-tenant C6 callback ref so the fresh client can receive webhooks with no
-	// operator edit and no restart. The plaintext ref is returned DISPLAY-ONCE below and
-	// never logged. Fall back to the plain path when no webhook provisioner is wired.
-	var (
-		t          *tenant.Tenant
-		webhookRef string
-		err        error
-	)
-	if wp, ok := s.clientProvisioner.(ClientWebhookProvisioner); ok {
-		t, webhookRef, err = wp.ProvisionClientWithWebhook(r.Context(), accountID, req.Name, idemKey)
-	} else {
-		t, err = s.clientProvisioner.ProvisionClient(r.Context(), accountID, req.Name, idemKey)
-	}
+	// Provision the empresa-cliente WITHOUT minting a webhook ref (SIN-69584 / B1): the
+	// single durable ref is minted later at the in-flow C6 registration convergence
+	// (SIN-69560 / F2), so this response never carries a capability secret and a fresh
+	// client holds zero refs until its credential + PIX key complete.
+	t, err := s.clientProvisioner.ProvisionClient(r.Context(), accountID, req.Name, idemKey)
 	if err != nil {
 		writeDomainError(w, err)
 		return
 	}
-	view := clientView{TenantID: t.ID(), AccountID: t.AccountID(), Name: t.Name()}
-	if webhookRef != "" {
-		view.WebhookRef = webhookRef
-		view.WebhookPath = "/webhooks/c6/" + webhookRef
-	}
-	writeJSON(w, http.StatusCreated, view)
+	writeJSON(w, http.StatusCreated, clientView{TenantID: t.ID(), AccountID: t.AccountID(), Name: t.Name()})
 }

@@ -578,6 +578,14 @@ paths:
         A credencial bancária da nova empresa-cliente segue por
         `PUT /v1/bank-credential` self-serve (SIN-69196), agora endereçável pelo
         seletor. `Idempotency-Key` obrigatório (dedup em retry).
+
+        **Webhook (SIN-69584 / B1):** este endpoint **não** cunha nem devolve
+        `webhook_ref`/`webhook_path`. A **única** ref de callback C6 nasce no
+        ponto de convergência in-flow (credencial + chave PIX completas,
+        SIN-69560 / F2) e o texto-claro **nunca** sai do processo (só o hash é
+        persistido). A Conta não precisa da ref — quem chama o webhook é o PSP
+        C6, não a Conta. Uma empresa-cliente recém-criada tem **zero** refs até a
+        convergência, e depois exatamente **uma**.
       security:
         - accountKeyAuth: []
       parameters:
@@ -823,6 +831,47 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/InternalError" }
+
+  /admin/tenants/{tenantID}/webhook-refs/revoke:
+    post:
+      operationId: adminRevokeWebhookRefs
+      tags: [admin]
+      summary: Revogar (soft-delete) as refs de webhook de uma empresa-cliente
+      description: >-
+        Revoga **todas** as refs de callback C6 ativas de uma empresa-cliente
+        (SIN-69584 / B1). Soft-delete: as linhas ficam para auditoria; uma ref
+        revogada passa a resolver como **miss** idêntico a uma ref inexistente
+        no caminho inbound (mesma-`401`/`404` anti-enumeração, sem oráculo). Como
+        o store é **hash-only**, o operador não tem o texto-claro da ref
+        órfã/vazada — por isso a revogação é **por-tenant** (revoga o conjunto
+        ativo, não uma ref específica). **Idempotente:** um tenant sem ref ativa
+        retorna `200` com `revoked: 0`.
+
+
+        **Ordem segura:** revogar-antes-de-re-registrar abre uma janela em que o
+        inbound sob a ref antiga falha-fechado. Para a ref **órfã** (que o C6
+        nunca chama) é seguro revogar já; NÃO é rotação user-facing (o texto-claro
+        nunca sai do processo). Depois, F2/sweep (SIN-69590 / B2) cunha uma ref
+        nova e limpa.
+      security:
+        - adminAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PathTenantID"
+      responses:
+        "200":
+          description: Refs ativas revogadas (contagem; `0` se não havia nenhuma).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookRefRevocation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503":
+          description: Store de refs não montado (fail-closed — nada foi revogado).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /admin/accounts/{accountID}/account-key:
     post:
@@ -1087,6 +1136,19 @@ components:
           description: Identificador da empresa-cliente. Use-o no header `X-Client-Tenant`.
         account_id: { type: string, description: Conta dona (derivada da chave). }
         name: { type: string }
+
+    WebhookRefRevocation:
+      type: object
+      description: >-
+        Resultado da revogação por-tenant das refs de webhook (SIN-69584 / B1).
+        Não carrega segredo: o store é hash-only, então nenhum texto-claro existiu
+        aqui para vazar.
+      properties:
+        tenant_id: { type: string, description: Empresa-cliente cujas refs foram revogadas. }
+        revoked:
+          type: integer
+          description: Quantas refs ativas foram revogadas (0 se não havia nenhuma).
+          example: 1
 
     SelfServeBankCredentialRequest:
       type: object

@@ -87,6 +87,11 @@ type Server struct {
 	// never affects the write response. When nil (stub bank / feature not wired) the
 	// self-serve write paths skip the registration entirely. See Config.WebhookRegistrar.
 	webhookReg WebhookInFlowRegistrar
+	// webhookRefRevoker soft-deletes a tenant's active webhook refs for the admin Bearer
+	// revoke route (POST /admin/tenants/{id}/webhook-refs/revoke, SIN-69584 / B1). When
+	// nil the route is registered under admin auth but fails closed (503). See
+	// Config.WebhookRefRevoker.
+	webhookRefRevoker WebhookRefRevoker
 }
 
 // WebhookInFlowRegistrar is the narrow slice of app.WebhookRegistrationService the
@@ -211,6 +216,11 @@ type Config struct {
 	// nil (stub bank / feature not wired, e.g. tests and stub deployments) the self-serve
 	// write paths skip the registration entirely.
 	WebhookRegistrar WebhookInFlowRegistrar
+	// WebhookRefRevoker backs the admin Bearer, tenant-scoped webhook-ref revocation route
+	// (POST /admin/tenants/{id}/webhook-refs/revoke, SIN-69584 / B1). Built over
+	// app.NewWebhookRefRevocationService atop the durable ref store. When nil the route is
+	// registered under admin auth but fails closed (503). Optional: tests leave it nil.
+	WebhookRefRevoker WebhookRefRevoker
 }
 
 // NewServer builds a Server from its config.
@@ -242,6 +252,7 @@ func NewServer(c Config) *Server {
 		clientProvisioner:      c.ClientProvisioner,
 		accountOutboundWebhook: c.AccountOutboundWebhook,
 		webhookReg:             c.WebhookRegistrar,
+		webhookRefRevoker:      c.WebhookRefRevoker,
 	}
 }
 
@@ -488,6 +499,10 @@ func (s *Server) Router() http.Handler {
 			r.Post("/tenants/{tenantID}/pricing", s.handleSetPrice)
 			r.Put("/tenants/{tenantID}/bank-credential", s.handleSetBankCredential)
 			r.Put("/tenants/{tenantID}/bank-certificate", s.handleSetBankCertificate)
+			// Tenant-scoped webhook-ref revocation (SIN-69584 / B1): soft-delete every
+			// active C6 callback ref for a tenant so a leaked/orphan ref stops
+			// authenticating an inbound callback (same non-oracle 401/404 miss). Idempotent.
+			r.Post("/tenants/{tenantID}/webhook-refs/revoke", s.handleRevokeWebhookRefs)
 			// Account-key bootstrap (model (b), ADR-0011 §3 / SIN-69280): an admin mints
 			// the FIRST bearer key for a named Account — how the board provisions Verz's
 			// initial key, then hands it over a secure channel (never a public comment,

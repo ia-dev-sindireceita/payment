@@ -94,6 +94,37 @@ curl -sS -X POST https://<base>/v1/clients \
 - **Credencial bancária** da nova empresa-cliente: em seguida, via
   `PUT /v1/bank-credential` self-serve (SIN-69196), endereçada pelo seletor do
   passo 4. O dinheiro liquida direto na conta da empresa-cliente (PSP-Indireto).
+- **Webhook C6 (SIN-69584 / B1):** a resposta **não** traz `webhook_ref`/
+  `webhook_path`, e é **de propósito** — o client-create **não** cunha ref. A
+  **única** ref de callback nasce quando a credencial + a chave PIX ficam prontas
+  (registro in-flow, SIN-69560 / F2); o texto-claro nunca sai do processo (só o
+  hash é persistido). Quem chama o webhook é o **C6**, não a Conta — a Conta não
+  precisa da ref. Uma empresa-cliente recém-criada tem **zero** refs até a
+  convergência, e depois exatamente **uma**.
+
+## 3b. Webhook C6 — revogar uma ref órfã/vazada (SIN-69584 / B1)
+
+Se uma ref precisar ser invalidada (ex.: a ref órfã histórica da Verz, criada
+antes de o client-create parar de cunhar), use a rota admin **tenant-scoped**:
+
+```
+curl -sS -X POST https://<base>/admin/tenants/<tenant_id>/webhook-refs/revoke \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+# 200 → { "tenant_id": "<tenant_id>", "revoked": 1 }   # 0 se não havia ref ativa
+```
+
+- **Soft-delete:** as linhas ficam para auditoria; a ref revogada passa a
+  resolver como **miss** idêntico a uma ref inexistente no inbound (mesma-`401`/
+  `404` anti-enumeração, sem oráculo).
+- **Por-tenant, não por-ref:** o store é **hash-only**, então o operador não tem
+  o texto-claro da ref órfã — a rota revoga **todas** as refs ativas do tenant.
+- **Idempotente:** rodar de novo num tenant sem ref ativa retorna `revoked: 0`.
+- **⚠️ Ordem segura (revogar-antes-de-re-registrar):** revogar abre uma janela em
+  que o inbound sob a ref antiga **falha-fechado**. Para a ref **órfã** (que o C6
+  **nunca** chama) é seguro revogar já — **não** é uma rotação user-facing (o
+  texto-claro nunca existiu fora do processo). Depois, o registro in-flow F2 (ou
+  o sweep B2, SIN-69590) cunha uma ref nova e limpa. **Não** revogue uma ref que
+  o C6 está chamando ativamente sem já ter o re-registro pronto.
 
 ## 4. Usar o seletor em cada chamada de negócio
 

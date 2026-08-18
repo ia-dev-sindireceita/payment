@@ -138,8 +138,10 @@ func TestWebhookAuthNoStoreIsEnvOnly(t *testing.T) {
 	}
 }
 
-// clientWebhookResponse mirrors the /v1/clients body including the F1 webhook fields.
-type clientWebhookResponse struct {
+// clientProvisionResponse mirrors the /v1/clients body. Since SIN-69584 / B1 it carries
+// NO webhook fields; the extra webhook_ref/webhook_path tags below stay so the test can
+// assert the server does NOT emit them (they must decode empty).
+type clientProvisionResponse struct {
 	TenantID    string `json:"tenant_id"`
 	AccountID   string `json:"account_id"`
 	Name        string `json:"name"`
@@ -147,11 +149,14 @@ type clientWebhookResponse struct {
 	WebhookPath string `json:"webhook_path"`
 }
 
-// TestProvisionClientReturnsDurableWebhookRef is the end-to-end F1 acceptance at the
-// handler: POST /v1/clients mints a durable ref (display-once in the body), and that
-// SAME ref — read back from the store as if after a restart — authenticates to the new
-// tenant. An idempotent replay omits the ref (display-once).
-func TestProvisionClientReturnsDurableWebhookRef(t *testing.T) {
+// TestProvisionClientMintsNoWebhookRef is the SIN-69584 / B1 acceptance at the handler:
+// POST /v1/clients provisions the empresa-cliente but does NOT mint or expose a webhook
+// ref. The single durable ref is minted later at the in-flow C6 registration convergence
+// (SIN-69560 / F2), so a fresh client holds ZERO refs and the response never leaks a
+// capability secret. Replaces the former F1 mint-on-create acceptance (the client-create
+// minting it exercised was removed by CTO decision on SIN-69584 — "colapsar
+// ProvisionClientWithWebhook").
+func TestProvisionClientMintsNoWebhookRef(t *testing.T) {
 	t.Parallel()
 	keys := persistence.NewAccountKeyStore(system.Clock{})
 	seeded, err := keys.PutKey(context.Background(), acctSeeded)
@@ -167,8 +172,7 @@ func TestProvisionClientReturnsDurableWebhookRef(t *testing.T) {
 		WebhookAuth:        auth,
 		AccountKeyAuth:     keys,
 		AccountKeySelector: true,
-		ClientProvisioner: app.NewClientProvisioningService(tenants, system.IDProvider{}, system.Clock{}).
-			WithWebhookRefMinter(app.NewWebhookRefMintService(refStore)),
+		ClientProvisioner:  app.NewClientProvisioningService(tenants, system.IDProvider{}, system.Clock{}),
 	})
 	handler := srv.Router()
 
@@ -177,38 +181,37 @@ func TestProvisionClientReturnsDurableWebhookRef(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("want 201, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	var v clientWebhookResponse
+	var v clientProvisionResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !webhookref.Valid(v.WebhookRef) {
-		t.Fatalf("response webhook_ref not well-formed: %q", v.WebhookRef)
+	if v.TenantID == "" || v.AccountID == "" {
+		t.Fatalf("provision must return tenant + account, got %+v", v)
 	}
-	if v.WebhookPath != "/webhooks/c6/"+v.WebhookRef {
-		t.Fatalf("webhook_path = %q, want /webhooks/c6/<ref>", v.WebhookPath)
+	// The response must NOT carry a webhook ref/path (no capability secret leaked).
+	if v.WebhookRef != "" || v.WebhookPath != "" {
+		t.Fatalf("client-create must not expose a webhook ref, got ref=%q path=%q", v.WebhookRef, v.WebhookPath)
 	}
-	// Durable: the minted ref authenticates to the new tenant via a fresh authenticator
-	// over the same store (simulating a restart that lost the env).
-	fresh := httpadapter.NewStaticTokenAuth(nil, nil, nil).WithWebhookRefStore(refStore)
-	id, ok := fresh.AuthenticateWebhook(v.WebhookRef)
-	if !ok || id.TenantID != v.TenantID {
-		t.Fatalf("minted ref auth = (%+v, %v), want tenant %s", id, ok, v.TenantID)
+	// The response body must not even contain the keys (belt-and-suspenders vs a future
+	// tag drift): decode into a raw map and assert their absence.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
 	}
-
-	// Idempotent replay: same client, NO ref re-shown.
-	rec2 := do(t, handler, http.MethodPost, clientsPath, seeded,
-		map[string]string{"Idempotency-Key": "cli-1"}, map[string]string{"name": "Loja X"})
-	if rec2.Code != http.StatusCreated {
-		t.Fatalf("replay want 201, got %d", rec2.Code)
+	if _, ok := raw["webhook_ref"]; ok {
+		t.Fatal("response must not contain a webhook_ref key")
 	}
-	var v2 clientWebhookResponse
-	if err := json.Unmarshal(rec2.Body.Bytes(), &v2); err != nil {
-		t.Fatalf("decode replay: %v", err)
+	if _, ok := raw["webhook_path"]; ok {
+		t.Fatal("response must not contain a webhook_path key")
 	}
-	if v2.TenantID != v.TenantID {
-		t.Fatalf("replay tenant = %s, want %s", v2.TenantID, v.TenantID)
+	// ZERO refs minted for the new tenant: revoking the tenant's active refs reports 0
+	// (the revoke primitive is the port's own soft-delete, so this is a real-store probe,
+	// no mock). A mint-on-create would have left exactly one to revoke.
+	n, err := refStore.RevokeWebhookRefs(context.Background(), v.TenantID)
+	if err != nil {
+		t.Fatalf("probe active refs: %v", err)
 	}
-	if v2.WebhookRef != "" {
-		t.Fatalf("replay must omit webhook_ref (display-once), got %q", v2.WebhookRef)
+	if n != 0 {
+		t.Fatalf("client-create minted %d webhook ref(s), want 0", n)
 	}
 }
