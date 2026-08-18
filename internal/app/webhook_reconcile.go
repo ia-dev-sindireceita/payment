@@ -20,7 +20,7 @@ import (
 //   - Respects ctx cancellation (no goroutine leak).
 //   - Observability: one Info log per sweep with eligible/confirmed/skipped counts.
 type WebhookReconcileWorker struct {
-	enabled   bool
+	enabled    bool
 	enumerator ports.CredentialEnumerator
 	registrar  *WebhookRegistrationService
 	logger     *slog.Logger
