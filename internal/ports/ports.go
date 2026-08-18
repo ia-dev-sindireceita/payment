@@ -108,17 +108,27 @@ type AccountKeyStore interface {
 // argument, and the interface stays swappable (in-memory <-> durable sqlite) with
 // identical behaviour.
 type WebhookRefStore interface {
-	// PutWebhookRef binds a minted ref (identified only by refSHA) to tenantID. The
-	// caller has already generated the plaintext ref and returned it display-once; only
-	// its hash reaches here. Persisting a ref for an unknown tenant fails (referential
-	// integrity), so a ref can never dangle.
+	// PutWebhookRef binds a minted ref (identified only by refSHA) to tenantID with
+	// SUPERSEDE semantics (SIN-69588 / B1): any ref currently active for tenantID is
+	// revoked in the same atomic step before the new one is inserted, so a tenant has
+	// AT MOST ONE active callback ref at a time. The caller has already generated the
+	// plaintext ref and returned it display-once; only its hash reaches here. Persisting
+	// a ref for an unknown tenant fails (referential integrity), so a ref can never
+	// dangle. Re-putting an already-active hash is idempotent.
 	PutWebhookRef(ctx context.Context, refSHA []byte, tenantID string) error
-	// LookupWebhookRef resolves a ref's SHA-256 to its owning tenant id. It returns
-	// ("", false, nil) for an unregistered ref — a non-oracle miss identical to the
-	// in-memory map's miss, so the authenticator answers the same uniform 401. A
-	// non-nil error signals an infrastructure failure (the caller fails closed on it,
-	// never open); it is never used to distinguish "no such ref" from a real error.
+	// LookupWebhookRef resolves an ACTIVE ref's SHA-256 to its owning tenant id. A
+	// revoked or unregistered ref both return ("", false, nil) — a non-oracle miss
+	// identical to the in-memory map's miss, so the authenticator answers the same
+	// uniform 401. A non-nil error signals an infrastructure failure (the caller fails
+	// closed on it, never open); it is never used to distinguish "no such ref" from a
+	// real error.
 	LookupWebhookRef(ctx context.Context, refSHA []byte) (tenantID string, ok bool, err error)
+	// RevokeWebhookRefs soft-deletes every ref currently active for tenantID so none of
+	// them authenticate any longer (SIN-69588 / B1). It is the revocation primitive
+	// behind ref rotation (PutWebhookRef reuses it) and explicit revocation. Idempotent:
+	// revoking a tenant with no active ref is a no-op. Returns how many refs were
+	// revoked. A non-nil error signals an infrastructure failure.
+	RevokeWebhookRefs(ctx context.Context, tenantID string) (revoked int, err error)
 }
 
 // PricingRepository resolves and stores per-endpoint pricing. The admin-console
