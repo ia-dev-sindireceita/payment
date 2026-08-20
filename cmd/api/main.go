@@ -333,7 +333,8 @@ func run() error {
 	// reference the same instance (idempotent GET-gate keeps concurrent calls safe).
 	webhookRegSvc := app.NewWebhookRegistrationService(
 		creds, webhookRegistrar, app.NewWebhookRefMintService(webhookRefStore),
-		webhookCallbackBaseURL(), slog.Default())
+		webhookCallbackBaseURL(), slog.Default()).
+		WithTenants(store)
 
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:     app.NewChargeService(deps),
