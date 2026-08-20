@@ -44,3 +44,6 @@ go.work.sum
 
 # Local Claude Code / agent config (leaks internal paths + UUIDs)
 .claude/
+# binario compilado da ferramenta de diagnostico (nao versionar)
+/c6-webhook-probe
+build/
