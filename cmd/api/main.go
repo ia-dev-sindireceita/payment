@@ -106,8 +106,15 @@ func run() error {
 	// in-flow registration (SIN-69560 / F2). Nil for the stub (no webhook wire), which
 	// makes the registration service inert — exactly the safe default in dev/tests.
 	var webhookRegistrar ports.PixWebhookRegistrar
+	// The deregistrar removes those same PSP callbacks when a bank configuration is
+	// removed in the console (ADR-0012 §5). Derived from the same C6 ProviderSet; nil for
+	// the stub. Wiring it into the console (below) is what arms the bank-identity removal
+	// guard (SIN-70342): the guard only runs on the deregistration path, so leaving this
+	// nil left the guard — and the deregistration it protects — dormant in production.
+	var webhookDeregistrar ports.WebhookDeregistrar
 	if set, ok := registry.Get(ports.BankIDC6); ok {
 		webhookRegistrar = set.PixWebhook
+		webhookDeregistrar = set.WebhookDeregistrar
 	}
 	// The per-port routers dispatch each request to the bank resolved at the HTTP
 	// boundary (carried on the context). The application services depend on these,
@@ -125,6 +132,7 @@ func run() error {
 	// per-bank routing surface — that moves into the registry routers when a second
 	// bank gains PIX Automático (SIN-66022).
 	recReader, cobrReader := recurrenceReaders(registry)
+	solicRecWriter, locRecWriter := recurrenceWriters(registry)
 
 	// Outbound webhook attribution (SIN-69491, F1 of SIN-69486): on a settled inbound
 	// event, resolve the owning Conta SERVER-SIDE and materialise the event onto that
@@ -162,6 +170,8 @@ func run() error {
 		Statement:          routers.Statement,
 		RecReader:          recReader,
 		CobRReader:         cobrReader,
+		SolicRecs:          solicRecWriter,
+		LocRecs:            locRecWriter,
 		OutboundAttributor: outboundAttributor,
 		Credentials:        creds,
 		CredWriter:         creds,
@@ -270,7 +280,15 @@ func run() error {
 		CertReader:       certs,
 		CredDeleter:      creds,
 		CertDeleter:      certs,
-		Sharing:          creds,
+		// Removing a bank configuration deregisters the PSP callbacks first (needs the
+		// credential to authenticate, so read before delete). WebhookDeregistrar is nil for
+		// the stub ⇒ no-op. Sharing arms the bank-identity guard on that path: it skips the
+		// PSP deregistration when ANOTHER ACTIVE tenant shares the PIX key / client_id, so
+		// removing one holder never silently knocks out the other's live webhook (SIN-70342,
+		// the Verz incident). Creds resolves the (tenant, c6) PIX key the delete is keyed by.
+		WebhookDeregistrar: webhookDeregistrar,
+		Creds:              creds,
+		Sharing:            creds,
 		Invoices:         store,
 		OutboundWebhooks: outboundWebhooks,
 		CredInvalidator:  credInvalidator,
@@ -339,13 +357,17 @@ func run() error {
 		WithTenants(store)
 
 	srv := httpadapter.NewServer(httpadapter.Config{
-		Charges:     app.NewChargeService(deps),
-		Pix:         app.NewPixService(deps),
-		PixCobV:     app.NewPixDueChargeService(deps),
-		Checkout:    app.NewCheckoutService(deps),
-		Boleto:      app.NewBoletoService(deps),
-		DDA:         app.NewDDAService(deps),
-		Statement:   app.NewStatementService(deps),
+		Charges:   app.NewChargeService(deps),
+		Pix:       app.NewPixService(deps),
+		PixCobV:   app.NewPixDueChargeService(deps),
+		Checkout:  app.NewCheckoutService(deps),
+		Boleto:    app.NewBoletoService(deps),
+		DDA:       app.NewDDAService(deps),
+		Statement: app.NewStatementService(deps),
+		// PIX Automático (recorrência). The service is wired unconditionally so the
+		// recurrence WEBHOOK path can keep recording reconciled mandates; the flag below
+		// decides only whether the tenant-facing routes exist.
+		Recurrence:  app.NewRecurrenceService(deps),
 		Admin:       app.NewAdminService(deps),
 		Console:     console,
 		ConsoleAuth: consoleAuth,
@@ -369,6 +391,11 @@ func run() error {
 		TrustedProxyHops: cfg.TrustedProxyHops,
 		// Self-serve credential intake (SIN-69196), default-off dark-ship.
 		SelfServeCredIntake: cfg.SelfServeCredIntake,
+		// PIX Automático tenant surface (Jornada 3 — QR composto), default-off
+		// dark-ship. Note this does NOT open the mandate read path: that stays
+		// fail-secure until PAYMENT_C6_REC_JWKS_URL is configured.
+		PixRecurrence:     cfg.PixRecurrence,
+		WebhookLogPayload: cfg.WebhookLogPayload,
 		// Model (b) account-key + per-request client selector (ADR-0011 §2 /
 		// SIN-69279), default-off dark-ship: consulted only when AccountKeySelector
 		// is on and the bearer has the ak_ shape; otherwise inert (model (a)).
@@ -722,6 +749,14 @@ func buildProviderSet(generic ports.BankProvider, raw ports.PixProvider) bank.Pr
 	if v, ok := raw.(ports.PixWebhookRegistrar); ok {
 		set.PixWebhook = v
 	}
+	// The C6 raw provider also satisfies ports.WebhookDeregistrar (the BACEN deletes; the
+	// stub speaks none of them). Expose it so removing a bank configuration in the console
+	// tears down the PSP callbacks BEFORE the credential that authenticates them is deleted
+	// (ADR-0012 §5). Nil for the stub ⇒ deregistration is an inert no-op. The bank-identity
+	// removal guard (SIN-70342) only runs on this path, so it is dormant until this is set.
+	if v, ok := raw.(ports.WebhookDeregistrar); ok {
+		set.WebhookDeregistrar = v
+	}
 	return set
 }
 
@@ -740,4 +775,21 @@ func recurrenceReaders(reg *bank.Registry) (ports.RecProvider, ports.CobRProvide
 	recReader, _ := set.Pix.(ports.RecProvider)
 	cobrReader, _ := set.Pix.(ports.CobRProvider)
 	return recReader, cobrReader
+}
+
+// recurrenceWriters derives the remaining PIX Automático ports the TENANT-FACING
+// surface needs: the activation request (solicrec, Jornada 1) and the payload locations
+// the composite-QR journeys are built on (locrec, Jornadas 2/3/4). Same derivation and
+// same caveat as recurrenceReaders — read off the C6 ProviderSet's raw provider because
+// recurrence is not yet part of the per-bank routing surface (SIN-66022) — and the same
+// failure mode: a bank that does not implement them yields nil, which leaves those
+// operations answering 503 rather than panicking.
+func recurrenceWriters(reg *bank.Registry) (ports.SolicRecProvider, ports.LocRecProvider) {
+	set, ok := reg.Get(ports.BankIDC6)
+	if !ok || set.Pix == nil {
+		return nil, nil
+	}
+	solicRec, _ := set.Pix.(ports.SolicRecProvider)
+	locRec, _ := set.Pix.(ports.LocRecProvider)
+	return solicRec, locRec
 }
