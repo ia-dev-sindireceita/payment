@@ -106,15 +106,8 @@ func run() error {
 	// in-flow registration (SIN-69560 / F2). Nil for the stub (no webhook wire), which
 	// makes the registration service inert — exactly the safe default in dev/tests.
 	var webhookRegistrar ports.PixWebhookRegistrar
-	// The deregistrar removes those same PSP callbacks when a bank configuration is
-	// removed in the console (ADR-0012 §5). Derived from the same C6 ProviderSet; nil for
-	// the stub. Wiring it into the console (below) is what arms the bank-identity removal
-	// guard (SIN-70342): the guard only runs on the deregistration path, so leaving this
-	// nil left the guard — and the deregistration it protects — dormant in production.
-	var webhookDeregistrar ports.WebhookDeregistrar
 	if set, ok := registry.Get(ports.BankIDC6); ok {
 		webhookRegistrar = set.PixWebhook
-		webhookDeregistrar = set.WebhookDeregistrar
 	}
 	// The per-port routers dispatch each request to the bank resolved at the HTTP
 	// boundary (carried on the context). The application services depend on these,
@@ -280,15 +273,7 @@ func run() error {
 		CertReader:       certs,
 		CredDeleter:      creds,
 		CertDeleter:      certs,
-		// Removing a bank configuration deregisters the PSP callbacks first (needs the
-		// credential to authenticate, so read before delete). WebhookDeregistrar is nil for
-		// the stub ⇒ no-op. Sharing arms the bank-identity guard on that path: it skips the
-		// PSP deregistration when ANOTHER ACTIVE tenant shares the PIX key / client_id, so
-		// removing one holder never silently knocks out the other's live webhook (SIN-70342,
-		// the Verz incident). Creds resolves the (tenant, c6) PIX key the delete is keyed by.
-		WebhookDeregistrar: webhookDeregistrar,
-		Creds:              creds,
-		Sharing:            creds,
+		Sharing:          creds,
 		Invoices:         store,
 		OutboundWebhooks: outboundWebhooks,
 		CredInvalidator:  credInvalidator,
@@ -392,8 +377,7 @@ func run() error {
 		// Self-serve credential intake (SIN-69196), default-off dark-ship.
 		SelfServeCredIntake: cfg.SelfServeCredIntake,
 		// PIX Automático tenant surface (Jornada 3 — QR composto), default-off
-		// dark-ship. Note this does NOT open the mandate read path: that stays
-		// fail-secure until PAYMENT_C6_REC_JWKS_URL is configured.
+		// dark-ship.
 		PixRecurrence:     cfg.PixRecurrence,
 		WebhookLogPayload: cfg.WebhookLogPayload,
 		// Model (b) account-key + per-request client selector (ADR-0011 §2 /
@@ -675,36 +659,6 @@ func newBankRegistry(cfg config.Config, creds ports.CredentialStore, certs c6.Ce
 	} else {
 		log.Print("api: C6 mTLS transport wired (vault-per-tenant; no §8 path bootstrap configured)")
 	}
-	// PIX Automático (Recorrência) reads are JWS-signed; wire the concrete verifier
-	// when a JWKS URL is configured. The verifier reuses the C6 HTTP client (so a
-	// JWKS served behind the same mTLS connection is reached with the client cert);
-	// when nil it builds its own TLS-1.2+ client. A bad JWKS URL fails the boot
-	// closed. When PAYMENT_C6_REC_JWKS_URL is unset the verifier stays nil and the
-	// recurrence reads fail secure (ErrUnavailable) — the correct interim until F4
-	// go-live (SIN-66061).
-	//
-	// The JWKS endpoint is process-wide with no natural tenant, so its request stamps
-	// none and the vault mTLS transport would fall back to the §8 bootstrap cert; on a
-	// vault-only deployment that cert is absent and the handshake fails closed
-	// (SIN-69375). PAYMENT_C6_REC_JWKS_MTLS_TENANT designates a tenant whose vault cert
-	// is presented on the fetch so recurrence verification works without a §8 bootstrap
-	// cert. Empty keeps the prior tenantless behaviour.
-	if cfg.C6.RecJWKSURL != "" {
-		var vopts []c6.VerifierOption
-		if cfg.C6.RecJWKSMTLSTenant != "" {
-			vopts = append(vopts, c6.WithMTLSTenant(cfg.C6.RecJWKSMTLSTenant))
-		}
-		verifier, err := c6.NewJWSVerifier(cfg.C6.RecJWKSURL, c6cfg.HTTPClient, vopts...)
-		if err != nil {
-			return nil, err
-		}
-		c6cfg.RecurrenceVerifier = verifier
-		if cfg.C6.RecJWKSMTLSTenant != "" {
-			log.Print("api: C6 recurrence JWS verifier configured (JWKS fetch uses designated mTLS tenant)")
-		} else {
-			log.Print("api: C6 recurrence JWS verifier configured")
-		}
-	}
 	c6p, err := c6.New(c6cfg, creds)
 	if err != nil {
 		return nil, err
@@ -748,14 +702,6 @@ func buildProviderSet(generic ports.BankProvider, raw ports.PixProvider) bank.Pr
 	// PSP webhook over the same transport. Nil for the stub ⇒ registration is a no-op.
 	if v, ok := raw.(ports.PixWebhookRegistrar); ok {
 		set.PixWebhook = v
-	}
-	// The C6 raw provider also satisfies ports.WebhookDeregistrar (the BACEN deletes; the
-	// stub speaks none of them). Expose it so removing a bank configuration in the console
-	// tears down the PSP callbacks BEFORE the credential that authenticates them is deleted
-	// (ADR-0012 §5). Nil for the stub ⇒ deregistration is an inert no-op. The bank-identity
-	// removal guard (SIN-70342) only runs on this path, so it is dormant until this is set.
-	if v, ok := raw.(ports.WebhookDeregistrar); ok {
-		set.WebhookDeregistrar = v
 	}
 	return set
 }
