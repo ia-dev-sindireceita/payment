@@ -37,13 +37,11 @@ func NewOutboundDeliveryStore(db *sql.DB) *OutboundDeliveryStore {
 func (s *OutboundDeliveryStore) EnqueueDelivery(ctx context.Context, d *outboundqueue.Delivery) error {
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO account_outbound_delivery
-		     (id, account_id, tenant_id, event_key, tx_id, event_type, status, created_at,
-		      amount_cents, installments, message)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		     (id, account_id, tenant_id, event_key, tx_id, event_type, status, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (account_id, event_key) DO NOTHING`,
 		d.ID(), d.AccountID(), d.TenantID(), d.EventKey(), d.TxID(), d.EventType(),
-		string(d.Status()), d.CreatedAt().UTC().Format(tsLayout),
-		d.Detail().AmountCents, d.Detail().Installments, d.Detail().Message); err != nil {
+		string(d.Status()), d.CreatedAt().UTC().Format(tsLayout)); err != nil {
 		return fmt.Errorf("enqueue outbound delivery: %w", err)
 	}
 	return nil
@@ -69,8 +67,7 @@ func (s *OutboundDeliveryStore) DeadLetter(ctx context.Context, dl *outboundqueu
 // returns only the given Conta's rows.
 func (s *OutboundDeliveryStore) PendingDeliveries(ctx context.Context, accountID string) ([]*outboundqueue.Delivery, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, account_id, tenant_id, event_key, tx_id, event_type, status, created_at,
-		        amount_cents, installments, message
+		`SELECT id, account_id, tenant_id, event_key, tx_id, event_type, status, created_at
 		   FROM account_outbound_delivery
 		  WHERE account_id = $1 AND status = $2
 		  ORDER BY created_at ASC, id ASC`,
@@ -82,17 +79,13 @@ func (s *OutboundDeliveryStore) PendingDeliveries(ctx context.Context, accountID
 
 	var out []*outboundqueue.Delivery
 	for rows.Next() {
-		var id, acct, tenantID, eventKey, txID, eventType, status, createdAt, message string
-		var amountCents int64
-		var installments int
-		if err := rows.Scan(&id, &acct, &tenantID, &eventKey, &txID, &eventType, &status, &createdAt,
-			&amountCents, &installments, &message); err != nil {
+		var id, acct, tenantID, eventKey, txID, eventType, status, createdAt string
+		if err := rows.Scan(&id, &acct, &tenantID, &eventKey, &txID, &eventType, &status, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan pending delivery: %w", err)
 		}
 		out = append(out, outboundqueue.RehydrateDelivery(
 			id, acct, tenantID, eventKey, txID, eventType,
-			outboundqueue.DeliveryStatus(status), parseTime(createdAt),
-			outboundqueue.Detail{AmountCents: amountCents, Installments: installments, Message: message}))
+			outboundqueue.DeliveryStatus(status), parseTime(createdAt)))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate pending deliveries: %w", err)
@@ -128,8 +121,7 @@ func (s *OutboundDeliveryStore) ClaimPendingDeliveries(ctx context.Context, limi
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, account_id, tenant_id, event_key, tx_id, event_type, status, created_at,
-		        amount_cents, installments, message
+		`SELECT id, account_id, tenant_id, event_key, tx_id, event_type, status, created_at
 		   FROM account_outbound_delivery
 		  WHERE status = $1
 		  ORDER BY created_at ASC, id ASC
@@ -142,17 +134,13 @@ func (s *OutboundDeliveryStore) ClaimPendingDeliveries(ctx context.Context, limi
 
 	var out []*outboundqueue.Delivery
 	for rows.Next() {
-		var id, acct, tenantID, eventKey, txID, eventType, status, createdAt, message string
-		var amountCents int64
-		var installments int
-		if err := rows.Scan(&id, &acct, &tenantID, &eventKey, &txID, &eventType, &status, &createdAt,
-			&amountCents, &installments, &message); err != nil {
+		var id, acct, tenantID, eventKey, txID, eventType, status, createdAt string
+		if err := rows.Scan(&id, &acct, &tenantID, &eventKey, &txID, &eventType, &status, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan pending delivery: %w", err)
 		}
 		out = append(out, outboundqueue.RehydrateDelivery(
 			id, acct, tenantID, eventKey, txID, eventType,
-			outboundqueue.DeliveryStatus(status), parseTime(createdAt),
-			outboundqueue.Detail{AmountCents: amountCents, Installments: installments, Message: message}))
+			outboundqueue.DeliveryStatus(status), parseTime(createdAt)))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate pending deliveries: %w", err)
