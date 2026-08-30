@@ -38,3 +38,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Compiled server binary (from `go build ./cmd/api`)
+/api
+
+# Local Claude Code / agent config (leaks internal paths + UUIDs)
+.claude/
