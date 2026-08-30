@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -51,6 +52,19 @@ type ConsoleService struct {
 	// still removes whichever half is wired), so wiring-light tests keep working.
 	credDeleter ports.CredentialDeleter
 	certDeleter ports.BankCertificateDeleter
+	// webhookDeregistrar stops the PSP from calling us for a tenant whose bank
+	// configuration is being removed. Optional: nil leaves the previous behaviour, where
+	// removal deleted our side and left the PSP registered.
+	webhookDeregistrar ports.WebhookDeregistrar
+	// creds resolves the PIX key the PIX-webhook deregistration is keyed by. It must be
+	// read BEFORE the credential is deleted.
+	creds ports.CredentialStore
+	// sharing answers which OTHER tenants hold the same PIX key / PSP account, so one
+	// empresa can neither take a key another ACTIVE empresa is using nor, on removal,
+	// tear down that empresa's live webhook. Optional: nil leaves the historical
+	// behaviour (no exclusivity check, unconditional deregistration), which keeps
+	// wiring-light tests working — but cmd/api DOES wire it.
+	sharing ports.CreditorKeySharingLookup
 	// invoices is the append-only Fatura store (SIN-69121). The console generates
 	// an invoice by freezing a consumption window and reads them back for the
 	// "Faturas" screen and the CSV download. Optional: a nil store disables the
@@ -149,6 +163,9 @@ type ConsoleDeps struct {
 	// privilege): the console grants the creditor-key capability independently of the
 	// secret-rotation capability (SIN-66092 / ADR-0008).
 	CreditorWriter ports.CreditorKeyWriter
+	// Sharing answers which tenants already hold a PIX key / PSP account. Optional;
+	// nil disables the exclusivity check and the removal guard. See ConsoleService.sharing.
+	Sharing ports.CreditorKeySharingLookup
 	// CertWriter / CertReader are the per-(tenant,bank) mTLS certificate vault
 	// (SIN-66087). CertWriter stores the validated cert/key pair (write-only key);
 	// CertReader projects only the stored certificate's public metadata into the
@@ -163,6 +180,11 @@ type ConsoleDeps struct {
 	// a nil deleter degrades to a no-op for that half.
 	CredDeleter ports.CredentialDeleter
 	CertDeleter ports.BankCertificateDeleter
+	// WebhookDeregistrar stops the PSP calling us when a bank configuration is removed.
+	// Nil (stub / not wired) keeps the previous behaviour. Creds resolves the PIX key that
+	// deregistration is keyed by, read before the credential is deleted.
+	WebhookDeregistrar ports.WebhookDeregistrar
+	Creds              ports.CredentialStore
 	// Invoices is the append-only Fatura store (SIN-69121). Optional: nil disables
 	// the invoice use-cases (the rest of the console still works).
 	Invoices InvoiceStore
@@ -195,24 +217,27 @@ func NewConsoleService(d ConsoleDeps) *ConsoleService {
 		a = noopAudit{}
 	}
 	return &ConsoleService{
-		tenants:       d.Tenants,
-		accounts:      d.Accounts,
-		pricing:       d.Pricing,
-		ledger:        d.Ledger,
-		credWriter:    d.CredWriter,
-		creditorWrite: d.CreditorWriter,
-		credReader:    d.CredReader,
-		certWriter:    d.CertWriter,
-		certReader:    d.CertReader,
-		credDeleter:   d.CredDeleter,
-		certDeleter:   d.CertDeleter,
-		invoices:      d.Invoices,
-		webhooks:      d.OutboundWebhooks,
-		credEvictor:   ci,
-		audit:         a,
-		clock:         d.Clock,
-		ids:           d.IDs,
-		invoiceGuard:  newInvoiceBatchGuard(invoiceBatchIdempotencyTTL),
+		tenants:            d.Tenants,
+		accounts:           d.Accounts,
+		pricing:            d.Pricing,
+		ledger:             d.Ledger,
+		credWriter:         d.CredWriter,
+		creditorWrite:      d.CreditorWriter,
+		credReader:         d.CredReader,
+		certWriter:         d.CertWriter,
+		certReader:         d.CertReader,
+		credDeleter:        d.CredDeleter,
+		certDeleter:        d.CertDeleter,
+		webhookDeregistrar: d.WebhookDeregistrar,
+		creds:              d.Creds,
+		sharing:            d.Sharing,
+		invoices:           d.Invoices,
+		webhooks:           d.OutboundWebhooks,
+		credEvictor:        ci,
+		audit:              a,
+		clock:              d.Clock,
+		ids:                d.IDs,
+		invoiceGuard:       newInvoiceBatchGuard(invoiceBatchIdempotencyTTL),
 	}
 }
 
@@ -632,7 +657,8 @@ func (s *ConsoleService) SetCreditorKey(ctx context.Context, tenantID, creditorK
 	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
 		return fmt.Errorf("resolve tenant: %w", err)
 	}
-	if err := s.creditorWrite.SetCreditorKey(ctx, tenantID, strings.TrimSpace(creditorKey)); err != nil {
+	key := strings.TrimSpace(creditorKey)
+	if err := s.creditorWrite.SetCreditorKey(ctx, tenantID, key); err != nil {
 		// Wrap with non-sensitive context only; never include the key value.
 		return fmt.Errorf("set creditor key: %w", err)
 	}
@@ -689,8 +715,9 @@ func (s *ConsoleService) SetBankCertificate(ctx context.Context, tenantID, bankI
 		// Wrap with non-sensitive context only; never include key material.
 		return ports.BankCertificateMeta{}, fmt.Errorf("set bank certificate: %w", err)
 	}
-	// Evict any cached transport/token state keyed on the tenant credential so the
-	// certificate rotation takes effect without waiting out a cache TTL (ADR-0003).
+	// Evict the tenant's cached token AND its pooled mTLS connections, so the
+	// certificate just written is the one presented on the next handshake (ADR-0003,
+	// SIN-69368) instead of only after the next restart.
 	s.credEvictor.InvalidateToken(tenantID)
 	// Audit the provisioning with who/tenant/bank/fingerprint (never the key).
 	// Fail-closed: a forensic-record error surfaces rather than dropping the trail.
@@ -739,6 +766,12 @@ func (s *ConsoleService) RemoveBankConfig(ctx context.Context, tenantID, bankID 
 	if !ports.IsKnownBankID(slug) {
 		return shared.NewValidationError("bank", "banco não suportado")
 	}
+	// Deregister at the PSP FIRST: the calls below authenticate with the very credential
+	// this operation is about to delete, and the PIX callback is keyed by the creditor key
+	// stored on it. Doing it after would make deregistration impossible — the PSP would
+	// keep POSTing notifications we can no longer authenticate or reconcile.
+	s.deregisterWebhooks(ctx, tenantID, slug)
+
 	if s.credDeleter != nil {
 		if err := s.credDeleter.DeleteBankCredential(ctx, tenantID, slug); err != nil {
 			return fmt.Errorf("delete bank credential: %w", err)
@@ -1055,4 +1088,101 @@ func (s *ConsoleService) AccountConsumptionInRange(ctx context.Context, accountI
 	}
 	sort.SliceStable(rep.Tenants, func(i, j int) bool { return rep.Tenants[i].TenantID < rep.Tenants[j].TenantID })
 	return rep, nil
+}
+
+// deregisterWebhooks removes the tenant's PSP callbacks, best-effort. It never fails the
+// removal: the operator asked for the configuration to go, and refusing because the bank
+// is briefly unavailable would be worse than the residue — which is exactly the state
+// every removal left behind before this existed. An already-absent registration is not an
+// error. Each outcome is logged with the tenant and bank (never the callback URL, which
+// embeds the secret ref).
+
+// tenantIsActive resolves a tenant's ACTIVE flag. A tenant that no longer exists counts
+// as inactive (an orphan credential row must not block a legitimate write).
+func (s *ConsoleService) tenantIsActive(ctx context.Context, tenantID string) (bool, error) {
+	t, err := s.tenants.FindTenantByID(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, shared.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return t.Active(), nil
+}
+
+// sharesBankIdentityWithActiveTenant reports whether ANOTHER ACTIVE tenant is registered
+// under the same PIX key or the same PSP account (client_id) as tenantID.
+//
+// Falha FECHADO para o chamador que a usa: quando não dá para responder, tratamos como
+// "compartilha", porque o estrago de desregistrar o webhook de uma empresa ativa é bem
+// pior do que o de deixar uma inscrição órfã no PSP.
+func (s *ConsoleService) sharesBankIdentityWithActiveTenant(ctx context.Context, tenantID, bankID, chave, clientID string) bool {
+	if s.sharing == nil {
+		return false
+	}
+	lookups := []func() ([]string, error){
+		func() ([]string, error) { return s.sharing.FindTenantsByCreditorKey(ctx, bankID, chave) },
+		func() ([]string, error) { return s.sharing.FindTenantsByClientID(ctx, bankID, clientID) },
+	}
+	for _, lookup := range lookups {
+		holders, err := lookup()
+		if err != nil {
+			return true
+		}
+		for _, other := range holders {
+			if other == tenantID {
+				continue
+			}
+			active, err := s.tenantIsActive(ctx, other)
+			if err != nil || active {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *ConsoleService) deregisterWebhooks(ctx context.Context, tenantID, bankID string) {
+	if s == nil || s.webhookDeregistrar == nil || bankID != ports.BankIDC6 {
+		return
+	}
+	drop := func(name string, fn func() error) {
+		if err := fn(); err != nil && !errors.Is(err, shared.ErrNotFound) {
+			slog.WarnContext(ctx, "console: could not deregister webhook at the PSP",
+				slog.String("channel", name), slog.String("tenant_id", tenantID),
+				slog.String("bank_id", bankID), slog.String("error", err.Error()))
+		}
+	}
+	// The PIX callback is keyed by the creditor key, so it is read from the credential
+	// while that credential still exists. No key means nothing was ever registered.
+	var chave, clientID string
+	if s.creds != nil {
+		if cred, err := s.creds.GetBankCredential(ctx, tenantID, bankID); err == nil {
+			chave = strings.TrimSpace(cred.CreditorKey)
+			clientID = strings.TrimSpace(cred.ClientID)
+		}
+	}
+
+	// Desregistrar é uma operação sobre a IDENTIDADE no PSP, não sobre este tenant. O
+	// canal PIX é apagado POR CHAVE e os canais de recorrência pela CONTA do client_id —
+	// então remover a config de um tenant que divide chave ou conta com outro derruba a
+	// inscrição VIVA do outro, e nada a refaz (a varredura de renovação está desligada).
+	//
+	// Aconteceu de verdade: a Verz tinha o mesmo cadastro duas vezes, um suspenso e um
+	// ativo, com a mesma chave. Limpar o suspenso teria deixado a empresa ativa sem
+	// webhook, em silêncio, até alguém regravar a credencial dela.
+	//
+	// Então: se outro tenant ATIVO divide a identidade, apagamos só o NOSSO lado e
+	// deixamos o PSP como está. A inscrição que sobra pertence a quem ainda a usa.
+	if s.sharesBankIdentityWithActiveTenant(ctx, tenantID, bankID, chave, clientID) {
+		slog.InfoContext(ctx, "console: PSP deregistration skipped, bank identity shared with an active tenant",
+			slog.String("tenant_id", tenantID), slog.String("bank_id", bankID))
+		return
+	}
+
+	if chave != "" {
+		drop("pix", func() error { return s.webhookDeregistrar.DeleteWebhook(ctx, tenantID, chave) })
+	}
+	drop("rec", func() error { return s.webhookDeregistrar.DeleteRecWebhook(ctx, tenantID) })
+	drop("cobr", func() error { return s.webhookDeregistrar.DeleteCobRWebhook(ctx, tenantID) })
 }

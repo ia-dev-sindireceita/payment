@@ -474,6 +474,51 @@ type CredentialDeleter interface {
 	DeleteBankCredential(ctx context.Context, tenantID, bankID string) error
 }
 
+// BankCapabilities says which payment methods a tenant's bank credential ACTUALLY
+// authorises. It is deliberately in OUR vocabulary, not the PSP's: a bank grants
+// whatever the conta contratou, under its own scope names, and the adapter translates.
+// Adding a second bank means a new translation, not a new concept here.
+type BankCapabilities struct {
+	// PIX reports whether the credential may create and read PIX charges.
+	PIX bool
+	// Card reports whether it may open the hosted card checkout.
+	Card bool
+}
+
+// BankCapabilityReader resolves a tenant's BankCapabilities from the bank.
+//
+// Existe porque o que a empresa PEDE e o que a conta dela TEM são coisas diferentes, e
+// descobrir a diferença no meio de uma compra é o pior lugar possível: a conta de uma
+// empresa não tinha o produto Checkout contratado, e a única evidência foi o C6
+// responder 403 quando o comprador já estava com o cartão na mão (SIN-69368). Lido
+// ANTES, o mesmo fato vira um aviso na tela de configuração.
+type BankCapabilityReader interface {
+	// BankCapabilities returns what tenantID's credential authorises. A tenant with no
+	// credential surfaces shared.ErrNotFound — "não configurado", not "não pode".
+	BankCapabilities(ctx context.Context, tenantID string) (BankCapabilities, error)
+}
+
+// CreditorKeySharingLookup answers WHICH tenants already hold a given bank identity.
+// It exists to keep one invariant: a PIX creditor key, and the C6 account behind a
+// client_id, belong to ONE active empresa at a time.
+//
+// Duas empresas ativas com a mesma chave PIX se destroem mutuamente. No C6 o webhook é
+// registrado POR CHAVE, com uma URL só por chave: as duas se sobrescrevem, o aviso de
+// pagamento chega por um ref que não é do dono da cobrança e é recusado, e a liquidação
+// passa a depender de varredura. Aconteceu em produção (SIN-69368).
+//
+// A busca por chave devolve o tenant, nunca a chave de ninguém: quem pergunta já tem em
+// mãos a chave que está tentando gravar, e nada além disso sai daqui.
+type CreditorKeySharingLookup interface {
+	// FindTenantsByCreditorKey returns every tenant id whose registered creditor key for
+	// bankID equals creditorKey. Empty result (never ErrNotFound) when nobody holds it.
+	FindTenantsByCreditorKey(ctx context.Context, bankID, creditorKey string) ([]string, error)
+	// FindTenantsByClientID returns every tenant id registered under the same bank
+	// client_id — i.e. sharing the PSP ACCOUNT, which is what the account-level webhook
+	// channels (rec/cobr) are keyed by.
+	FindTenantsByClientID(ctx context.Context, bankID, clientID string) ([]string, error)
+}
+
 // CreditorKeyWriter is the admin-plane write path for a tenant's registered PIX
 // creditor key (chave do recebedor). It is kept deliberately separate from
 // CredentialWriter so the secret-rotation capability and the fund-routing
@@ -684,6 +729,14 @@ type ChargeResult struct {
 	Status              string
 	ExpectedAmountCents int64
 	ReceivedAmountCents int64
+	// Installments and Message carry card-settlement detail through to the Conta's
+	// outbound webhook so a reseller learns in how many parcelas the payment was
+	// authorised and what the PSP said about the capture. They are meaningful only for
+	// a card checkout; a PIX or boleto reconcile leaves them zero/empty. Neither is
+	// PII (an installment count and a PSP status message), which is what keeps them
+	// carryable on the non-PII outbound envelope.
+	Installments int
+	Message      string
 }
 
 // AmountReconciled reports whether the amount received on this charge exactly
@@ -807,6 +860,14 @@ type PixDueChargeRequest struct {
 	DiscountFixedCents int64
 	DebtorTaxID        string
 	DebtorName         string
+	// The debtor's ADDRESS is mandatory on a due-date charge: BACEN/C6 require
+	// logradouro, cidade, uf and cep on every cobv, because the document is a formal
+	// charge the payer receives. (An immediate cob has no such requirement — its debtor
+	// is optional and address-less, which is why only this shape carries them.)
+	DebtorStreet  string
+	DebtorCity    string
+	DebtorState   string // UF, 2 letters
+	DebtorZipCode string // CEP, digits only
 	// CreditorKey is the recebedor's PIX key (chave) the charge is registered under.
 	CreditorKey string
 	// IdempotencyKey, when present, is forwarded so the PSP collapses retried/
@@ -908,6 +969,43 @@ type PixWebhookRegistrar interface {
 	GetWebhook(ctx context.Context, tenantID, pixKey string) (WebhookRegistration, error)
 }
 
+// WebhookDeregistrar is the output port for REMOVING a tenant's PSP callbacks. It is a
+// port of its own, not extra methods on the registrars, so a bank adapter that can
+// register but not deregister still satisfies those (ISP) — which is the real situation:
+// the PSP-proprietary surface exposes no delete at all, only the BACEN ones do.
+//
+// It exists because removing a tenant's bank configuration otherwise leaves the PSP
+// calling us forever: the credential we would need to authenticate the notification is
+// gone, and the callback ref may be revoked, so every delivery is one we can never
+// reconcile. Deregistration must therefore run BEFORE the credential is deleted — it
+// needs that credential to authenticate.
+type WebhookDeregistrar interface {
+	// DeleteWebhook removes the PIX settlement callback registered for pixKey. An
+	// already-absent registration is shared.ErrNotFound, which a caller may treat as done.
+	DeleteWebhook(ctx context.Context, tenantID, pixKey string) error
+	// DeleteRecWebhook and DeleteCobRWebhook remove the two singleton recurrence callbacks.
+	DeleteRecWebhook(ctx context.Context, tenantID string) error
+	DeleteCobRWebhook(ctx context.Context, tenantID string) error
+}
+
+// ServiceWebhookRegistrar is the output port for the PSP-PROPRIETARY notification
+// surface, which is registered per SERVICE (checkout, boleto) rather than per PIX key.
+// It is a separate port from PixWebhookRegistrar (ISP) because the two surfaces are
+// genuinely different contracts at the PSP — different path, different HTTP verb,
+// different body field name, and even opposite Accept requirements — so a consumer of
+// one must not be forced to depend on the other. Every service can point at the SAME
+// per-tenant callback URL: the PSP routes by the service discriminator it echoes in the
+// notification, which the inbound receiver switches on.
+type ServiceWebhookRegistrar interface {
+	// RegisterServiceWebhook idempotently registers the HTTPS webhookURL the PSP will
+	// notify for `service`. An unknown service, an empty tenantID, or a non-HTTPS URL is
+	// shared.ErrValidation.
+	RegisterServiceWebhook(ctx context.Context, tenantID, service, webhookURL string) error
+	// GetServiceWebhook reads back the callback currently registered for `service` so a
+	// caller can confirm idempotently. An unregistered service is shared.ErrNotFound.
+	GetServiceWebhook(ctx context.Context, tenantID, service string) (WebhookRegistration, error)
+}
+
 // PixListFilter is the date-window + pagination filter for listing immediate PIX
 // charges. Start and End are the BACEN inicio/fim bounds (required); Page and
 // PageSize map to paginacao.paginaAtual / paginacao.itensPorPagina (optional — a
@@ -954,11 +1052,15 @@ type BoletoDiscountTier struct {
 // ADR-0005 "Riscos conhecidos" for the "S/N"/alphanumeric homologation question.
 // These are plain Go types — transport tags and wire formatting live in the adapter.
 type BoletoAddress struct {
-	Street  string
-	Number  int
-	City    string
-	State   string // UF, 2 letters
-	ZipCode string // CEP, digits only
+	Street string
+	Number int
+	// Neighborhood is the bairro. C6 requires it on every bank-slip registration
+	// (`payer.address.neighborhood`), so an empty value is a validation error at the
+	// adapter boundary rather than a 400 from the bank.
+	Neighborhood string
+	City         string
+	State        string // UF, 2 letters
+	ZipCode      string // CEP, digits only
 }
 
 // BoletoPayer identifies the sacado/pagador of a boleto. It is the domain mirror of
@@ -996,7 +1098,10 @@ type BoletoRequest struct {
 	// Payer is the boleto's sacado/pagador. The real C6 contract requires the full
 	// payer (name + tax id + address) on POST /v1/bank_slips; mandatory-field
 	// validation lives in the C6 adapter so the stub stays lenient (ADR-0005).
-	Payer          BoletoPayer
+	Payer BoletoPayer
+	// Description is the customer-visible charge description printed on the slip. C6
+	// requires it (max 100 chars) — a registration without it is refused by the bank.
+	Description    string
 	IdempotencyKey string
 }
 
@@ -1068,7 +1173,11 @@ type CheckoutRequest struct {
 	// RequireAuthentication asks the hosted page to authenticate the payer (step-up
 	// / 3-DS) before capture (roteiro 9.c).
 	RequireAuthentication bool
-	IdempotencyKey        string
+	// MaxInstallments is the ceiling of parcelas the buyer may split a credit
+	// purchase into; 1 is a single payment. The range and the debit rule are
+	// enforced by US, not the PSP — see the c6 adapter's cardBody.
+	MaxInstallments int
+	IdempotencyKey  string
 }
 
 // CheckoutResult is the bank's response to a checkout-session operation (open,
@@ -1096,6 +1205,16 @@ type CheckoutResult struct {
 	// them; the adapter sets them from the request).
 	CardType              string
 	RequireAuthentication bool
+	// MaxInstallments echoes the ceiling that was REQUESTED. It is a different
+	// number from Installments below, and conflating them would be a money bug:
+	// this is what we offered, that is what the buyer took.
+	MaxInstallments int
+	// Installments is how many parcelas the card authorisation was split into (1 for a
+	// single payment). Message is the PSP's human-readable capture status, e.g.
+	// "Transacao capturada com sucesso". Both come from payment.card on the reconcile
+	// read and are forwarded to the Conta's outbound webhook.
+	Installments int
+	Message      string
 }
 
 // AmountReconciled reports whether the amount captured on the session exactly matches
