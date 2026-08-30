@@ -106,8 +106,15 @@ func run() error {
 	// in-flow registration (SIN-69560 / F2). Nil for the stub (no webhook wire), which
 	// makes the registration service inert — exactly the safe default in dev/tests.
 	var webhookRegistrar ports.PixWebhookRegistrar
+	// The deregistrar removes those same PSP callbacks when a bank configuration is
+	// removed in the console (ADR-0012 §5). Derived from the same C6 ProviderSet; nil for
+	// the stub. Wiring it into the console (below) is what arms the bank-identity removal
+	// guard (SIN-70342): the guard only runs on the deregistration path, so leaving this
+	// nil left the guard — and the deregistration it protects — dormant in production.
+	var webhookDeregistrar ports.WebhookDeregistrar
 	if set, ok := registry.Get(ports.BankIDC6); ok {
 		webhookRegistrar = set.PixWebhook
+		webhookDeregistrar = set.WebhookDeregistrar
 	}
 	// The per-port routers dispatch each request to the bank resolved at the HTTP
 	// boundary (carried on the context). The application services depend on these,
@@ -259,24 +266,32 @@ func run() error {
 	})
 
 	console := app.NewConsoleService(app.ConsoleDeps{
-		Tenants:          store,
-		Accounts:         store,
-		Pricing:          store,
-		Ledger:           store,
-		CredWriter:       creds,
-		CreditorWriter:   creds,
-		CredReader:       creds,
-		CertWriter:       certs,
-		CertReader:       certs,
-		CredDeleter:      creds,
-		CertDeleter:      certs,
-		Sharing:          creds,
-		Invoices:         store,
-		OutboundWebhooks: outboundWebhooks,
-		CredInvalidator:  credInvalidator,
-		Audit:            store,
-		Clock:            system.Clock{},
-		IDs:              system.IDProvider{},
+		Tenants:        store,
+		Accounts:       store,
+		Pricing:        store,
+		Ledger:         store,
+		CredWriter:     creds,
+		CreditorWriter: creds,
+		CredReader:     creds,
+		CertWriter:     certs,
+		CertReader:     certs,
+		CredDeleter:    creds,
+		CertDeleter:    certs,
+		// Removing a bank configuration deregisters the PSP callbacks first (needs the
+		// credential to authenticate, so read before delete). WebhookDeregistrar is nil for
+		// the stub ⇒ no-op. Sharing arms the bank-identity guard on that path: it skips the
+		// PSP deregistration when ANOTHER ACTIVE tenant shares the PIX key / client_id, so
+		// removing one holder never silently knocks out the other's live webhook (SIN-70342,
+		// the Verz incident). Creds resolves the (tenant, c6) PIX key the delete is keyed by.
+		WebhookDeregistrar: webhookDeregistrar,
+		Creds:              creds,
+		Sharing:            creds,
+		Invoices:           store,
+		OutboundWebhooks:   outboundWebhooks,
+		CredInvalidator:    credInvalidator,
+		Audit:              store,
+		Clock:              system.Clock{},
+		IDs:                system.IDProvider{},
 	})
 
 	// Self-contained console login (ADR-0001 Opção B, SIN-69265): username +
@@ -721,6 +736,14 @@ func buildProviderSet(generic ports.BankProvider, raw ports.PixProvider) bank.Pr
 	// PSP webhook over the same transport. Nil for the stub ⇒ registration is a no-op.
 	if v, ok := raw.(ports.PixWebhookRegistrar); ok {
 		set.PixWebhook = v
+	}
+	// The C6 raw provider also satisfies ports.WebhookDeregistrar (the BACEN deletes; the
+	// stub speaks none of them). Expose it so removing a bank configuration in the console
+	// tears down the PSP callbacks BEFORE the credential that authenticates them is deleted
+	// (ADR-0012 §5). Nil for the stub ⇒ deregistration is an inert no-op. The bank-identity
+	// removal guard (SIN-70342) only runs on this path, so it is dormant until this is set.
+	if v, ok := raw.(ports.WebhookDeregistrar); ok {
+		set.WebhookDeregistrar = v
 	}
 	return set
 }
