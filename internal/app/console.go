@@ -419,6 +419,9 @@ func (s *ConsoleService) SetBankCredential(ctx context.Context, tenantID, client
 	// Single-bank write path: persists under the default bank (BankIDC6),
 	// preserving current behaviour. A per-bank selector in the console is the
 	// routing/UX workstream (SIN-66022 / SIN-66017), not this schema change.
+	if err := s.assertClientIDFree(ctx, tenantID, ports.BankIDC6, clientID); err != nil {
+		return err
+	}
 	if err := s.credWriter.SetBankCredential(ctx, tenantID, ports.BankIDC6, clientID, secret); err != nil {
 		// Wrap with non-sensitive context only; never include the secret.
 		return fmt.Errorf("set bank credential: %w", err)
@@ -635,6 +638,9 @@ func (s *ConsoleService) SetBankCredentialFor(ctx context.Context, tenantID, ban
 	if !ports.IsKnownBankID(slug) {
 		return shared.NewValidationError("bank", "banco não suportado")
 	}
+	if err := s.assertClientIDFree(ctx, tenantID, slug, clientID); err != nil {
+		return err
+	}
 	if err := s.credWriter.SetBankCredential(ctx, tenantID, slug, clientID, secret); err != nil {
 		return fmt.Errorf("set bank credential: %w", err)
 	}
@@ -658,6 +664,9 @@ func (s *ConsoleService) SetCreditorKey(ctx context.Context, tenantID, creditorK
 		return fmt.Errorf("resolve tenant: %w", err)
 	}
 	key := strings.TrimSpace(creditorKey)
+	if err := s.assertCreditorKeyFree(ctx, tenantID, key); err != nil {
+		return err
+	}
 	if err := s.creditorWrite.SetCreditorKey(ctx, tenantID, key); err != nil {
 		// Wrap with non-sensitive context only; never include the key value.
 		return fmt.Errorf("set creditor key: %w", err)
@@ -1096,6 +1105,18 @@ func (s *ConsoleService) AccountConsumptionInRange(ctx context.Context, accountI
 // every removal left behind before this existed. An already-absent registration is not an
 // error. Each outcome is logged with the tenant and bank (never the callback URL, which
 // embeds the secret ref).
+// assertCreditorKeyFree delegates to the package guard; see bank_identity.go for why
+// the invariant exists and why a suspended holder does not block.
+func (s *ConsoleService) assertCreditorKeyFree(ctx context.Context, tenantID, creditorKey string) error {
+	return assertCreditorKeyUnclaimed(ctx, s.sharing, s.tenants, tenantID, ports.BankIDC6, creditorKey)
+}
+
+// assertClientIDFree rejects a PSP account (client_id) already used by another ACTIVE
+// empresa. Dividir a conta quebra recorrência e CHECKOUT — o aviso de pagamento com
+// cartão —, mesmo que as chaves PIX sejam diferentes.
+func (s *ConsoleService) assertClientIDFree(ctx context.Context, tenantID, bankID, clientID string) error {
+	return assertClientIDUnclaimed(ctx, s.sharing, s.tenants, tenantID, bankID, clientID)
+}
 
 // tenantIsActive resolves a tenant's ACTIVE flag. A tenant that no longer exists counts
 // as inactive (an orphan credential row must not block a legitimate write).

@@ -165,6 +165,7 @@ func run() error {
 		OutboundAttributor: outboundAttributor,
 		Credentials:        creds,
 		CredWriter:         creds,
+		Sharing:            creds,
 		CertWriter:         certs,
 		CredInvalidator:    credInvalidator,
 		Audit:              store,
@@ -269,6 +270,7 @@ func run() error {
 		CertReader:       certs,
 		CredDeleter:      creds,
 		CertDeleter:      certs,
+		Sharing:          creds,
 		Invoices:         store,
 		OutboundWebhooks: outboundWebhooks,
 		CredInvalidator:  credInvalidator,
@@ -333,7 +335,8 @@ func run() error {
 	// reference the same instance (idempotent GET-gate keeps concurrent calls safe).
 	webhookRegSvc := app.NewWebhookRegistrationService(
 		creds, webhookRegistrar, app.NewWebhookRefMintService(webhookRefStore),
-		webhookCallbackBaseURL(), slog.Default())
+		webhookCallbackBaseURL(), slog.Default()).
+		WithTenants(store)
 
 	srv := httpadapter.NewServer(httpadapter.Config{
 		Charges:     app.NewChargeService(deps),
@@ -405,6 +408,9 @@ func run() error {
 		// stub, which makes the service inert). The callback base origin mirrors
 		// cmd/register-webhook (PAYMENT_WEBHOOK_BASE_URL, default the receiver VPS).
 		WebhookRegistrar: webhookRegSvc,
+		// Capacidades por tenant vêm do banco real quando ele está ligado; com o stub
+		// (dev/testes) fica nil e a rota responde 503 em vez de inventar um "pode".
+		BankCapabilities: bankCapabilityReader(registry),
 	})
 
 	httpServer := &stdhttp.Server{
@@ -444,6 +450,22 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// bankCapabilityReader derives the per-tenant capability reader from the wired registry.
+// Only the real C6 adapter can answer it — the capability comes from the scopes the PSP
+// grants on the token, and the in-memory stub has no PSP. Nil for the stub, which makes
+// the route answer 503: melhor dizer "não sei" do que afirmar que a empresa pode cobrar
+// de um jeito que o banco vai recusar.
+func bankCapabilityReader(registry *bank.Registry) ports.BankCapabilityReader {
+	set, ok := registry.Get(ports.BankIDC6)
+	if !ok || set.Pix == nil {
+		return nil
+	}
+	// Mesma travessia que recurrenceReaders faz: o provider real do C6 é quem sabe
+	// responder, e o stub simplesmente não satisfaz a interface.
+	reader, _ := set.Pix.(ports.BankCapabilityReader)
+	return reader
 }
 
 // runWebhookReconcileWorker drives the B2 webhook-reconcile sweep on a fixed interval
@@ -493,6 +515,10 @@ type credentialAdapter interface {
 	ports.CredentialDeleter
 	ports.CreditorKeyWriter
 	ports.CredentialEnumerator
+	// CreditorKeySharingLookup keeps a PIX key / PSP account from being claimed by two
+	// ACTIVE empresas at once, and stops a removal from tearing down a webhook that
+	// still belongs to another one (SIN-69368). Both vaults implement it.
+	ports.CreditorKeySharingLookup
 }
 
 // certificateAdapter is the union of mTLS-certificate ports the wiring depends on.

@@ -17,9 +17,12 @@ import (
 // privileged (RBAC enforced at the boundary) and every successful mutation is
 // recorded to the append-only audit trail with the operator's identity.
 type AdminService struct {
-	tenants     ports.TenantRepository
-	pricing     ports.PricingRepository
-	credWriter  ports.CredentialWriter
+	tenants    ports.TenantRepository
+	pricing    ports.PricingRepository
+	credWriter ports.CredentialWriter
+	// sharing keeps a PSP account (client_id) from being claimed by two ACTIVE empresas
+	// at once. Optional: nil leaves the historical behaviour. See bank_identity.go.
+	sharing     ports.CreditorKeySharingLookup
 	certWriter  ports.BankCertificateWriter
 	credEvictor ports.CredentialInvalidator
 	audit       ports.AuditLog
@@ -55,7 +58,7 @@ func NewAdminService(d Deps) *AdminService {
 	if ci == nil {
 		ci = noopCredInvalidator{}
 	}
-	return &AdminService{tenants: d.Tenants, pricing: d.Pricing, credWriter: d.CredWriter, certWriter: d.CertWriter, credEvictor: ci, audit: a, clock: d.Clock, ids: d.IDs}
+	return &AdminService{tenants: d.Tenants, pricing: d.Pricing, credWriter: d.CredWriter, sharing: d.Sharing, certWriter: d.CertWriter, credEvictor: ci, audit: a, clock: d.Clock, ids: d.IDs}
 }
 
 // recordAudit appends an audit entry for a privileged action. who is derived
@@ -176,6 +179,9 @@ func (s *AdminService) setBankCredential(ctx context.Context, tenantID, bank, cl
 	if _, err := s.tenants.FindTenantByID(ctx, tenantID); err != nil {
 		return fmt.Errorf("resolve tenant: %w", err)
 	}
+	if err := assertClientIDUnclaimed(ctx, s.sharing, s.tenants, tenantID, bank, clientID); err != nil {
+		return err
+	}
 	if err := s.credWriter.SetBankCredential(ctx, tenantID, bank, clientID, secret); err != nil {
 		// Wrap with a non-sensitive context only; never include the secret.
 		return fmt.Errorf("set bank credential: %w", err)
@@ -229,8 +235,9 @@ func (s *AdminService) recordCertificateAudit(ctx context.Context, tenantID, ban
 // for a rotation; the validity window is returned so the UI can badge it. On
 // success ONLY the public metadata is returned (never the private key) and the
 // write is audited by who/tenant/bank/fingerprint — the key is never logged,
-// echoed or audited (threat C1/C4). Wiring the stored material into the live C6
-// mTLS transport is a separable follow-up (plan "Fora de escopo").
+// echoed or audited (threat C1/C4). The write reaches the LIVE transport: the
+// eviction below drops the tenant's pooled TLS connections, so the new certificate
+// is presented on the very next call instead of waiting out a restart.
 func (s *AdminService) SetBankCertificate(ctx context.Context, tenantID, bank, certPEM, keyPEM string) (ports.BankCertificateMeta, error) {
 	return s.setBankCertificate(ctx, tenantID, bank, certPEM, keyPEM, false)
 }
@@ -287,9 +294,10 @@ func (s *AdminService) setBankCertificate(ctx context.Context, tenantID, bank, c
 		// Wrap with non-sensitive context only; never include key material.
 		return ports.BankCertificateMeta{}, fmt.Errorf("set bank certificate: %w", err)
 	}
-	// Evict any cached transport/token state keyed on the tenant credential so a
-	// certificate rotation can take effect without waiting out a cache TTL
-	// (best-effort, local; ADR-0003). The live mTLS transport swap is a follow-up.
+	// Evict the tenant's cached token AND its pooled mTLS connections, so the
+	// certificate just written is the one presented on the next handshake (ADR-0003,
+	// SIN-69368). A pooled connection never re-runs GetClientCertificate: without this
+	// the rotation would only take effect at the next restart.
 	s.credEvictor.InvalidateToken(tenantID)
 	if err := s.recordCertificateAudit(ctx, tenantID, bank, cert.FingerprintSHA256, selfServe); err != nil {
 		return ports.BankCertificateMeta{}, err
