@@ -18,9 +18,20 @@ import (
 // create targets the same charge.
 //
 // Reads (GetRec/GetSolicRec/GetCobR) reconcile authoritative state from the bank —
-// never trust a raw webhook (threat W3). C6 returns those reads as JWS-signed
-// documents (Accept: application/jose; non-repúdio do mandato BACEN); verifying
-// that signature before the body is trusted is the adapter's responsibility.
+// never trust a raw webhook (threat W3). They are plain application/json, and their
+// authenticity comes from the CHANNEL: OAuth2 client_credentials over the per-tenant
+// mTLS, exactly as for cob/cobv/boleto/checkout.
+//
+// There is deliberately NO signature check on this path, and that is a correction, not
+// an omission. An earlier design had the adapter demand `Accept: application/jose` and
+// verify a JWS against a C6 JWKS; probed against the sandbox on 28/08/2026 C6 answers
+// that header with 400 — it serves only application/json — so every recurrence read was
+// failing and no JWKS value could have helped. The Pix Automático JWS is real but it is
+// someone else's document: it lives on GET /rec/{recUrlAccessToken}, a public endpoint
+// on another host, fetched and validated by the PAYER's PSP when it reads the QR. We are
+// the recebedor and never request it. Residual, stated plainly: there is no cryptographic
+// non-repudiation of the mandate document on our side. See SIN-66034 and
+// docs/ops/c6-recurrence-jws-obsoleto.md.
 //
 // The bank dimension is fixed in the adapter's identity ("c6"), never carried on a
 // business request: resolution stays on the (tenantID, bankID) credential seam
@@ -92,8 +103,30 @@ type CreateRecRequest struct {
 	Vinculo             RecVinculo
 	Calendario          RecCalendario
 	PoliticaRetentativa RetryPolicy
+	// LocID is the payload location (locrec) the composite QR renders the mandate
+	// parameters from. Zero means "no location" — legal for the solicrec journey
+	// (Jornada 1), which has no QR at all; required for the QR journeys 2/3/4.
+	LocID int64
+	// JornadaTxID is the txid of the ALREADY-CREATED immediate charge the composite
+	// QR settles alongside the authorization (ativacao.dadosJornada.txid). BACEN makes
+	// it mandatory for Jornada 3 and forbids it on 1/2/4, so it is sent only when set.
+	JornadaTxID string
+	// ValorRecCents is the fixed amount every cycle debits, in centavos (valor.valorRec
+	// on the wire, rendered as the BACEN decimal string). Zero = variable-value mandate,
+	// whose amount is decided per cycle. A non-zero value is the ceiling the payer
+	// authorized: recurrence.RequireWithinAuthorizedValue caps every CobR at it.
+	ValorRecCents int64
 	// IdempotencyKey collapses retried/concurrent registrations into one mandate.
 	IdempotencyKey string
+}
+
+// RecDadosQR is the composite QR (QR composto) the bank renders for a mandate. It is
+// populated only on a read that carries every parameter the QR needs — see
+// RecProvider.GetRecForQR. Jornada names which QR was composed: JORNADA_2 (mandate
+// only), JORNADA_3 (mandate + immediate charge) or JORNADA_4 (mandate + due charge).
+type RecDadosQR struct {
+	Jornada       string
+	PixCopiaECola string
 }
 
 // RecResult is the bank's representation of a recurring mandate.
@@ -107,6 +140,15 @@ type RecResult struct {
 	// TipoJornada is the activation-journey state, e.g. AGUARDANDO_DEFINICAO until
 	// the payer approves the mandate at their bank.
 	TipoJornada string
+	// LocID / Location are the payload location bound to the mandate (zero/empty when
+	// none is bound). Location is the URL the payer's PSP reads the parameters from.
+	LocID    int64
+	Location string
+	// ValorRecCents is the fixed authorized amount in centavos (0 = variable-value).
+	ValorRecCents int64
+	// DadosQR carries the composite QR when the read asked for one and the bank had
+	// everything it needed to compose it. Zero value means "not composed".
+	DadosQR RecDadosQR
 }
 
 // RecProvider is the output port for recurring-debit mandates (rec).
@@ -115,11 +157,51 @@ type RecProvider interface {
 	// must be APROVADA (out-of-band, via the payer's bank) before any CobR is
 	// chargeable.
 	CreateRec(ctx context.Context, tenantID string, req CreateRecRequest) (RecResult, error)
-	// GetRec reconciles the authoritative mandate state from the bank (JWS-verified).
+	// GetRec reconciles the authoritative mandate state from the bank.
 	GetRec(ctx context.Context, tenantID, idRec string) (RecResult, error)
+	// GetRecForQR reads the mandate asking the bank to compose the QR for a journey.
+	// It is a separate method rather than a parameter on GetRec because the two have
+	// different reasons to exist: GetRec is the reconcile-before-settle read the
+	// webhook path depends on (never trust the body — threat W3), while this one is a
+	// presentation read that produces the artifact the shop displays. A txID selects
+	// the journey: the txid of an immediate charge composes JORNADA_3, the txid of a
+	// due charge composes JORNADA_4, and an empty txID composes JORNADA_2.
+	GetRecForQR(ctx context.Context, tenantID, idRec, txID string) (RecResult, error)
 	// CancelRec revokes a mandate (PATCH status=CANCELADA) so no further debits can
 	// be originated. Idempotent on idRec.
 	CancelRec(ctx context.Context, tenantID, idRec string) (RecResult, error)
+}
+
+// LocRecResult is a payload location for recurrence (locrec): the URL the payer's
+// PSP fetches the mandate parameters from when it reads a composite QR. The bank
+// mints it; the recebedor then binds it to a mandate by passing the id on
+// CreateRecRequest.LocID.
+type LocRecResult struct {
+	// ID is the bank-assigned location identifier (int64 on the wire, not a string).
+	ID int64
+	// Location is the URL embedded in the composite QR.
+	Location string
+	// Criacao is when the bank minted the location.
+	Criacao time.Time
+	// IDRec is the mandate currently bound to this location, empty when unbound.
+	IDRec string
+}
+
+// LocRecProvider is the output port for recurrence payload locations (locrec). It is
+// its own port rather than a method on RecProvider because a deployment can speak the
+// mandate surface without the QR journeys (Jornada 1 needs no location at all), and
+// the hexagonal seam should let that be a wiring decision.
+type LocRecProvider interface {
+	// CreateLocRec mints a payload location. The BACEN contract takes NO request body
+	// — the location is minted from the authenticated recebedor's context alone — so
+	// there is nothing to validate at this boundary beyond the tenant.
+	CreateLocRec(ctx context.Context, tenantID, idempotencyKey string) (LocRecResult, error)
+	// GetLocRec reads one location back, including the mandate bound to it.
+	GetLocRec(ctx context.Context, tenantID string, id int64) (LocRecResult, error)
+	// UnlinkLocRec detaches the mandate from a location (DELETE /locrec/{id}/idRec) so
+	// the location can be rebound. Idempotent: unlinking an already-free location is a
+	// no-op that returns the location.
+	UnlinkLocRec(ctx context.Context, tenantID string, id int64) (LocRecResult, error)
 }
 
 // SolicRecDestinatario is the participant/account a recurrence-activation request
@@ -154,7 +236,7 @@ type SolicRecResult struct {
 // SolicRecProvider is the output port for recurrence-activation requests (solicrec).
 type SolicRecProvider interface {
 	CreateSolicRec(ctx context.Context, tenantID string, req CreateSolicRecRequest) (SolicRecResult, error)
-	// GetSolicRec reconciles the authoritative activation-request state (JWS-verified).
+	// GetSolicRec reconciles the authoritative activation-request state.
 	GetSolicRec(ctx context.Context, tenantID, idSolicRec string) (SolicRecResult, error)
 }
 
@@ -201,10 +283,19 @@ type CobRResult struct {
 // CobRProvider is the output port for recurring charge instances (cobr).
 type CobRProvider interface {
 	CreateCobR(ctx context.Context, tenantID string, req CreateCobRRequest) (CobRResult, error)
-	// GetCobR reconciles the authoritative charge state from the bank (JWS-verified).
+	// GetCobR reconciles the authoritative charge state from the bank.
 	GetCobR(ctx context.Context, tenantID, txID string) (CobRResult, error)
-	// ReviseCobR updates a not-yet-settled charge instance (PUT /cobr/{txid}).
-	ReviseCobR(ctx context.Context, tenantID string, req CreateCobRRequest) (CobRResult, error)
+	// CancelCobR cancels ONE scheduled charge instance (PATCH /cobr/{txid} with
+	// status=CANCELADA) without touching the mandate: the payer's authorization stays
+	// standing and later cycles still charge. It is the only amendment the BACEN
+	// contract admits on a cobr — `status: CANCELADA` is the sole revisable field and
+	// the sole allowed value, so there is no way to change an instalment's amount or
+	// due date. To charge a different amount, cancel this instance and originate a new
+	// one; that keeps every debit traceable to the instance that authorized it instead
+	// of letting one txid quietly mean two different amounts.
+	//
+	// Idempotent on txid: cancelling an already-cancelled charge is the same effect.
+	CancelCobR(ctx context.Context, tenantID, txID string) (CobRResult, error)
 	// RetryCobR schedules a retry of a failed charge per the mandate's política de
 	// retentativa, on the given date (yyyy-MM-dd).
 	RetryCobR(ctx context.Context, tenantID, txID, dataRetentativa string) (CobRResult, error)

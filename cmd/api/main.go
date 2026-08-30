@@ -132,6 +132,7 @@ func run() error {
 	// per-bank routing surface — that moves into the registry routers when a second
 	// bank gains PIX Automático (SIN-66022).
 	recReader, cobrReader := recurrenceReaders(registry)
+	solicRecWriter, locRecWriter := recurrenceWriters(registry)
 
 	// Outbound webhook attribution (SIN-69491, F1 of SIN-69486): on a settled inbound
 	// event, resolve the owning Conta SERVER-SIDE and materialise the event onto that
@@ -169,6 +170,8 @@ func run() error {
 		Statement:          routers.Statement,
 		RecReader:          recReader,
 		CobRReader:         cobrReader,
+		SolicRecs:          solicRecWriter,
+		LocRecs:            locRecWriter,
 		OutboundAttributor: outboundAttributor,
 		Credentials:        creds,
 		CredWriter:         creds,
@@ -354,13 +357,17 @@ func run() error {
 		WithTenants(store)
 
 	srv := httpadapter.NewServer(httpadapter.Config{
-		Charges:     app.NewChargeService(deps),
-		Pix:         app.NewPixService(deps),
-		PixCobV:     app.NewPixDueChargeService(deps),
-		Checkout:    app.NewCheckoutService(deps),
-		Boleto:      app.NewBoletoService(deps),
-		DDA:         app.NewDDAService(deps),
-		Statement:   app.NewStatementService(deps),
+		Charges:   app.NewChargeService(deps),
+		Pix:       app.NewPixService(deps),
+		PixCobV:   app.NewPixDueChargeService(deps),
+		Checkout:  app.NewCheckoutService(deps),
+		Boleto:    app.NewBoletoService(deps),
+		DDA:       app.NewDDAService(deps),
+		Statement: app.NewStatementService(deps),
+		// PIX Automático (recorrência). The service is wired unconditionally so the
+		// recurrence WEBHOOK path can keep recording reconciled mandates; the flag below
+		// decides only whether the tenant-facing routes exist.
+		Recurrence:  app.NewRecurrenceService(deps),
 		Admin:       app.NewAdminService(deps),
 		Console:     console,
 		ConsoleAuth: consoleAuth,
@@ -384,6 +391,10 @@ func run() error {
 		TrustedProxyHops: cfg.TrustedProxyHops,
 		// Self-serve credential intake (SIN-69196), default-off dark-ship.
 		SelfServeCredIntake: cfg.SelfServeCredIntake,
+		// PIX Automático tenant surface (Jornada 3 — QR composto), default-off
+		// dark-ship.
+		PixRecurrence:     cfg.PixRecurrence,
+		WebhookLogPayload: cfg.WebhookLogPayload,
 		// Model (b) account-key + per-request client selector (ADR-0011 §2 /
 		// SIN-69279), default-off dark-ship: consulted only when AccountKeySelector
 		// is on and the bearer has the ak_ shape; otherwise inert (model (a)).
@@ -663,36 +674,6 @@ func newBankRegistry(cfg config.Config, creds ports.CredentialStore, certs c6.Ce
 	} else {
 		log.Print("api: C6 mTLS transport wired (vault-per-tenant; no §8 path bootstrap configured)")
 	}
-	// PIX Automático (Recorrência) reads are JWS-signed; wire the concrete verifier
-	// when a JWKS URL is configured. The verifier reuses the C6 HTTP client (so a
-	// JWKS served behind the same mTLS connection is reached with the client cert);
-	// when nil it builds its own TLS-1.2+ client. A bad JWKS URL fails the boot
-	// closed. When PAYMENT_C6_REC_JWKS_URL is unset the verifier stays nil and the
-	// recurrence reads fail secure (ErrUnavailable) — the correct interim until F4
-	// go-live (SIN-66061).
-	//
-	// The JWKS endpoint is process-wide with no natural tenant, so its request stamps
-	// none and the vault mTLS transport would fall back to the §8 bootstrap cert; on a
-	// vault-only deployment that cert is absent and the handshake fails closed
-	// (SIN-69375). PAYMENT_C6_REC_JWKS_MTLS_TENANT designates a tenant whose vault cert
-	// is presented on the fetch so recurrence verification works without a §8 bootstrap
-	// cert. Empty keeps the prior tenantless behaviour.
-	if cfg.C6.RecJWKSURL != "" {
-		var vopts []c6.VerifierOption
-		if cfg.C6.RecJWKSMTLSTenant != "" {
-			vopts = append(vopts, c6.WithMTLSTenant(cfg.C6.RecJWKSMTLSTenant))
-		}
-		verifier, err := c6.NewJWSVerifier(cfg.C6.RecJWKSURL, c6cfg.HTTPClient, vopts...)
-		if err != nil {
-			return nil, err
-		}
-		c6cfg.RecurrenceVerifier = verifier
-		if cfg.C6.RecJWKSMTLSTenant != "" {
-			log.Print("api: C6 recurrence JWS verifier configured (JWKS fetch uses designated mTLS tenant)")
-		} else {
-			log.Print("api: C6 recurrence JWS verifier configured")
-		}
-	}
 	c6p, err := c6.New(c6cfg, creds)
 	if err != nil {
 		return nil, err
@@ -763,4 +744,21 @@ func recurrenceReaders(reg *bank.Registry) (ports.RecProvider, ports.CobRProvide
 	recReader, _ := set.Pix.(ports.RecProvider)
 	cobrReader, _ := set.Pix.(ports.CobRProvider)
 	return recReader, cobrReader
+}
+
+// recurrenceWriters derives the remaining PIX Automático ports the TENANT-FACING
+// surface needs: the activation request (solicrec, Jornada 1) and the payload locations
+// the composite-QR journeys are built on (locrec, Jornadas 2/3/4). Same derivation and
+// same caveat as recurrenceReaders — read off the C6 ProviderSet's raw provider because
+// recurrence is not yet part of the per-bank routing surface (SIN-66022) — and the same
+// failure mode: a bank that does not implement them yields nil, which leaves those
+// operations answering 503 rather than panicking.
+func recurrenceWriters(reg *bank.Registry) (ports.SolicRecProvider, ports.LocRecProvider) {
+	set, ok := reg.Get(ports.BankIDC6)
+	if !ok || set.Pix == nil {
+		return nil, nil
+	}
+	solicRec, _ := set.Pix.(ports.SolicRecProvider)
+	locRec, _ := set.Pix.(ports.LocRecProvider)
+	return solicRec, locRec
 }

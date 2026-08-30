@@ -18,12 +18,13 @@ import (
 // SIN-66034 (F0). C6 follows the BACEN surface under the same /v2/pix prefix as
 // cob/cobv: rec (mandato), solicrec (solicitação de confirmação) and cobr
 // (cobrança recorrente). Writes are application/json with a {"data":{...}} envelope
-// (201); reads are JWS-signed (Accept: application/jose) and go through
-// signedRead/RecurrenceVerifier. This file replaces the chutado consent scaffold.
+// (201); reads are plain application/json and go through recurrenceRead. This file
+// replaces the chutado consent scaffold.
 const (
 	recPath      = "/v2/pix/rec"
 	solicRecPath = "/v2/pix/solicrec"
 	cobrPath     = "/v2/pix/cobr"
+	locRecPath   = "/v2/pix/locrec"
 )
 
 // compile-time assertions that Provider satisfies the Recorrência ports.
@@ -31,19 +32,8 @@ var (
 	_ ports.RecProvider      = (*Provider)(nil)
 	_ ports.SolicRecProvider = (*Provider)(nil)
 	_ ports.CobRProvider     = (*Provider)(nil)
+	_ ports.LocRecProvider   = (*Provider)(nil)
 )
-
-// RecurrenceVerifier verifies a JWS-signed Recorrência read document and returns
-// its decoded JSON payload. C6 returns rec/solicrec/cobr reads as a JWS (Accept:
-// application/jose) so the BACEN mandate is non-reputable; the adapter MUST verify
-// the signature against C6's published JWKS before trusting the body. F1 defines
-// this seam so the read path is hexagonal and table-testable; the concrete
-// implementation is *JWSVerifier (go-jose v4, explicit asymmetric allowlist + JWKS
-// by kid with rotation), wired in cmd/api/main.go when PAYMENT_C6_REC_JWKS_URL is
-// set (SIN-66061). When no verifier is injected the reads fail secure.
-type RecurrenceVerifier interface {
-	VerifyJWS(ctx context.Context, compact []byte) (payload []byte, err error)
-}
 
 // ---- rec (mandato) ----
 
@@ -71,10 +61,42 @@ type recebedorBody struct {
 	Nome             string `json:"nome,omitempty"`
 }
 
+// recDadosJornadaBody carries ativacao.dadosJornada.txid — the txid of the immediate
+// charge a Jornada 3 composite QR settles alongside the authorization. BACEN requires
+// it for Jornada 3 and forbids it for 1/2/4, so the whole ativacao object is a pointer
+// and is omitted unless a journey txid was supplied.
+type recDadosJornadaBody struct {
+	TxID string `json:"txid"`
+}
+
+type recAtivacaoBody struct {
+	DadosJornada recDadosJornadaBody `json:"dadosJornada"`
+}
+
+// recValorBody is the mandate's fixed amount.
+//
+// valorRec is a QUOTED decimal string on this wire ("99.00"), not a bare number: the
+// contract types it `string` with pattern \d{1,10}\.\d{2}, and every money example in
+// the captured spec is quoted. That is why it uses formatAmount (the same string
+// renderer as cobr's valor.original) rather than brlDecimal, which marshals to a bare
+// JSON number for the boleto surface. Both render from integer centavos — no float ever
+// touches an amount (SIN-65953).
+//
+// Omitted entirely for a variable-value mandate, since C6 rejects an empty valorRec.
+type recValorBody struct {
+	ValorRec string `json:"valorRec"`
+}
+
 type recRequestBody struct {
 	Vinculo             recVinculoBody    `json:"vinculo"`
 	Calendario          recCalendarioBody `json:"calendario"`
 	PoliticaRetentativa string            `json:"politicaRetentativa"`
+	// Loc binds the mandate to a payload location (locrec) so the bank can compose the
+	// QR. A pointer because 0 is not "no location" on the wire — the field must be
+	// absent, not zero.
+	Loc      *int64           `json:"loc,omitempty"`
+	Ativacao *recAtivacaoBody `json:"ativacao,omitempty"`
+	Valor    *recValorBody    `json:"valor,omitempty"`
 }
 
 type recResponseBody struct {
@@ -87,6 +109,46 @@ type recResponseBody struct {
 	Ativacao            struct {
 		TipoJornada string `json:"tipoJornada"`
 	} `json:"ativacao"`
+	// Loc is the location bound to the mandate. C6 returns it as the bare integer id
+	// on a create and as the expanded object on a read, so it is decoded leniently
+	// (locRef) rather than as one shape that a contract drift would break.
+	Loc   locRef `json:"loc"`
+	Valor struct {
+		ValorRec brlDecimal `json:"valorRec"`
+	} `json:"valor"`
+	// DadosQR is present only when the read asked the bank to compose a QR and every
+	// parameter it needs was filled in (GET /rec/{idRec}?txid=...).
+	DadosQR struct {
+		Jornada       string `json:"jornada"`
+		PixCopiaECola string `json:"pixCopiaECola"`
+	} `json:"dadosQR"`
+}
+
+// locRef decodes the mandate's loc field in either shape C6 uses: the bare integer id
+// (`"loc": 108`) or the expanded location object (`"loc": {"id": 108, "location":
+// "..."}`). Decoding both here keeps the shape drift out of every call site; an
+// unparseable value degrades to the zero location rather than failing the whole read,
+// because the location is presentation metadata and never a money-bearing field.
+type locRef struct {
+	ID       int64
+	Location string
+}
+
+func (l *locRef) UnmarshalJSON(b []byte) error {
+	var id int64
+	if err := json.Unmarshal(b, &id); err == nil {
+		l.ID = id
+		return nil
+	}
+	var obj struct {
+		ID       int64  `json:"id"`
+		Location string `json:"location"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return nil // absent/null/unknown shape → zero location, never a hard failure
+	}
+	l.ID, l.Location = obj.ID, obj.Location
+	return nil
 }
 
 func (b recResponseBody) toResult() ports.RecResult {
@@ -114,6 +176,13 @@ func (b recResponseBody) toResult() ports.RecResult {
 		},
 		PoliticaRetentativa: ports.RetryPolicy(b.PoliticaRetentativa),
 		TipoJornada:         b.Ativacao.TipoJornada,
+		LocID:               b.Loc.ID,
+		Location:            b.Loc.Location,
+		ValorRecCents:       int64(b.Valor.ValorRec),
+		DadosQR: ports.RecDadosQR{
+			Jornada:       b.DadosQR.Jornada,
+			PixCopiaECola: b.DadosQR.PixCopiaECola,
+		},
 	}
 }
 
@@ -147,6 +216,25 @@ func (p *Provider) CreateRec(ctx context.Context, tenantID string, req ports.Cre
 	if err := validateObjeto(req.Vinculo.Objeto); err != nil {
 		return ports.RecResult{}, err
 	}
+	if req.ValorRecCents < 0 {
+		return ports.RecResult{}, &Error{Op: "create_rec", sentinel: shared.ErrValidation, detail: "valor_rec_cents must not be negative"}
+	}
+	// The three Jornada fields are optional on the wire and must be ABSENT rather than
+	// zero when unused: a `loc: 0`, an empty `ativacao` or a `valorRec: "0.00"` are all
+	// rejected by C6's schema. Build them as pointers so encoding/json omits them.
+	var loc *int64
+	if req.LocID > 0 {
+		v := req.LocID
+		loc = &v
+	}
+	var ativacao *recAtivacaoBody
+	if txid := strings.TrimSpace(req.JornadaTxID); txid != "" {
+		ativacao = &recAtivacaoBody{DadosJornada: recDadosJornadaBody{TxID: txid}}
+	}
+	var valor *recValorBody
+	if req.ValorRecCents > 0 {
+		valor = &recValorBody{ValorRec: formatAmount(req.ValorRecCents)}
+	}
 	payload, err := json.Marshal(recRequestBody{
 		Vinculo: recVinculoBody{
 			Contrato: req.Vinculo.Contrato,
@@ -162,6 +250,9 @@ func (p *Provider) CreateRec(ctx context.Context, tenantID string, req ports.Cre
 			Periodicidade: string(req.Calendario.Periodicidade),
 		},
 		PoliticaRetentativa: string(req.PoliticaRetentativa),
+		Loc:                 loc,
+		Ativacao:            ativacao,
+		Valor:               valor,
 	})
 	if err != nil {
 		return ports.RecResult{}, &Error{Op: "create_rec", sentinel: shared.ErrValidation}
@@ -179,20 +270,53 @@ func (p *Provider) CreateRec(ctx context.Context, tenantID string, req ports.Cre
 	return out.Data.toResult(), nil
 }
 
-// GetRec reconciles the authoritative mandate state from C6 (GET /v2/pix/rec/{idRec}),
-// verifying the JWS signature before the body is trusted (never trust a webhook —
-// threat W3).
+// GetRec reconciles the authoritative mandate state from C6 (GET /v2/pix/rec/{idRec}).
+// It is the read that makes "never trust a raw webhook" (threat W3) real: the
+// notification is only a trigger, and this answer — not the notification body — is what
+// the caller acts on. Authenticity comes from the channel (OAuth2 client_credentials
+// over the per-tenant mTLS), exactly as for cob/cobv/boleto/checkout; see
+// recurrenceRead for why there is no signature to verify here.
 func (p *Provider) GetRec(ctx context.Context, tenantID, idRec string) (ports.RecResult, error) {
 	if strings.TrimSpace(idRec) == "" {
 		return ports.RecResult{}, &Error{Op: "get_rec", sentinel: shared.ErrValidation}
 	}
-	payload, err := p.signedRead(ctx, tenantID, "get_rec", p.baseURL+recPath+"/"+url.PathEscape(idRec))
+	payload, err := p.recurrenceRead(ctx, tenantID, "get_rec", p.baseURL+recPath+"/"+url.PathEscape(idRec))
 	if err != nil {
 		return ports.RecResult{}, err
 	}
 	var b recResponseBody
 	if err := decodeData(payload, &b); err != nil {
-		return ports.RecResult{}, &Error{Op: "get_rec", sentinel: shared.ErrUnavailable, detail: "malformed signed body"}
+		return ports.RecResult{}, &Error{Op: "get_rec", sentinel: shared.ErrUnavailable, detail: "malformed body"}
+	}
+	return b.toResult(), nil
+}
+
+// GetRecForQR reads the mandate asking C6 to compose the QR for a journey
+// (GET /v2/pix/rec/{idRec}?txid={txid}). The txid selects which QR is composed: the
+// txid of an immediate charge yields JORNADA_3 (the composite QR that settles the
+// first charge AND authorizes the recurrence), the txid of a cobrança com vencimento
+// yields JORNADA_4, and an empty txid yields JORNADA_2 (mandate parameters only).
+//
+// It is the same read as GetRec, over the same authenticated channel — this one just
+// asks C6 to compose the QR as well. C6 fills dadosQR only
+// when every parameter the QR needs is present on both the mandate and the referenced
+// charge; a missing dadosQR is therefore not an error here, it is "not composable
+// yet", and the caller decides what to do about it.
+func (p *Provider) GetRecForQR(ctx context.Context, tenantID, idRec, txID string) (ports.RecResult, error) {
+	if strings.TrimSpace(idRec) == "" {
+		return ports.RecResult{}, &Error{Op: "get_rec_qr", sentinel: shared.ErrValidation}
+	}
+	endpoint := p.baseURL + recPath + "/" + url.PathEscape(idRec)
+	if txid := strings.TrimSpace(txID); txid != "" {
+		endpoint += "?txid=" + url.QueryEscape(txid)
+	}
+	payload, err := p.recurrenceRead(ctx, tenantID, "get_rec_qr", endpoint)
+	if err != nil {
+		return ports.RecResult{}, err
+	}
+	var b recResponseBody
+	if err := decodeData(payload, &b); err != nil {
+		return ports.RecResult{}, &Error{Op: "get_rec_qr", sentinel: shared.ErrUnavailable, detail: "malformed body"}
 	}
 	return b.toResult(), nil
 }
@@ -306,23 +430,27 @@ func (p *Provider) CreateSolicRec(ctx context.Context, tenantID string, req port
 }
 
 // GetSolicRec reconciles the authoritative activation-request state from C6
-// (GET /v2/pix/solicrec/{idSolicRec}), JWS-verified.
+// (GET /v2/pix/solicrec/{idSolicRec}).
 func (p *Provider) GetSolicRec(ctx context.Context, tenantID, idSolicRec string) (ports.SolicRecResult, error) {
 	if strings.TrimSpace(idSolicRec) == "" {
 		return ports.SolicRecResult{}, &Error{Op: "get_solicrec", sentinel: shared.ErrValidation}
 	}
-	payload, err := p.signedRead(ctx, tenantID, "get_solicrec", p.baseURL+solicRecPath+"/"+url.PathEscape(idSolicRec))
+	payload, err := p.recurrenceRead(ctx, tenantID, "get_solicrec", p.baseURL+solicRecPath+"/"+url.PathEscape(idSolicRec))
 	if err != nil {
 		return ports.SolicRecResult{}, err
 	}
 	var b solicRecResponseBody
 	if err := decodeData(payload, &b); err != nil {
-		return ports.SolicRecResult{}, &Error{Op: "get_solicrec", sentinel: shared.ErrUnavailable, detail: "malformed signed body"}
+		return ports.SolicRecResult{}, &Error{Op: "get_solicrec", sentinel: shared.ErrUnavailable, detail: "malformed body"}
 	}
 	return b.toResult(), nil
 }
 
 // ---- cobr (cobrança recorrente) ----
+
+// cobrStatusCancelada is the only value the BACEN cobr revision accepts
+// (CobRStatusRevisada.status enum has exactly this one member).
+const cobrStatusCancelada = "CANCELADA"
 
 type cobrCalendarioBody struct {
 	DataDeVencimento string `json:"dataDeVencimento"`
@@ -418,23 +546,35 @@ func (p *Provider) CreateCobR(ctx context.Context, tenantID string, req ports.Cr
 	return out.Data.toResult(), nil
 }
 
-// ReviseCobR updates a not-yet-settled charge instance (PUT /v2/pix/cobr/{txid}).
-func (p *Provider) ReviseCobR(ctx context.Context, tenantID string, req ports.CreateCobRRequest) (ports.CobRResult, error) {
-	if strings.TrimSpace(req.TxID) == "" || strings.TrimSpace(req.IDRec) == "" || req.ValorCents <= 0 {
-		return ports.CobRResult{}, &Error{Op: "revise_cobr", sentinel: shared.ErrValidation}
+// CancelCobR cancels one scheduled charge instance: PATCH /v2/pix/cobr/{txid} with
+// {"status":"CANCELADA"}.
+//
+// PATCH, not PUT. On this surface PUT /cobr/{txid} is the CREATE (201, full cobr body,
+// txid defined by the client) and PATCH is the revision — whose only revisable field is
+// `status` and whose only allowed value is CANCELADA. An earlier version of this method
+// sent the full create body over PUT under the name "revise", which is the create call
+// wearing another name: it could never amend anything, and against an existing txid it
+// either no-ops or re-registers the instalment. The txid is forwarded as the
+// Idempotency-Key so a retried cancel collapses to one effect.
+func (p *Provider) CancelCobR(ctx context.Context, tenantID, txID string) (ports.CobRResult, error) {
+	txID = strings.TrimSpace(txID)
+	if txID == "" {
+		return ports.CobRResult{}, &Error{Op: "cancel_cobr", sentinel: shared.ErrValidation}
 	}
-	payload, err := json.Marshal(buildCobRBody(req))
+	payload, err := json.Marshal(struct {
+		Status string `json:"status"`
+	}{Status: cobrStatusCancelada})
 	if err != nil {
-		return ports.CobRResult{}, &Error{Op: "revise_cobr", sentinel: shared.ErrValidation}
+		return ports.CobRResult{}, &Error{Op: "cancel_cobr", sentinel: shared.ErrValidation}
 	}
-	httpReq, err := p.authedJSONRequest(ctx, tenantID, "revise_cobr", http.MethodPut, p.baseURL+cobrPath+"/"+url.PathEscape(req.TxID), payload, req.TxID)
+	httpReq, err := p.authedJSONRequest(ctx, tenantID, "cancel_cobr", http.MethodPatch, p.baseURL+cobrPath+"/"+url.PathEscape(txID), payload, txID)
 	if err != nil {
 		return ports.CobRResult{}, err
 	}
 	var out struct {
 		Data cobrResponseBody `json:"data"`
 	}
-	if err := p.do(httpReq, "revise_cobr", &out); err != nil {
+	if err := p.do(httpReq, "cancel_cobr", &out); err != nil {
 		return ports.CobRResult{}, err
 	}
 	return out.Data.toResult(), nil
@@ -460,33 +600,49 @@ func (p *Provider) RetryCobR(ctx context.Context, tenantID, txID, dataRetentativ
 	return out.Data.toResult(), nil
 }
 
-// GetCobR reconciles the authoritative charge state from C6 (GET /v2/pix/cobr/{txid}),
-// JWS-verified.
+// GetCobR reconciles the authoritative charge state from C6 (GET /v2/pix/cobr/{txid}).
+// Settlement is decided on THIS answer, never on the notification body (threat W3).
 func (p *Provider) GetCobR(ctx context.Context, tenantID, txID string) (ports.CobRResult, error) {
 	if strings.TrimSpace(txID) == "" {
 		return ports.CobRResult{}, &Error{Op: "get_cobr", sentinel: shared.ErrValidation}
 	}
-	payload, err := p.signedRead(ctx, tenantID, "get_cobr", p.baseURL+cobrPath+"/"+url.PathEscape(txID))
+	payload, err := p.recurrenceRead(ctx, tenantID, "get_cobr", p.baseURL+cobrPath+"/"+url.PathEscape(txID))
 	if err != nil {
 		return ports.CobRResult{}, err
 	}
 	var b cobrResponseBody
 	if err := decodeData(payload, &b); err != nil {
-		return ports.CobRResult{}, &Error{Op: "get_cobr", sentinel: shared.ErrUnavailable, detail: "malformed signed body"}
+		return ports.CobRResult{}, &Error{Op: "get_cobr", sentinel: shared.ErrUnavailable, detail: "malformed body"}
 	}
 	return b.toResult(), nil
 }
 
 // ---- shared helpers ----
 
-// signedRead performs a Recorrência read: GET with Accept: application/jose, maps a
-// non-2xx into a domain error, then verifies the JWS and returns the decoded JSON
-// payload. Without a configured RecurrenceVerifier it fails secure (ErrUnavailable)
-// rather than trusting an unverified mandate document.
-func (p *Provider) signedRead(ctx context.Context, tenantID, op, endpoint string) ([]byte, error) {
-	if p.recVerifier == nil {
-		return nil, &Error{Op: op, sentinel: shared.ErrUnavailable, detail: "recurrence read verifier not configured"}
-	}
+// recurrenceRead performs a Recorrência read: GET with Accept: application/json, maps
+// a non-2xx into a domain error, and returns the body.
+//
+// It used to send `Accept: application/jose` and refuse to trust the body unless a JWS
+// verified against a C6 JWKS. That was wrong, and provably so — C6 rejects the header
+// outright (probed against the sandbox on 28/08/2026, cmd/c6-rec-probe):
+//
+//	Accept: application/json  → 200, Content-Type: application/json
+//	Accept: application/jose  → 400 "Request Accept header '[application/jose]' does
+//	                            not match any defined response types. Must be one of:
+//	                            [application/json, application/problem+json]"
+//
+// So every recurrence read was failing, and no JWKS value could have fixed it: the
+// request was refused before any signature could exist to verify. The contract agrees
+// — these reads are declared application/json, and the single JWS in the whole C6 Pix
+// Automático spec belongs to GET /rec/{recUrlAccessToken}: a PUBLIC endpoint on another
+// host (qrcode-h.c6pix.com), signed under a BACEN `jku`, fetched and validated by the
+// PAYER's PSP when it scans the QR. We are the recebedor; that document is not ours to
+// verify, and we never request it.
+//
+// What authenticates these reads is therefore the channel, not the payload: OAuth2
+// client_credentials over the per-tenant mTLS transport — exactly what already
+// authenticates cob, cobv, boleto and checkout.
+func (p *Provider) recurrenceRead(ctx context.Context, tenantID, op, endpoint string) ([]byte, error) {
 	token, err := p.tokens.token(ctx, tenantID)
 	if err != nil {
 		return nil, err
@@ -496,7 +652,7 @@ func (p *Provider) signedRead(ctx context.Context, tenantID, op, endpoint string
 		return nil, transportError(op)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/jose")
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := p.httpc.Do(req)
 	if err != nil {
@@ -508,17 +664,13 @@ func (p *Provider) signedRead(ctx context.Context, tenantID, op, endpoint string
 	if resp.StatusCode/100 != 2 {
 		return nil, mapError(op, resp.StatusCode, body)
 	}
-	payload, err := p.recVerifier.VerifyJWS(ctx, body)
-	if err != nil {
-		return nil, &Error{Op: op, StatusCode: resp.StatusCode, sentinel: shared.ErrUnavailable, detail: "jws verification failed"}
-	}
-	return payload, nil
+	return body, nil
 }
 
 // decodeData unmarshals a Recorrência body that may be wrapped in the C6
-// {"data":{...}} envelope or delivered bare (the verified JWS payload shape is not
-// guaranteed to carry the envelope). It tries the envelope first, falling back to
-// the raw payload.
+// {"data":{...}} envelope or delivered bare — writes answer with the envelope, and the
+// reads are not guaranteed to. It tries the envelope first, falling back to the raw
+// payload.
 func decodeData(payload []byte, dst any) error {
 	var env struct {
 		Data json.RawMessage `json:"data"`

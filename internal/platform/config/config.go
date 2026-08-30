@@ -84,6 +84,23 @@ type Config struct {
 	// (production credentials are provisioned via the admin intake); it is a
 	// fast-follow convenience. Set PAYMENT_SELFSERVE_CRED_INTAKE truthy to enable.
 	SelfServeCredIntake bool
+	// PixRecurrence enables the PIX Automático (recorrência) tenant surface: the
+	// mandate, activation-request, payload-location and recurring-charge routes under
+	// /v1/pix. Defaults to false (secure / dark-ship): when off the routes are not
+	// registered at all, so rollback is a config flip and no integrator can reach a
+	// half-wired journey. Set PAYMENT_PIX_RECURRENCE truthy to enable.
+	//
+	// There is no second flag to turn on: the mandate reads used to be gated behind a
+	// JWS verifier and PAYMENT_C6_REC_JWKS_URL, which C6 turned out not to serve at all
+	// (docs/ops/c6-recurrence-jws-obsoleto.md). This flag alone exposes the surface.
+	PixRecurrence bool
+	// WebhookLogPayload logs the RAW body of SUCCESSFULLY processed inbound webhooks.
+	// Rejected webhooks always log their body, regardless of this flag (SIN-69580):
+	// silent 400s made a live settlement outage indistinguishable from the PSP never
+	// calling. Defaults to false — the accepted path is high-volume and the payload is
+	// written unredacted (payer name, CPF/CNPJ). Set PAYMENT_WEBHOOK_LOG_PAYLOAD truthy
+	// to enable, deliberately and time-boxed.
+	WebhookLogPayload bool
 	// AccountKeySelector enables the model (b) account-key + per-request client
 	// selector auth path at the tenant choke-point (ADR-0011 §2, SIN-69279). When
 	// on, a caller may present an Account's rotatable bearer key (ak_… prefix) plus
@@ -159,23 +176,6 @@ type C6Config struct {
 	// (threat C1); only the path comes from the environment.
 	ClientCertPath string
 	ClientKeyPath  string
-	// RecJWKSURL is the absolute https URL of C6's JWKS used to verify the JWS-signed
-	// PIX Automático (Recorrência) reads (rec/solicrec/cobr GETs, Accept:
-	// application/jose). When empty those reads fail secure (ErrUnavailable) — the
-	// recurrence read path stays disabled rather than trusting an unverified mandate
-	// document, the correct interim until F4 go-live (SIN-66061). It is a URL, never
-	// a secret: only public keys are served from it.
-	RecJWKSURL string
-	// RecJWKSMTLSTenant designates which tenant's vault mTLS certificate is presented
-	// on the (process-wide) JWKS fetch. The JWKS endpoint has no natural tenant, so a
-	// request to it stamps no tenant and the mTLS transport would fall back to the §8
-	// bootstrap certificate — which is absent in a vault-only deployment, making the
-	// handshake (and thus every recurrence signature verification) fail closed
-	// (SIN-69375, follow-up of SIN-69368). Setting this to a tenant that owns a vault
-	// certificate makes the JWKS fetch present that certificate. Empty (the default)
-	// keeps the prior behaviour: the fetch uses the §8 bootstrap cert when configured,
-	// else presents no client cert. It is not a secret — only the tenant identifier.
-	RecJWKSMTLSTenant string
 	// RateLimitRPS and RateLimitBurst configure the proactive outbound token bucket
 	// that paces requests to C6 (Termo A5 — no DoS-shaped load). Zero/unparseable ⇒
 	// the adapter's conservative defaults. MaxRetries bounds retries on a retryable
@@ -205,22 +205,22 @@ func FromEnv() Config {
 		SecureCookies:          getenvBool("PAYMENT_SECURE_COOKIES", true),
 		TrustedProxyHops:       getenvInt("PAYMENT_TRUSTED_PROXY_HOPS", 0),
 		SelfServeCredIntake:    getenvBool("PAYMENT_SELFSERVE_CRED_INTAKE", false),
+		PixRecurrence:          getenvBool("PAYMENT_PIX_RECURRENCE", false),
+		WebhookLogPayload:      getenvBool("PAYMENT_WEBHOOK_LOG_PAYLOAD", false),
 		AccountKeySelector:     getenvBool("PAYMENT_ACCOUNT_KEY_SELECTOR", false),
 		AccountOutboundWebhook: getenvBool("PAYMENT_ACCOUNT_OUTBOUND_WEBHOOK", false),
 		ConsoleUsername:        getenv("PAYMENT_CONSOLE_USERNAME", "pericles.luz"),
 		ConsoleBootstrapToken:  os.Getenv("PAYMENT_CONSOLE_BOOTSTRAP_TOKEN"),
 		C6: C6Config{
-			BaseURL:           os.Getenv("PAYMENT_C6_BASE_URL"),
-			TokenURL:          os.Getenv("PAYMENT_C6_TOKEN_URL"),
-			Scope:             os.Getenv("PAYMENT_C6_SCOPE"),
-			Timeout:           getenvDuration("PAYMENT_C6_TIMEOUT", 15*time.Second),
-			ClientCertPath:    os.Getenv("PAYMENT_C6_CLIENT_CERT"),
-			ClientKeyPath:     os.Getenv("PAYMENT_C6_CLIENT_KEY"),
-			RecJWKSURL:        os.Getenv("PAYMENT_C6_REC_JWKS_URL"),
-			RecJWKSMTLSTenant: os.Getenv("PAYMENT_C6_REC_JWKS_MTLS_TENANT"),
-			RateLimitRPS:      getenvFloat("PAYMENT_C6_RATE_LIMIT_RPS", 0),
-			RateLimitBurst:    getenvInt("PAYMENT_C6_RATE_LIMIT_BURST", 0),
-			MaxRetries:        getenvIntSigned("PAYMENT_C6_MAX_RETRIES", 0),
+			BaseURL:        os.Getenv("PAYMENT_C6_BASE_URL"),
+			TokenURL:       os.Getenv("PAYMENT_C6_TOKEN_URL"),
+			Scope:          os.Getenv("PAYMENT_C6_SCOPE"),
+			Timeout:        getenvDuration("PAYMENT_C6_TIMEOUT", 15*time.Second),
+			ClientCertPath: os.Getenv("PAYMENT_C6_CLIENT_CERT"),
+			ClientKeyPath:  os.Getenv("PAYMENT_C6_CLIENT_KEY"),
+			RateLimitRPS:   getenvFloat("PAYMENT_C6_RATE_LIMIT_RPS", 0),
+			RateLimitBurst: getenvInt("PAYMENT_C6_RATE_LIMIT_BURST", 0),
+			MaxRetries:     getenvIntSigned("PAYMENT_C6_MAX_RETRIES", 0),
 		},
 		WebhookReconcile:         getenvBool("PAYMENT_WEBHOOK_RECONCILE", false),
 		WebhookReconcileInterval: getenvDuration("PAYMENT_WEBHOOK_RECONCILE_INTERVAL", 5*time.Minute),
