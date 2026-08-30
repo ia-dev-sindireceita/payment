@@ -58,6 +58,11 @@ type Config struct {
 	// sign-off (SIN-66034 F0); the create/cancel paths do not need it.
 	RecurrenceVerifier RecurrenceVerifier
 
+	// BillingScheme is the C6 carteira de cobrança used on bank-slip registration
+	// (production: 15, sandbox: 21 — per the C6 Bolepix contract). Empty selects
+	// defaultBillingScheme.
+	BillingScheme string
+
 	// RateLimitPerSecond is the steady-state outbound request rate (tokens/sec) to
 	// C6, capping the load this adapter can generate (Termo A5, no DoS-shaped
 	// traffic). Zero or negative ⇒ defaultRatePerSecond.
@@ -74,8 +79,14 @@ type Config struct {
 // Provider implements ports.BankProvider (and ports.PixProvider) against C6.
 type Provider struct {
 	baseURL string
-	httpc   *http.Client
-	tokens  *tokenManager
+	// billingScheme is the C6 "carteira de cobrança" sent on every bank-slip
+	// registration. It is ENVIRONMENT-dependent (C6 documents carteira 15 in
+	// production and 21 in sandbox), so it is configuration, never a constant: a
+	// deployment pointed at the wrong environment must be fixed by config, not by a
+	// rebuild. Defaults to defaultBillingScheme when unset.
+	billingScheme string
+	httpc         *http.Client
+	tokens        *tokenManager
 	// creds resolves a tenant's bank credential, including its registered PIX
 	// creditor key (chave do recebedor), which the adapter injects into a cob/cobv
 	// when the request omits one (per-tenant config injection, ADR-0004 /
@@ -164,14 +175,20 @@ func New(cfg Config, creds ports.CredentialStore) (*Provider, error) {
 		maxRetries = 0
 	}
 
+	billingScheme := strings.TrimSpace(cfg.BillingScheme)
+	if billingScheme == "" {
+		billingScheme = defaultBillingScheme
+	}
+
 	return &Provider{
-		baseURL:     trimTrailingSlash(cfg.BaseURL),
-		httpc:       httpc,
-		tokens:      newTokenManager(creds, ports.BankIDC6, cfg.TokenURL, cfg.Scope, httpc, now),
-		creds:       creds,
-		bankID:      ports.BankIDC6,
-		now:         now,
-		recVerifier: cfg.RecurrenceVerifier,
+		baseURL:       trimTrailingSlash(cfg.BaseURL),
+		billingScheme: billingScheme,
+		httpc:         httpc,
+		tokens:        newTokenManager(creds, ports.BankIDC6, cfg.TokenURL, cfg.Scope, httpc, now),
+		creds:         creds,
+		bankID:        ports.BankIDC6,
+		now:           now,
+		recVerifier:   cfg.RecurrenceVerifier,
 		limiter: &tokenBucket{
 			tokens:       float64(burst),
 			capacity:     float64(burst),

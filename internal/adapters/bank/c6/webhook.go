@@ -38,10 +38,30 @@ const (
 	// GET. It is an RFC3339 timestamp; parsed best-effort (it is a cosmetic echo,
 	// never settlement money, so a malformed value must not fail the read).
 	webhookCriacaoLayout = time.RFC3339
+
+	// webhookRegistrationAccept is the Accept header the C6 webhook REGISTRATION PUTs
+	// require. C6 rejects the default "application/json" on these operations with
+	// 400 RequisicaoInvalida and the detail:
+	//
+	//	Request Accept header '[application/json]' does not match any defined
+	//	response types. Must be one of: [application/problem+json].
+	//
+	// Live-verified against the real C6 (SIN-69580): the identical request differing
+	// ONLY in this header returns 400 with application/json and 200 with
+	// application/problem+json, on all three registration PUTs — /v2/pix/webhook/{chave},
+	// /v2/pix/webhookrec and /v2/pix/webhookcobr.
+	//
+	// Deliberately scoped to the registration PUTs. The webhook GET readback and every
+	// other C6 surface (cob PUT, statement, DDA…) work with the default and are left
+	// alone, so this narrow quirk does not leak into the shared request builder.
+	webhookRegistrationAccept = "application/problem+json"
 )
 
-// compile-time assertion that Provider satisfies the webhook-registrar port.
-var _ ports.PixWebhookRegistrar = (*Provider)(nil)
+// compile-time assertions that Provider satisfies the webhook ports.
+var (
+	_ ports.PixWebhookRegistrar = (*Provider)(nil)
+	_ ports.WebhookDeregistrar  = (*Provider)(nil)
+)
 
 // webhookRequestBody is the BACEN PIX webhook registration payload: the single
 // HTTPS callback URL C6 will POST settlement notifications to for the recebedor
@@ -112,6 +132,7 @@ func (p *Provider) RegisterWebhook(ctx context.Context, tenantID, pixKey, webhoo
 	if err != nil {
 		return err
 	}
+	httpReq.Header.Set("Accept", webhookRegistrationAccept)
 	// The PSP answers a successful PUT with 200/201/204 and an empty or echo body;
 	// the registration outcome is the status, so the body is not decoded here.
 	return p.doStatus(httpReq, "register_webhook")
@@ -160,4 +181,37 @@ func (p *Provider) doStatus(req *http.Request, op string) error {
 		return mapError(op, resp.StatusCode, body)
 	}
 	return nil
+}
+
+// webhookDeleteAccept is the Accept sent on the deregistration calls. The PSP negotiates
+// against the response types an operation DECLARES: the registration PUT declares only a
+// problem+json error body (its 200 has none), which is why it rejects application/json;
+// the readback GET declares application/json on its 200 and accepts that. DELETE declares
+// NO content type at all — 204 plus typed-less errors — so neither value can be inferred
+// from the contract. Offering both in one header lets the negotiation match whichever the
+// gateway looks for, instead of guessing and shipping a call that 400s the first time an
+// operator uses it. Accept is a list by definition; the PSP's own error message echoes it
+// parsed as one.
+const webhookDeleteAccept = "application/json, application/problem+json"
+
+// DeleteWebhook deregisters the PIX settlement callback for pixKey (DELETE
+// /v2/pix/webhook/{chave}). It exists so removing a tenant's bank configuration can stop
+// the PSP from calling us: without it, C6 keeps POSTing to a URL whose credential we just
+// deleted and whose ref may be revoked — deliveries that can never reconcile. An already
+// absent registration surfaces as shared.ErrNotFound, which the caller may treat as done.
+func (p *Provider) DeleteWebhook(ctx context.Context, tenantID, pixKey string) error {
+	const op = "delete_webhook"
+	if strings.TrimSpace(tenantID) == "" {
+		return &Error{Op: op, sentinel: shared.ErrValidation, detail: "tenant is required"}
+	}
+	if strings.TrimSpace(pixKey) == "" {
+		return &Error{Op: op, sentinel: shared.ErrValidation, detail: "pix key is required"}
+	}
+	endpoint := p.baseURL + pixWebhookPath + "/" + url.PathEscape(pixKey)
+	httpReq, err := p.authedJSONRequest(ctx, tenantID, op, http.MethodDelete, endpoint, nil, "")
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Accept", webhookDeleteAccept)
+	return p.doStatus(httpReq, op)
 }

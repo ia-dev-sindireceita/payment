@@ -24,13 +24,24 @@ const checkoutPath = "/v1/checkouts"
 
 // cardBody is the C6 payment.card object (schema: card). For the hosted checkout
 // flow the payer types the card on C6's page, so card_info (card_hash/token) is
-// never sent at creation — only the routing fields are. installments is fixed at 1
-// (single payment) because the current product/port models no installment plan;
-// multi-installment (with interest_type) is a future port field, not invented here.
+// never sent at creation — only the routing fields are.
+//
+// installments carries the ceiling the caller asked for (it was hardcoded to 1 until
+// SIN-65726, which meant no buyer could ever split a payment), and interest_type says
+// who pays for splitting it.
 type cardBody struct {
 	Type         string `json:"type"`                   // DEBIT | CREDIT
-	Installments int    `json:"installments"`           // 1..12
+	Installments int    `json:"installments"`           // 1..12 — validado por NÓS, não pelo C6
 	Authenticate string `json:"authenticate,omitempty"` // REQUIRED | OPTIONAL | NOT_REQUIRED
+	// InterestType decide QUEM paga os juros do parcelamento: BY_ISSUER (o
+	// comprador, via administradora) ou BY_SELLER (a loja absorve).
+	//
+	// Enviar isto não é opcional na prática. Omitir o campo faz o C6 assumir
+	// BY_SELLER — observado numa captura real de produção —, ou seja, NÃO mandar é
+	// escolher que o lojista pague, por omissão. É a pior forma de tomar uma decisão
+	// de dinheiro. BY_ISSUER foi verificado no fio em 2026-08-19: a criação
+	// respondeu 201.
+	InterestType string `json:"interest_type,omitempty"`
 }
 
 // paymentBody is the C6 payment envelope (schema: payment). For a card checkout it
@@ -60,6 +71,18 @@ type checkoutResponseBody struct {
 	Status string     `json:"status"`
 	URL    string     `json:"url"`
 	Amount brlDecimal `json:"amount"`
+	// Payment carries the card settlement detail present on a reconcile (GET) read of a
+	// paid session. Live-verified against the real C6 (SIN-69580): a PAID checkout
+	// answers with payment.card.{installments,message,return_code,authorization_code}.
+	// `amount` there is decimal REAIS on the wire; brlDecimal parses it to integer
+	// cents by string, never through a float, so 5.01 is exactly 501.
+	Payment struct {
+		Card struct {
+			Installments int    `json:"installments"`
+			Message      string `json:"message"`
+			ReturnCode   string `json:"return_code"`
+		} `json:"card"`
+	} `json:"payment"`
 }
 
 // CreateCheckoutSession opens a hosted checkout at C6 (POST /v1/checkouts/) and
@@ -89,12 +112,27 @@ func (p *Provider) CreateCheckoutSession(ctx context.Context, tenantID string, r
 		authenticate = "REQUIRED"
 	}
 
+	// A faixa e a regra do débito são NOSSAS. Sondado contra o C6 real em
+	// 2026-08-19: uma criação com installments: 13 respondeu 201, e um cartão de
+	// DÉBITO com 3 parcelas também. O PSP não valida nenhuma das duas, então um
+	// valor fora da faixa passaria pela criação e só se manifestaria quando um
+	// comprador de verdade fosse pagar — o pior lugar possível para descobrir.
+	// Falha fechada aqui, mesmo o app já tendo validado: defesa em profundidade.
+	installments := req.MaxInstallments
+	if installments <= 0 {
+		installments = 1
+	}
+	if installments > maxCardInstallments || (cardType == "DEBIT" && installments > 1) {
+		return ports.CheckoutResult{}, &Error{Op: "create_checkout", sentinel: shared.ErrValidation}
+	}
+
 	body := checkoutRequestBody{
 		Amount: brlDecimal(sum),
 		Payment: paymentBody{Card: &cardBody{
 			Type:         cardType,
-			Installments: 1,
+			Installments: installments,
 			Authenticate: authenticate,
+			InterestType: cardInterestByIssuer,
 		}},
 	}
 	if !req.ExpiresAt.IsZero() {
@@ -130,9 +168,10 @@ func (p *Provider) CreateCheckoutSession(ctx context.Context, tenantID string, r
 		status = "CREATED" // create returns {id,url}; a fresh checkout is CREATED (spec)
 	}
 	return ports.CheckoutResult{
-		SessionID:   out.ID,
-		Status:      status,
-		RedirectURL: out.URL,
+		SessionID:       out.ID,
+		Status:          status,
+		RedirectURL:     out.URL,
+		MaxInstallments: installments,
 		// AmountCents is the authorized total we sent (C6's create response does not
 		// echo it); reflecting it keeps the result self-describing for the caller.
 		AmountCents: sum,
@@ -181,24 +220,44 @@ func (p *Provider) CancelCheckoutSession(ctx context.Context, tenantID, sessionI
 // URL is validated only when present (a cancelled/paid checkout need not carry one);
 // an untrusted non-https/relative target fails closed rather than being forwarded.
 //
-// ReceivedAmountCents is left zero: C6 does not yet return a captured amount
-// (captured_amount is documented "EM BREVE"), so the reconcile read cannot assert
-// captured == authorized. AmountReconciled() then stays false, which is fail-safe for
-// threat W3 — a checkout is never settled for an unverified captured amount. Amount-
-// or status-based settlement of checkouts is a follow-up once C6 GA's captured_amount
-// (settlement path, SIN-65726).
+// SETTLEMENT ON status == PAID (SIN-65726, decided SIN-69580).
+//
+// C6 does not return a captured amount. That was verified against the live gateway, not
+// inferred: a GET on a paid session answers with id/status/amount/payment_date_time and
+// a payment.card block, and no captured_amount anywhere — the field documented as
+// "EM BREVE" has no representation in this contract, and neither does a partial capture,
+// so there is no field a lesser captured value could even arrive in.
+//
+// Holding ReceivedAmountCents at zero therefore did not implement the W3 amount gate for
+// checkouts; it implemented "no checkout ever settles", indefinitely, waiting on a field
+// that may never come in this shape. A PAID session with a successful capture is treated
+// as captured for its authorized total: ReceivedAmountCents mirrors AmountCents so
+// AmountReconciled() holds and the shared settlement core liquidates.
+//
+// The gate is deliberately narrow — status PAID alone is not enough. The capture must
+// also be affirmed by the card block (return_code "00", the PSP's success code, e.g.
+// alongside "Transacao capturada com sucesso"). Anything else leaves ReceivedAmountCents
+// at zero and the charge unsettled, which keeps the divergence path as the fail-safe.
+// Should C6 ever publish a real captured amount, this is the one place to read it.
 func toCheckoutResult(out checkoutResponseBody, op string) (ports.CheckoutResult, error) {
 	if out.URL != "" {
 		if err := validateRedirectURL(out.URL); err != nil {
 			return ports.CheckoutResult{}, &Error{Op: op, detail: "untrusted redirect url", sentinel: shared.ErrUnavailable}
 		}
 	}
+	authorized := int64(out.Amount)
+	var received int64
+	if checkoutCaptured(out) {
+		received = authorized
+	}
 	return ports.CheckoutResult{
 		SessionID:           out.ID,
 		Status:              out.Status,
 		RedirectURL:         out.URL,
-		AmountCents:         int64(out.Amount),
-		ReceivedAmountCents: 0,
+		AmountCents:         authorized,
+		ReceivedAmountCents: received,
+		Installments:        out.Payment.Card.Installments,
+		Message:             out.Payment.Card.Message,
 	}, nil
 }
 
@@ -214,3 +273,33 @@ func validateRedirectURL(raw string) error {
 	}
 	return nil
 }
+
+// checkoutStatusPaid is the C6 terminal status for a settled checkout session.
+const checkoutStatusPaid = "PAID"
+
+// checkoutReturnCodeApproved is the card network's success code on payment.card.
+// Anything else (a decline, a pending capture) is not a settlement.
+const checkoutReturnCodeApproved = "00"
+
+// checkoutCaptured reports whether a reconcile read shows a session whose full amount
+// was actually captured. Both signals must agree: the session status is PAID and the
+// card authorisation returned the success code. Requiring the card block too means a
+// status flipped without a matching capture does not liquidate money.
+func checkoutCaptured(out checkoutResponseBody) bool {
+	if !strings.EqualFold(strings.TrimSpace(out.Status), checkoutStatusPaid) {
+		return false
+	}
+	return strings.TrimSpace(out.Payment.Card.ReturnCode) == checkoutReturnCodeApproved
+}
+
+// maxCardInstallments é o teto documentado do C6 para payment.card.installments.
+// Repetido aqui, e não só no domínio, porque o PSP aceita valores acima dele.
+const maxCardInstallments = 12
+
+// cardInterestByIssuer põe os juros do parcelamento na conta do comprador, via
+// administradora do cartão, em vez de a loja absorvê-los.
+//
+// É decisão de produto, tomada explicitamente: o default do C6 quando o campo é
+// omitido é BY_SELLER, então deixar de mandar seria escolher pelo lojista sem ele
+// saber. Se algum dia a política mudar, é aqui que ela muda.
+const cardInterestByIssuer = "BY_ISSUER"
