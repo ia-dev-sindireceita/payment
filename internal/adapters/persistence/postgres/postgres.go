@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -59,6 +60,12 @@ const tsLayout = "2006-01-02T15:04:05.000000000Z07:00"
 // Open opens a PostgreSQL database at dsn (a libpq URL or keyword/value string)
 // and configures the connection pool. The returned *sql.DB is owned by the caller.
 //
+// Boot fails closed if the DSN targets a REMOTE host without requiring TLS
+// (SIN-70320, A02, precedent SIN-66324): the deployed database lives on a shared
+// cluster reached across a private VLAN (data.lmhost, 172.18.0.0/20), so a
+// plaintext connection would expose the Vault-issued password and every row —
+// PII included — to anything on that segment. See assertTransportSecurity.
+//
 // Unlike the sqlite adapter there is no PRAGMA step: foreign keys are always
 // enforced. Worth knowing when reading migrated data — sqlite ran
 // `PRAGMA foreign_keys = ON` on a single pooled connection and never bounded the
@@ -69,6 +76,9 @@ const tsLayout = "2006-01-02T15:04:05.000000000Z07:00"
 // so an unbounded pool turns a traffic spike here into max_connections exhaustion
 // for every other tenant of that box.
 func Open(dsn string) (*sql.DB, error) {
+	if err := assertTransportSecurity(dsn); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
@@ -77,6 +87,73 @@ func Open(dsn string) (*sql.DB, error) {
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxLifetime(connMaxLifetime)
 	return db, nil
+}
+
+// assertTransportSecurity refuses a DSN whose connection would cross the network
+// in cleartext. It fails the boot rather than degrading silently: a mistyped or
+// downgraded sslmode against the shared cluster is a confidentiality incident, not
+// a warning.
+//
+// The rule is scoped to REMOTE targets. A loopback / Unix-socket DSN never leaves
+// the box, so TLS buys nothing there and sslmode=disable is legitimate — that is
+// exactly how the adapter's own test harness and the dev/CI paths connect. The
+// distinction is the host, which is precisely the security-relevant axis: TLS
+// matters when, and only when, bytes travel a wire.
+//
+// The DSN is interpreted through the driver's own parser (pgconn.ParseConfig) so
+// this guard agrees with how the connection will actually be made. sslmode=prefer
+// and sslmode=allow both parse to a config that keeps a PLAINTEXT fallback, so
+// they are correctly rejected for remote hosts even though a TLS path also exists;
+// only require / verify-ca / verify-full leave no cleartext path.
+//
+// The error names the host (a private IP, not a secret) but never echoes the DSN,
+// which carries the password.
+func assertTransportSecurity(dsn string) error {
+	cfg, err := pgconn.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("parse postgres dsn: %w", err)
+	}
+	if isLocalTarget(cfg.Host) {
+		return nil
+	}
+	if !tlsMandatory(cfg) {
+		return fmt.Errorf(
+			"refusing to boot: PAYMENT_DB_DSN targets remote host %q without requiring TLS; "+
+				"set sslmode=require (or verify-ca/verify-full) — the connection crosses the private VLAN",
+			cfg.Host)
+	}
+	return nil
+}
+
+// isLocalTarget reports whether the host stays on the local machine — loopback
+// address, "localhost", a Unix-domain socket path, or an unset host (which pgconn
+// resolves to a local socket / localhost). TLS is not required for these.
+func isLocalTarget(host string) bool {
+	if host == "" || host == "localhost" {
+		return true
+	}
+	if strings.HasPrefix(host, "/") { // Unix-domain socket directory
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
+// tlsMandatory reports whether every connection path the driver would try uses
+// TLS. The primary must carry a TLS config AND no fallback may drop to cleartext;
+// sslmode=prefer/allow leave such a fallback and thus return false.
+func tlsMandatory(cfg *pgconn.Config) bool {
+	if cfg.TLSConfig == nil {
+		return false
+	}
+	for _, fb := range cfg.Fallbacks {
+		if fb.TLSConfig == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // Pool bounds. Sized for a single API instance against a shared cluster, not for
