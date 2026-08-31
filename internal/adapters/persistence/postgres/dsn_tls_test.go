@@ -35,6 +35,12 @@ func TestAssertTransportSecurity(t *testing.T) {
 		{"localhost disable ok", "postgres://u:p@localhost:5432/payment?sslmode=disable", false},
 		{"kv localhost disable ok", "host=localhost port=5432 user=u dbname=payment sslmode=disable", false},
 		{"kv unix socket ok", "host=/var/run/postgresql port=5432 user=u dbname=payment sslmode=disable", false},
+		// Multi-host DSNs (primary + fallback): every target the driver would dial is
+		// mediated, not just the primary (SIN-70355). A local primary must not smuggle
+		// a remote cleartext fallback past the guard.
+		{"multihost local primary remote fallback rejected", "host=localhost,172.18.2.248 port=5432 user=u dbname=payment sslmode=disable", true},
+		{"multihost all-local ok", "host=localhost,127.0.0.1 port=5432 user=u dbname=payment sslmode=disable", false},
+		{"multihost remote require ok", "host=172.18.2.248,172.18.2.249 port=5432 user=u dbname=payment sslmode=require", false},
 		// Malformed DSN fails closed (an error, never a silent pass).
 		{"garbage dsn", "://not a dsn at all ???", true},
 	}
