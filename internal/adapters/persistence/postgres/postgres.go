@@ -106,6 +106,14 @@ func Open(dsn string) (*sql.DB, error) {
 // they are correctly rejected for remote hosts even though a TLS path also exists;
 // only require / verify-ca / verify-full leave no cleartext path.
 //
+// Complete mediation over EVERY dial target (SIN-70355). pgx supports multi-host
+// DSNs (a primary plus fallbacks, for TLS downgrade and HA), and the driver will
+// try each in turn. So the guard cannot short-circuit on the primary: a DSN whose
+// primary is local but whose fallback is a remote cleartext host would pass a
+// primary-only check and then dial that fallback in the clear if localhost were
+// down. Instead, inspect the primary and every fallback uniformly — exempt only
+// the local ones, and require TLS for any target that crosses the wire.
+//
 // The error names the host (a private IP, not a secret) but never echoes the DSN,
 // which carries the password.
 func assertTransportSecurity(dsn string) error {
@@ -113,14 +121,22 @@ func assertTransportSecurity(dsn string) error {
 	if err != nil {
 		return fmt.Errorf("parse postgres dsn: %w", err)
 	}
-	if isLocalTarget(cfg.Host) {
-		return nil
-	}
-	if !tlsMandatory(cfg) {
-		return fmt.Errorf(
-			"refusing to boot: PAYMENT_DB_DSN targets remote host %q without requiring TLS; "+
-				"set sslmode=require (or verify-ca/verify-full) — the connection crosses the private VLAN",
-			cfg.Host)
+	// The full set of targets the driver would dial, in order: the primary first,
+	// then each fallback. sslmode=prefer/allow give every host a cleartext fallback
+	// entry (TLSConfig == nil), so this loop catches those too.
+	targets := append([]*pgconn.FallbackConfig{
+		{Host: cfg.Host, Port: cfg.Port, TLSConfig: cfg.TLSConfig},
+	}, cfg.Fallbacks...)
+	for _, t := range targets {
+		if isLocalTarget(t.Host) {
+			continue
+		}
+		if t.TLSConfig == nil {
+			return fmt.Errorf(
+				"refusing to boot: PAYMENT_DB_DSN target host %q crosses the network without requiring TLS; "+
+					"set sslmode=require (or verify-ca/verify-full) — the connection crosses the private VLAN",
+				t.Host)
+		}
 	}
 	return nil
 }
@@ -139,21 +155,6 @@ func isLocalTarget(host string) bool {
 		return true
 	}
 	return false
-}
-
-// tlsMandatory reports whether every connection path the driver would try uses
-// TLS. The primary must carry a TLS config AND no fallback may drop to cleartext;
-// sslmode=prefer/allow leave such a fallback and thus return false.
-func tlsMandatory(cfg *pgconn.Config) bool {
-	if cfg.TLSConfig == nil {
-		return false
-	}
-	for _, fb := range cfg.Fallbacks {
-		if fb.TLSConfig == nil {
-			return false
-		}
-	}
-	return true
 }
 
 // Pool bounds. Sized for a single API instance against a shared cluster, not for
