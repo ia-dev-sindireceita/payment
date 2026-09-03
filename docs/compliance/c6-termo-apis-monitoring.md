@@ -36,11 +36,13 @@ Estes itens **não têm issue-blocker Paperclip apontável** — são ações de
 
 A routine Paperclip **`C6 Termo/API monitor (F21)`** (mensal, dia 3, 09:11 America/Sao_Paulo, assignee **CTO**) cria uma run-issue a cada disparo. Ao acordar nessa run-issue, o CTO executa:
 
-1. **Buscar sinais atuais** (público, sem auth):
+1. **Buscar sinais atuais** (público, sem auth). **O portal está atrás de Cloudflare, que bloqueia (`403 Attention Required`) o User-Agent default do `curl`.** É obrigatório enviar um UA de navegador — senão a run recebe 403 e pode ser mal-interpretada como "portal fora do ar" (falso sinal). Verificado em 2026-09-03 (SIN-70576):
    ```sh
-   curl -s https://developers.c6bank.com.br/sitemap.xml
-   curl -s https://developers.c6bank.com.br            # extrair static/js|css/main.<hash>
+   UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+   curl -s -A "$UA" -H 'Accept-Language: pt-BR,pt;q=0.9,en;q=0.8' https://developers.c6bank.com.br/sitemap.xml
+   curl -s -A "$UA" -H 'Accept-Language: pt-BR,pt;q=0.9,en;q=0.8' https://developers.c6bank.com.br  # extrair static/js|css/main.<hash>
    ```
+   > **`url_set_sha256`:** conjunto de `<loc>` **ordenado** (`sort`), unido por `\n` **sem newline final** — `printf '%s' "$(… | sort)" | sha256sum`. Um 403 (Cloudflare) **não** é `no-change`: é falha de coleta → reenviar com UA de navegador; se persistir, tratar como operator-gated (revisão manual) e registrar follow-up.
 2. **Comparar com o baseline** `docs/compliance/c6-portal-baseline.json`:
    - `url_set_sha256` diferente **ou** `urls[]` com item novo/removido → **mudança material candidata**.
    - `static_assets` com hash diferente → **portal republicado** → revisar release-notes manualmente.
@@ -71,3 +73,4 @@ A routine Paperclip **`C6 Termo/API monitor (F21)`** (mensal, dia 3, 09:11 Ameri
 - Pausar: `PATCH /api/routines/{id} {"status":"paused"}`.
 - Mudar cadência: `PATCH /api/routine-triggers/{triggerId} {"cronExpression":"<novo>"}`.
 - Se o portal migrar de tecnologia (deixar de expor sitemap/assets hashados), esta §1 precisa ser refeita — registrar como follow-up e cair no modo operator-gated (revisão manual mensal) até re-automatizar.
+- **Cloudflare (2026-09-03, SIN-70576):** o portal passou a exigir UA de navegador; `curl -s` cru retorna `403`. Se um dia o Cloudflare endurecer para challenge/JS (não passável com UA estático), esta §1 cai em operator-gated até reavaliar (ex.: coleta via headless Playwright, já disponível no ambiente).
