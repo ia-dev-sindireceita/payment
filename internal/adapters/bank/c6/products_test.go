@@ -34,6 +34,7 @@ type productServer struct {
 	boletoCreate http.HandlerFunc
 	boletoGet    http.HandlerFunc
 	boletoCancel http.HandlerFunc
+	boletoAmend  http.HandlerFunc
 	checkout     http.HandlerFunc
 	// cobvPut backs both create and amend (both PUT /v2/pix/cobv/{txid}); cobvGet
 	// backs the reconcile read (roteiro 7.5–7.7).
@@ -90,6 +91,17 @@ func newProductServer(t *testing.T) *productServer {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"bol_1","status":"CANCELLED","amount":10.00,"payment_method":{"bank_slip":{"bar_code":"123"},"pix":{"qr_code":"pix-emv"}}}`))
+	})
+	// Amendment (C6 v1.3.8 / SIN-72422): PATCH /v2/bank_slips/{external_reference_id}.
+	// The happy path echoes the amended resource in the same shape as the register 200.
+	mux.HandleFunc("PATCH /v2/bank_slips/{id}", func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		if ps.boletoAmend != nil {
+			ps.boletoAmend(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"bol_1","external_reference_id":"ref1","status":"REGISTERED","amount":700.00,"due_date":"2027-01-18","days_after_due_date":10,"fees":{"fine_value":10.00,"fine_type":"FIXED_VALUE","interest_value":0.80,"interest_type":"MONTHLY_PERCENTAGE"},"payment_method":{"bank_slip":{"digitable_line":"dl-1","bar_code":"123","our_number":"55501"},"pix":{"qr_code":"pix-emv"}}}`))
 	})
 	mux.HandleFunc("POST /v1/checkouts/", func(w http.ResponseWriter, r *http.Request) {
 		record(r)
@@ -238,6 +250,122 @@ func TestBoletoMissingCredential(t *testing.T) {
 	}
 	if ps.tokenCount() != 0 {
 		t.Fatalf("token must not be hit without a credential, hits=%d", ps.tokenCount())
+	}
+}
+
+// --- Boleto amendment (C6 v1.3.8 / SIN-72422) ---
+
+// amendProvider builds a C6 provider with the BolePix amendment path turned on. The
+// flag defaults OFF in production (see Config.AmendBoletoEnabled); these tests exercise
+// the Layer A path explicitly. The flag-off branch is pinned by TestUpdateBoletoIsUnsupported.
+func (ps *productServer) amendProvider(t *testing.T, creds ports.CredentialStore) *Provider {
+	t.Helper()
+	p, err := New(Config{
+		BaseURL:            ps.URL,
+		TokenURL:           ps.URL + "/oauth/token",
+		HTTPClient:         ps.Client(),
+		AmendBoletoEnabled: true,
+	}, creds)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return p
+}
+
+func TestUpdateBoletoAmendSuccess(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	p := ps.amendProvider(t, oneTenant("t1", "client-1", "secret-1"))
+
+	due := time.Unix(1_800_000_000, 0)
+	res, err := p.UpdateBoleto(context.Background(), "t1", "bol_1", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "bol_1", Currency: "BRL",
+		IdempotencyKey: "amend-k1",
+		AmountCents:    70000, DueDate: due, ValidUntil: due.Add(240 * time.Hour),
+		FineFixedCents: 1000, MonthlyInterestBps: 80,
+	})
+	if err != nil {
+		t.Fatalf("UpdateBoleto: %v", err)
+	}
+	// The echoed resource maps back onto the port: amount 700.00→70000, FIXED_VALUE fine
+	// 10.00→1000, 0.80 MONTHLY_PERCENTAGE interest→80 bps, days_after_due_date rebuilds ValidUntil.
+	if res.BoletoID != "bol_1" || res.Status != "REGISTERED" {
+		t.Fatalf("identity/status not mapped: %+v", res)
+	}
+	if res.AmountCents != 70000 || res.FineFixedCents != 1000 || res.MonthlyInterestBps != 80 {
+		t.Fatalf("amended money fields not mapped: %+v", res)
+	}
+	if res.ValidUntil.IsZero() {
+		t.Fatalf("days_after_due_date must rebuild ValidUntil, got zero")
+	}
+	// Plumbing: per-tenant bearer, forwarded idempotency key, PATCH carries only the
+	// mutable fields and never re-asserts the immutable registration block (payer).
+	if ps.lastAuthHeader != "Bearer tok-client-1" {
+		t.Fatalf("bearer not attached: %q", ps.lastAuthHeader)
+	}
+	if ps.idemKey() != "amend-k1" {
+		t.Fatalf("idempotency key not forwarded, got %q", ps.idemKey())
+	}
+	var sent map[string]json.RawMessage
+	if err := json.Unmarshal(ps.body(), &sent); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	for _, f := range []string{"amount", "due_date", "days_after_due_date", "fees"} {
+		if _, ok := sent[f]; !ok {
+			t.Fatalf("amend body must carry %q, body=%s", f, ps.body())
+		}
+	}
+	if _, ok := sent["payer"]; ok {
+		t.Fatalf("amend body must not carry payer, body=%s", ps.body())
+	}
+}
+
+func TestUpdateBoletoAmendIdempotencyFallback(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	p := ps.amendProvider(t, oneTenant("t1", "client-1", "secret-1"))
+	if _, err := p.UpdateBoleto(context.Background(), "t1", "bol_42", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "bol_42", Currency: "BRL", AmountCents: 5000,
+		DueDate: time.Unix(1_800_000_000, 0),
+	}); err != nil {
+		t.Fatalf("UpdateBoleto: %v", err)
+	}
+	if ps.idemKey() != "bol_42" {
+		t.Fatalf("idempotency key should fall back to boleto id, got %q", ps.idemKey())
+	}
+}
+
+func TestUpdateBoletoAmendNotFoundMapping(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	ps.boletoAmend = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"NOT_FOUND"}`))
+	}
+	p := ps.amendProvider(t, oneTenant("t1", "c", "s"))
+	if _, err := p.UpdateBoleto(context.Background(), "t1", "nope", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "nope", Currency: "BRL", AmountCents: 1000, DueDate: time.Unix(1, 0),
+	}); !errors.Is(err, shared.ErrNotFound) {
+		t.Fatalf("404 should map to ErrNotFound, got %v", err)
+	}
+}
+
+// A malformed amendment (more discount tiers than the bank's single slot) must fail closed
+// at the adapter boundary and never reach the bank — dropping a tier would change what the
+// payer owes.
+func TestUpdateBoletoAmendRejectsMultipleDiscountTiers(t *testing.T) {
+	t.Parallel()
+	ps := newProductServer(t)
+	p := ps.amendProvider(t, oneTenant("t1", "c", "s"))
+	_, err := p.UpdateBoleto(context.Background(), "t1", "bol_1", ports.BoletoRequest{
+		TenantID: "t1", BoletoID: "bol_1", Currency: "BRL", AmountCents: 1000, DueDate: time.Unix(1, 0),
+		Discounts: []ports.BoletoDiscountTier{{Bps: 100}, {Bps: 200}},
+	})
+	if !errors.Is(err, shared.ErrValidation) {
+		t.Fatalf("multiple discount tiers must fail closed with ErrValidation, got %v", err)
+	}
+	if len(ps.body()) != 0 {
+		t.Fatalf("a rejected amendment must not reach the bank: %s", ps.body())
 	}
 }
 

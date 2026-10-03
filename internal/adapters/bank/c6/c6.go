@@ -66,6 +66,14 @@ type Config struct {
 	// defaultMaxRetries; negative ⇒ no retries (single-shot). The ceiling is
 	// deliberately small so a degraded PSP is never hammered (Termo A5).
 	MaxRetries int
+	// AmendBoletoEnabled opts this adapter instance into the C6 BolePix amendment
+	// path (PATCH /v2/bank_slips/{external_reference_id}), introduced by C6 release
+	// v1.3.8 (18/09/2026; SIN-72422). It defaults to false: until the wire contract
+	// is confirmed against live homologation (SIN-65856) and SecurityEngineer signs
+	// off on amending a registered — money-affecting — charge, UpdateBoleto keeps
+	// failing closed exactly as before. The flag IS the rollback switch: off reverts
+	// the adapter to cancel-and-re-register with no code change.
+	AmendBoletoEnabled bool
 }
 
 // Provider implements ports.BankProvider (and ports.PixProvider) against C6.
@@ -103,6 +111,9 @@ type Provider struct {
 	// randFloat sources the backoff jitter in [0,1). Injectable for deterministic
 	// tests; defaults to math/rand.Float64.
 	randFloat func() float64
+	// amendEnabled gates the BolePix amendment path (PATCH /v2/bank_slips/{ref});
+	// see Config.AmendBoletoEnabled. Defaults to false → UpdateBoleto fails closed.
+	amendEnabled bool
 }
 
 // compile-time assertion that Provider satisfies the port.
@@ -193,9 +204,10 @@ func New(cfg Config, creds ports.CredentialStore) (*Provider, error) {
 			refillPerSec: rate,
 			now:          now,
 		},
-		maxRetries: maxRetries,
-		sleep:      realSleep,
-		randFloat:  rand.Float64,
+		maxRetries:   maxRetries,
+		sleep:        realSleep,
+		randFloat:    rand.Float64,
+		amendEnabled: cfg.AmendBoletoEnabled,
 	}, nil
 }
 

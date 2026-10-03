@@ -45,7 +45,9 @@ corpo de resposta). Esta matriz alimenta a Camada B (`.docx` para o C6).
 | 4.a/4.b | Baixa/cancelamento (a-vencer e vencido)     | `http.TestBoletoDeleteHTTP`, `app.TestCancelBoleto`, `bank.TestStubCancelBoleto`, `c6.TestCancelBoletoSuccess` | **204**; `GET` depois → `status=CANCELLED`; baixa idempotente (mesma resposta — a-vencer e vencido tratados igual) |
 | 5.a     | Alteração de vencimento                     | `app.TestUpdateBoletoVariants/5a_due_date`, `http.TestBoletoUpdateHTTP` | **200**; `due_date` amendado reconciliado no `GET` |
 | 5.b     | Alteração de validade (data limite)         | `app.TestUpdateBoletoVariants/5b_validity`, `boleto.TestWithValidUntil` | **200**; `valid_until` amendado; invariante `validade ≥ vencimento` no core |
-| 5.c     | Alteração de valor/multa/juros              | `app.TestUpdateBoletoVariants/5c_amount_fine_interest`, `c6.TestUpdateBoletoSuccess` | **200**; valor/multa-fixa/juros amendados; identidade (id/txid) preservada |
+| 5.c     | Alteração de valor/multa/juros              | `app.TestUpdateBoletoVariants/5c_amount_fine_interest`, `c6.TestUpdateBoletoAmendSuccess` | **200**; valor/multa-fixa/juros amendados; identidade (id/txid) preservada |
+
+> **Grupo 5 — adapter C6 (SIN-72422).** Até v1.3.8 o contrato publicado NÃO tinha endpoint de alteração e o adapter `c6.UpdateBoleto` falhava fechado (pinado por `c6.TestUpdateBoletoIsUnsupported`). A release **v1.3.8 (18/09/2026)** expôs `PATCH /v2/bank_slips/{external_reference_id}`. A **Camada A** (corpo/decode internos + testes determinísticos) está implementada atrás da flag `Config.AmendBoletoEnabled` (**default off** → segue falhando fechado). A **Camada B** — mapa de campos amendáveis e forma da resposta reais — está gated em homologação ao vivo (SIN-65856); a flag só liga após confirmação do contrato + LGTM da SecurityEngineer (mexe em valor de cobrança registrada).
 
 ## Lentes de segurança (não-negociáveis) — evidência
 
@@ -56,7 +58,7 @@ corpo de resposta). Esta matriz alimenta a Camada B (`.docx` para o C6).
 | Idempotência (sem cobrança dupla)            | `app.TestRegisterBoletoIdempotent`, `app.TestRegisterBoletoConcurrentSameKey`; amend não re-cobra `app.TestUpdateBoletoVariants` | 1 ledger entry; mesmo id em N concorrentes |
 | OWASP A01 — isolamento cross-tenant (sem oráculo) | `http.TestBoletoCrossTenantGetIsolation`, `http.TestBoletoCrossTenantWriteIsolation` (DELETE/PUT), `bank.TestStubGetBoletoIsolation`, `bank.TestStubCancelBoleto`, `bank.TestStubUpdateBoleto` | tenant B → 404 em GET/DELETE/PUT do boleto de A |
 | Validação no boundary + anti mass-assignment | `http.TestBoletoHTTPErrors/unknown_field`, `/bad_due_date`, `/fine_over_cap`, `http.TestBoletoWriteAuthAndValidation/put_unknown_field`, `/put_bad_due_date` | 400 |
-| Erros como valores, sem vazar status C6      | `c6.TestGetBoletoNotFoundMapping`, `c6.TestCancelBoletoNotFoundMapping`, `c6.TestUpdateBoletoNotFoundMapping` (404→`ErrNotFound`) | sentinela de domínio, sem corpo upstream |
+| Erros como valores, sem vazar status C6      | `c6.TestGetBoletoNotFoundMapping`, `c6.TestCancelBoletoNotFoundMapping`, `c6.TestUpdateBoletoAmendNotFoundMapping` (404→`ErrNotFound`) | sentinela de domínio, sem corpo upstream |
 | Falha do provider não cobra                  | `app.TestRegisterBoletoBankError`, `app.TestRegisterBoletoInvalidDoesNotReserve` | 0 ledger entries |
 
 ## Arquitetura
