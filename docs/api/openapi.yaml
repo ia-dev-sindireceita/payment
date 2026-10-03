@@ -71,8 +71,8 @@ tags:
     description: Boletos BolePix com multa/juros/desconto.
   - name: DDA
     description: Consulta e pagamento de boletos no DDA / agendamento.
-  - name: Extrato
-    description: Extrato da conta por período.
+  - name: Saldo & Extrato
+    description: Saldo da conta (/balance) e extrato por período (/statement).
   - name: Cobranças
     description: Cobrança genérica (compat).
   - name: Sistema
@@ -1090,10 +1090,28 @@ paths:
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /v1/balance:
+    get:
+      operationId: getBalance
+      tags: [Saldo & Extrato]
+      summary: Saldo atual da conta
+      description: >-
+        Retorna o saldo da conta da empresa-cliente autenticada (snapshot).
+        O tenant é derivado da credencial — nenhum parâmetro seleciona de quem é
+        o saldo (ameaça H1/P1).
+      responses:
+        "200":
+          description: Saldo atual.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Balance" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /v1/statement:
     get:
       operationId: getStatement
-      tags: [Extrato]
+      tags: [Saldo & Extrato]
       summary: Extrato da conta por período
       description: Janela máxima de 30 dias; `fim` deve ser &gt;= `inicio`.
       parameters:
@@ -2053,6 +2071,16 @@ components:
         entries:
           type: array
           items: { $ref: "#/components/schemas/StatementEntry" }
+    Balance:
+      type: object
+      description: >-
+        Snapshot do saldo da conta. `available_cents` pode ser negativo quando a
+        conta possui limite de cheque especial; `blocked_cents` nunca é negativo.
+      properties:
+        available_cents: { type: integer, format: int64, description: "Saldo disponível, em centavos." }
+        blocked_cents: { type: integer, format: int64, description: "Saldo bloqueado/reservado, em centavos (>= 0)." }
+        currency: { type: string, description: "Código ISO-4217 (ex. BRL)." }
+        as_of: { type: string, format: date-time, description: "Instante do snapshot (RFC3339)." }
 
     # --- Plano administrativo /admin/* ---
     CreateTenantRequest:

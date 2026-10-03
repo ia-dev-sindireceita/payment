@@ -20,6 +20,7 @@ type ProviderSet struct {
 	Boleto       ports.BoletoProvider
 	DDA          ports.DDAProvider
 	Statement    ports.StatementProvider
+	Balance      ports.BalanceProvider
 	// CredInvalidator evicts cached state keyed on this bank's credential (the C6
 	// OAuth2 token cache) after a credential write. Nil when the bank caches nothing
 	// (the in-memory stub). Aggregated across banks by the composite invalidator.

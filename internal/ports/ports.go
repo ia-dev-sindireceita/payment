@@ -1372,3 +1372,30 @@ type StatementProvider interface {
 	// adapter only transports it.
 	GetStatement(ctx context.Context, tenantID string, filter StatementFilter) (Statement, error)
 }
+
+// Balance is a tenant's account-balance snapshot (C6 "Saldo & Extrato", roteiro
+// grupo 13): the amount available to spend, the amount currently blocked/reserved,
+// the currency and the instant the bank computed it. It is a read projection the
+// adapter transports from the bank; AvailableCents may be negative (an overdraft
+// line), BlockedCents is never negative. The use-case maps it onto the domain
+// balance.Balance to re-validate it (defense in depth) before surfacing it.
+type Balance struct {
+	AvailableCents int64
+	BlockedCents   int64
+	Currency       string
+	AsOf           time.Time
+}
+
+// BalanceProvider is the output port for the account-balance surface (saldo, C6
+// "Saldo & Extrato", roteiro grupo 13). It is kept SEPARATE from StatementProvider
+// and the other bank ports (ISP): a use-case that reads the saldo must not be forced
+// to depend on extrato/PIX/boleto/checkout/DDA semantics, and those consumers must
+// not depend on the balance read. The C6 adapter implements it; a stub backs it for
+// tests. The single method carries tenantID explicitly so the per-tenant
+// credential/token isolation the adapter enforces is never bypassed — the tenant is
+// derived from the authenticated caller, never client input (threat H1/P1).
+type BalanceProvider interface {
+	// GetBalance returns the current balance snapshot of the tenant's account (C6
+	// "Saldo & Extrato" /balance). Pure read; never mutates state.
+	GetBalance(ctx context.Context, tenantID string) (Balance, error)
+}

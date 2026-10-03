@@ -167,6 +167,7 @@ func run() error {
 		Boleto:             routers.Boleto,
 		DDA:                routers.DDA,
 		Statement:          routers.Statement,
+		Balance:            routers.Balance,
 		RecReader:          recReader,
 		CobRReader:         cobrReader,
 		SolicRecs:          solicRecWriter,
@@ -363,6 +364,7 @@ func run() error {
 		Boleto:    app.NewBoletoService(deps),
 		DDA:       app.NewDDAService(deps),
 		Statement: app.NewStatementService(deps),
+		Balance:   app.NewBalanceService(deps),
 		// PIX Automático (recorrência). The service is wired unconditionally so the
 		// recurrence WEBHOOK path can keep recording reconciled mandates; the flag below
 		// decides only whether the tenant-facing routes exist.
@@ -707,6 +709,9 @@ func buildProviderSet(generic ports.BankProvider, raw ports.PixProvider) bank.Pr
 	}
 	if v, ok := raw.(ports.StatementProvider); ok {
 		set.Statement = v
+	}
+	if v, ok := raw.(ports.BalanceProvider); ok {
+		set.Balance = v
 	}
 	if v, ok := generic.(ports.CredentialInvalidator); ok {
 		set.CredInvalidator = v

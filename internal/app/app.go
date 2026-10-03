@@ -58,6 +58,11 @@ type Deps struct {
 	// production it is the C6 provider; in stub mode the in-memory StubProvider. When
 	// nil, StatementService is simply not wired.
 	Statement ports.StatementProvider
+	// Balance is the account-balance (saldo, C6 "Saldo & Extrato") port (roteiro grupo
+	// 13). Segregated from the other bank ports (ISP): BalanceService depends only on
+	// it. In production it is the C6 provider; in stub mode the in-memory StubProvider.
+	// When nil, BalanceService is simply not wired.
+	Balance ports.BalanceProvider
 	// RecReader / CobRReader are the recurrence reconcile-read ports (PIX Automático,
 	// SIN-66036). The recurrence webhook handler reconciles the authoritative mandate
 	// (GetRec) / charge (GetCobR) state before acting on an inbound notification —

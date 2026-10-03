@@ -45,6 +45,7 @@ type Routers struct {
 	Boleto       ports.BoletoProvider
 	DDA          ports.DDAProvider
 	Statement    ports.StatementProvider
+	Balance      ports.BalanceProvider
 }
 
 // NewRouters builds the per-port routers over reg.
@@ -57,6 +58,7 @@ func NewRouters(reg *Registry) Routers {
 		Boleto:       boletoRouter{reg},
 		DDA:          ddaRouter{reg},
 		Statement:    statementRouter{reg},
+		Balance:      balanceRouter{reg},
 	}
 }
 
@@ -276,4 +278,18 @@ func (r statementRouter) GetStatement(ctx context.Context, tenantID string, filt
 		return ports.Statement{}, shared.ErrUnavailable
 	}
 	return set.Statement.GetStatement(ctx, tenantID, filter)
+}
+
+// --- BalanceProvider ---
+
+type balanceRouter struct{ reg *Registry }
+
+var _ ports.BalanceProvider = balanceRouter{}
+
+func (r balanceRouter) GetBalance(ctx context.Context, tenantID string) (ports.Balance, error) {
+	set, ok := r.reg.resolve(ctx)
+	if !ok || set.Balance == nil {
+		return ports.Balance{}, shared.ErrUnavailable
+	}
+	return set.Balance.GetBalance(ctx, tenantID)
 }

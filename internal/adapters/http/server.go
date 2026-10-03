@@ -25,6 +25,7 @@ type Server struct {
 	boleto    *app.BoletoService
 	dda       *app.DDAService
 	statement *app.StatementService
+	balance   *app.BalanceService
 	// recurrence backs the PIX Automático tenant routes (/v1/pix/rec, /solicrec, /cobr,
 	// /locrec). Nil leaves them registered-but-unavailable (503), never a panic.
 	recurrence *app.RecurrenceService
@@ -142,6 +143,10 @@ type Config struct {
 	// grupo 13). It may be nil for deployments/tests that do not serve the extrato
 	// surface — the route is then registered but never exercised.
 	Statement *app.StatementService
+	// Balance backs the account-balance tenant route (GET /v1/balance, C6 "Saldo &
+	// Extrato", roteiro grupo 13). It may be nil for deployments/tests that do not
+	// serve the saldo surface — the route is then registered but never exercised.
+	Balance *app.BalanceService
 	// Recurrence backs the PIX Automático tenant routes (mandate, activation request,
 	// recurring charge and payload location). It may be nil for deployments/tests that
 	// do not serve recurrence — the handlers then answer 503 rather than panicking.
@@ -263,6 +268,7 @@ func NewServer(c Config) *Server {
 		boleto:                 c.Boleto,
 		dda:                    c.DDA,
 		statement:              c.Statement,
+		balance:                c.Balance,
 		recurrence:             c.Recurrence,
 		pixRecurrence:          c.PixRecurrence,
 		admin:                  c.Admin,
@@ -499,6 +505,11 @@ func (s *Server) Router() http.Handler {
 			// The tenant is derived from the credential, never the query — no parameter
 			// selects which tenant's extrato is read (threat H1/P1).
 			r.Get("/statement", s.handleGetStatement)
+			// Account balance (saldo, C6 "Saldo & Extrato", roteiro grupo 13): read the
+			// current balance snapshot of the authenticated tenant's account. The tenant is
+			// derived from the credential, never the query — no parameter selects which
+			// tenant's saldo is read (threat H1/P1).
+			r.Get("/balance", s.handleGetBalance)
 
 			// Capacidades do banco por tenant (SIN-69368). Deliberadamente FORA da flag de
 			// intake self-serve: aquela flag protege ESCRITAS de segredo, e esta é uma
