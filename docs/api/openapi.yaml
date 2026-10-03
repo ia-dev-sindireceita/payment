@@ -2077,10 +2077,10 @@ components:
         Snapshot do saldo da conta. `available_cents` pode ser negativo quando a
         conta possui limite de cheque especial; `blocked_cents` nunca é negativo.
       properties:
-        available_cents: { type: integer, format: int64, description: Saldo disponível, em centavos. }
-        blocked_cents: { type: integer, format: int64, description: Saldo bloqueado/reservado, em centavos (>= 0). }
-        currency: { type: string, description: Código ISO-4217 (ex. BRL). }
-        as_of: { type: string, format: date-time, description: Instante do snapshot (RFC3339). }
+        available_cents: { type: integer, format: int64, description: "Saldo disponível, em centavos." }
+        blocked_cents: { type: integer, format: int64, description: "Saldo bloqueado/reservado, em centavos (>= 0)." }
+        currency: { type: string, description: "Código ISO-4217 (ex. BRL)." }
+        as_of: { type: string, format: date-time, description: "Instante do snapshot (RFC3339)." }
 
     # --- Plano administrativo /admin/* ---
     CreateTenantRequest:
