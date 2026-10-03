@@ -20,9 +20,9 @@ import (
 var _ ports.BoletoProvider = (*Provider)(nil)
 
 // bankSlipsPath is the real C6 endpoint for registering a boleto (roteiro grupos
-// 1–3; ADR-0005). The id-addressed read/cancel/amend operations still use the
-// legacy /boletos/{id} path: their real contracts are not yet captured, so they
-// are deliberately out of this remap's scope (see GetBoleto/CancelBoleto/UpdateBoleto).
+// 1–3; ADR-0005). The id-addressed read (GET), cancel (PUT .../cancel) and amend
+// (PATCH, C6 v1.3.8 / SIN-72422) operations hang off this same base, addressed by
+// external_reference_id — not the legacy /boletos/{id} path.
 const bankSlipsPath = "/v2/bank_slips"
 
 // dueDateLayout is the date format the C6 bank_slips contract requires for
@@ -535,21 +535,90 @@ func (p *Provider) CancelBoleto(ctx context.Context, tenantID, boletoID string) 
 }
 
 // UpdateBoleto amends a registered boleto's parameters at C6 (roteiro grupo 5) via
-// PUT. The caller's IdempotencyKey (falling back to the boleto id) is forwarded so a
-// retried amendment is collapsed. A 404 surfaces as shared.ErrNotFound; the operation
-// is tenant-scoped through the per-tenant OAuth2 bearer token.
-func (p *Provider) UpdateBoleto(context.Context, string, string, ports.BoletoRequest) (ports.BoletoResult, error) {
-	// The published C6 BolePix contract exposes registration, read, PDF, listing and
-	// cancellation — there is NO amendment endpoint. The previous implementation PUT to a
-	// speculative /boletos/{id}, which the bank does not serve.
-	//
-	// Failing closed here is deliberate: the alternative is a call that looks like it
-	// amended a registered charge and did not, leaving our state and the bank's silently
-	// divergent on money. A caller that needs to change a registered boleto cancels it and
-	// registers a new one.
-	return ports.BoletoResult{}, &Error{
-		Op:       "update_boleto",
-		sentinel: shared.ErrValidation,
-		detail:   "bank does not support amending a registered boleto; cancel and re-register",
+// PATCH /v2/bank_slips/{external_reference_id} (C6 release v1.3.8, 18/09/2026;
+// SIN-72422). The caller's IdempotencyKey (falling back to the boleto id) is forwarded
+// so a retried amendment is collapsed onto one change; a 404 surfaces as
+// shared.ErrNotFound; the operation is tenant-scoped through the per-tenant OAuth2
+// bearer token, exactly like CancelBoleto — one tenant can never amend another's boleto.
+//
+// The amendment path is GATED behind Config.AmendBoletoEnabled and defaults OFF. Until
+// the flag is enabled it fails closed, preserving the original cancel-and-re-register
+// contract (and the TestUpdateBoletoIsUnsupported invariant). Failing closed is the safe
+// default: a call that looked like it amended a registered — money-affecting — charge but
+// did not would leave our state and the bank's silently divergent. The flag may only be
+// flipped on once the v1.3.8 wire contract (exact amendable fields + response shape) is
+// confirmed against live homologation (SIN-65856) and SecurityEngineer has signed off.
+//
+// Layer A (this change): the request body (bankSlipAmendBody) and the response decode
+// (bankSlipResponseBody) are our INTERNAL contract, proven deterministically against the
+// adapter's own double. The amendable field set — due_date, amount, days_after_due_date
+// and the fees block (fine/interest/discount) — is the subset the app's amend use-case
+// actually mutates; whether C6 accepts a partial PATCH or echoes the full resource is the
+// Layer B question the live homologation must answer before the flag is enabled.
+func (p *Provider) UpdateBoleto(ctx context.Context, tenantID, boletoID string, req ports.BoletoRequest) (ports.BoletoResult, error) {
+	if !p.amendEnabled {
+		return ports.BoletoResult{}, &Error{
+			Op:       "update_boleto",
+			sentinel: shared.ErrValidation,
+			detail:   "bank amendment path is disabled; cancel and re-register",
+		}
 	}
+
+	body, err := toBankSlipAmendBody("update_boleto", req)
+	if err != nil {
+		return ports.BoletoResult{}, err
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return ports.BoletoResult{}, &Error{Op: "update_boleto", sentinel: shared.ErrValidation}
+	}
+
+	idem := req.IdempotencyKey
+	if idem == "" {
+		idem = boletoID
+	}
+	endpoint := p.baseURL + bankSlipsPath + "/" + url.PathEscape(externalReferenceID(boletoID))
+	httpReq, err := p.authedJSONRequest(ctx, tenantID, "update_boleto", http.MethodPatch, endpoint, payload, idem)
+	if err != nil {
+		return ports.BoletoResult{}, err
+	}
+
+	var out bankSlipResponseBody
+	if err := p.do(httpReq, "update_boleto", &out); err != nil {
+		return ports.BoletoResult{}, err
+	}
+	return toBankSlipResult(out), nil
+}
+
+// bankSlipAmendBody is the JSON PATCHed to /v2/bank_slips/{external_reference_id}. Every
+// field is omitempty so only the parameters the caller actually changed travel on the
+// wire — the amendment never re-asserts the immutable registration data (payer, PIX key).
+// This is the adapter's INTERNAL contract pending live confirmation (see UpdateBoleto).
+type bankSlipAmendBody struct {
+	Amount           *brlDecimal   `json:"amount,omitempty"`
+	DueDate          string        `json:"due_date,omitempty"`
+	DaysAfterDueDate *int          `json:"days_after_due_date,omitempty"`
+	Fees             *bankSlipFees `json:"fees,omitempty"`
+}
+
+// toBankSlipAmendBody maps the port request onto the amendment body. It carries only the
+// mutable fields; a zero amount is omitted (an amendment that does not touch the value),
+// and the fees block is built by the same money-preserving mapping create uses, so a
+// fine/interest/discount change can never silently drop a tier.
+func toBankSlipAmendBody(op string, req ports.BoletoRequest) (bankSlipAmendBody, error) {
+	body := bankSlipAmendBody{}
+	if req.AmountCents > 0 {
+		amt := brlDecimal(req.AmountCents)
+		body.Amount = &amt
+	}
+	if !req.DueDate.IsZero() {
+		body.DueDate = req.DueDate.Format(dueDateLayout)
+		body.DaysAfterDueDate = daysAfterDueDate(req.DueDate, req.ValidUntil)
+	}
+	fees, err := toBankSlipFees(op, req)
+	if err != nil {
+		return bankSlipAmendBody{}, err
+	}
+	body.Fees = fees
+	return body, nil
 }
