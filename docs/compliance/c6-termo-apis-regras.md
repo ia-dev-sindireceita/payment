@@ -121,3 +121,26 @@ Legenda: ✅ coberto · 🟡 parcial (controle existe, falta reforço/confirmaç
 
 > As issues são criadas ao mesmo tempo que este documento; os números acima são preenchidos
 > na abertura. Não é preciso implementar os gaps neste PR — apenas rastreá-los.
+
+---
+
+## Histórico de monitoramento F21 (mudanças observadas no portal/API C6)
+
+Registro append-only das varreduras mensais da rotina **C6 Termo/API monitor (F21)** (SIN-68746).
+Procedimento: [`c6-termo-apis-monitoring.md`](./c6-termo-apis-monitoring.md). Baseline: [`c6-portal-baseline.json`](./c6-portal-baseline.json).
+
+### 2026-10-03 — SIN-72420 (release-notes v1.3.7 → v1.3.11)
+
+Sinal: conjunto de URLs do sitemap **inalterado** (17 URLs), mas **hash de assets mudou** (redeploy do portal). Release-notes renderizadas via Playwright (Cloudflare exige UA de navegador — SIN-70576). Mudanças desde o baseline de 2026-08-06 (então v1.3.6):
+
+| Release | Data | Mudança | Impacto na Solução | Tratamento |
+|---|---|---|---|---|
+| **v1.3.11** | 02 OUT 2026 | API de Extrato renomeada "**Saldo & Extrato**" + novo endpoint **`/balance`** | `GetStatement` usa `/v1/statement`; rename é doc + nova capability de saldo | **Material** → [SIN-72421](/SIN/issues/SIN-72421) |
+| **v1.3.10** | 01 OUT 2026 | Checkout: com `save_card=true`, só "Cartão de Crédito" é exibido | comportamento de checkout | menor → triar em [SIN-72421](/SIN/issues/SIN-72421) |
+| **v1.3.9** | 25 SET 2026 | Nova página **`/branding-guidelines`** (uso de marca C6) | **Termo A1/E19** (uso de marca); **não está no sitemap** → sinal por URL não pega | CTO revisa compliance de marca |
+| **v1.3.8** | 18 SET 2026 | BolePix: endpoint de atualização de cobrança é **`PATCH /v2/bank_slips/{external_reference_id}`** | **invalida a premissa** de `UpdateBoleto` ("no amendment endpoint", fail-closed) | **Material** → [SIN-72421](/SIN/issues/SIN-72421) |
+| **v1.3.7** | 09 SET 2026 | Descrição do status `PAID` do BolePix atualizada na doc de Notificações (webhook) | mapeamento de status webhook | menor → triar em [SIN-72421](/SIN/issues/SIN-72421) |
+
+Baseline atualizado: `captured_at` 2026-08-06 → 2026-10-03; hashes de assets `main.1ffe4ddc.css`/`main.a57cadac.js` → `main.4a464b21.css`/`main.337b0556.js`. `url_set_sha256` inalterado (URLs não mudaram).
+
+**Lembrete operator-gated (sempre):** o **Termo de Uso de APIs (PDF, cláusulas 2.8/2.9/11.5)** não é observável no portal público — deve ser conferido pelo canal de conta/e-mail do C6. Dono: **CTO** (impacto técnico) + **CEO** (relação comercial). Versão conhecida no repo: `v.10/03/2025`.
