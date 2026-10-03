@@ -1,8 +1,14 @@
 {
   "_comment": "Baseline snapshot of the C6 PUBLIC developer portal, used by the monthly monitor routine (SIN-68746, Termo C6 clausulas 2.8/2.9/11.5 - F21). The routine diffs a fresh fetch against this file. On a material change it opens a triage issue and updates this baseline + docs/compliance/c6-termo-apis-regras.md. See docs/compliance/c6-termo-apis-monitoring.md for the procedure. This file is DATA, not a secret: it holds only public URLs and content hashes.",
   "source": "https://developers.c6bank.com.br",
-  "captured_at": "2026-08-06",
-  "captured_by": "CTO (agent ed9d8370) via SIN-68746",
+  "captured_at": "2026-10-03",
+  "captured_by": "CTO (agent ed9d8370) via SIN-68746; refreshed SIN-72420 (F21 monthly, out/2026)",
+  "last_triage": {
+    "_comment": "F21 monthly diff out/2026 (SIN-72420): sitemap URL set UNCHANGED (17 URLs) but static-asset hashes changed = portal redeploy. Release-notes (rendered via Playwright, Cloudflare needs a browser UA per SIN-70576) showed 5 new releases since the 2026-08-06 baseline. Material changes triaged in SIN-72421: v1.3.8 BolePix amendment endpoint PATCH /v2/bank_slips/{external_reference_id} (invalidates UpdateBoleto 'no amendment endpoint' assumption); v1.3.11 Extrato renamed 'Saldo & Extrato' + new /balance endpoint. NOTE: v1.3.9 added /branding-guidelines which is NOT in the sitemap, so the URL-set signal cannot catch it on its own.",
+    "date": "2026-10-03",
+    "issue": "SIN-72421",
+    "latest_release_observed": "v1.3.11 (02 OUT 2026)"
+  },
   "signals": {
     "sitemap": {
       "url": "https://developers.c6bank.com.br/sitemap.xml",
@@ -32,8 +38,8 @@
       "_comment": "Content-hashed bundle filenames from index.html. They change on every portal redeploy (Scalar/React build). A change here means 'portal republished' -> review release-notes manually.",
       "index_url": "https://developers.c6bank.com.br",
       "assets": [
-        "static/css/main.1ffe4ddc.css",
-        "static/js/main.a57cadac.js"
+        "static/css/main.4a464b21.css",
+        "static/js/main.337b0556.js"
       ]
     },
     "release_notes": {
