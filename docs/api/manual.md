@@ -271,7 +271,7 @@ curl "$BASE/v1/checkout/chk_abc123"          -H "Authorization: Bearer <TENANT_T
 curl -X DELETE "$BASE/v1/checkout/chk_abc123" -H "Authorization: Bearer <TENANT_TOKEN>"  # cancelCheckout
 ```
 
-A liquidação chega pelo webhook C6 (§6.2), não por polling obrigatório.
+A liquidação chega pelo webhook C6 (§6.3), não por polling obrigatório.
 
 ### 4.2 PIX cobrança imediata (`createPix` / `getPix` / `listPix`)
 
@@ -555,7 +555,11 @@ Um grupo de outra empresa-cliente responde `404` (nunca oráculo cross-tenant).
 
 ---
 
-## 6. Reconciliação: extrato e webhook de liquidação
+## 6. Reconciliação: Saldo & Extrato e webhook de liquidação
+
+> A API do C6 renomeou "Extrato" para **"Saldo & Extrato"** (v1.3.11, 02/10/2026)
+> e passou a expor também o saldo da conta. A Solução segue o mesmo contrato:
+> saldo em `/v1/balance` e extrato por período em `/v1/statement`.
 
 ### 6.1 Extrato por período (`getStatement`)
 
@@ -573,7 +577,24 @@ curl "$BASE/v1/statement?inicio=2026-08-01&fim=2026-08-30" \
 { "entries": [ { "id": "e1", "date": "2026-08-16", "amount_cents": 4990, "kind": "credit", "description": "PIX E1234..." } ] }
 ```
 
-### 6.2 Webhook inbound de liquidação do C6 (`c6Webhook`)
+### 6.2 Saldo da conta (`getBalance`)
+
+Snapshot do saldo da conta da empresa-cliente autenticada. Sem parâmetros — o
+tenant vem da credencial (ameaça H1/P1). `available_cents` pode ser negativo
+quando há limite de cheque especial; `blocked_cents` nunca é negativo.
+
+```bash
+curl "$BASE/v1/balance" \
+  -H "Authorization: Bearer <TENANT_TOKEN>"
+```
+
+`200 OK`:
+
+```json
+{ "available_cents": 123456, "blocked_cents": 789, "currency": "BRL", "as_of": "2026-10-02T12:00:00Z" }
+```
+
+### 6.3 Webhook inbound de liquidação do C6 (`c6Webhook`)
 
 > Do ponto de vista do integrador: o C6 chama **a Sindireceita** — você não
 > chama esta rota. A empresa-cliente reconcilia via extrato (§6.1) e/ou pelas

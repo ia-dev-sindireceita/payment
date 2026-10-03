@@ -50,6 +50,10 @@ type StubProvider struct {
 	// tenant's account, keyed by tenantID. GetStatement filters them by the requested
 	// date window.
 	stmtEntries map[string][]ports.StatementEntry
+	// balances holds the account-balance snapshot (saldo, C6 "Saldo & Extrato",
+	// roteiro grupo 13) seeded per tenant, keyed by tenantID. A tenant with no seeded
+	// balance reads a deterministic zero snapshot (see GetBalance).
+	balances map[string]ports.Balance
 	// PIX Automático (Recorrência) in-memory state (SIN-66035): recs keyed by
 	// tenantID+"\x00"+idRec, solicRecs by tenantID+"\x00"+idSolicRec, cobrs by
 	// tenantID+"\x00"+txid. Lets wiring and use-cases run end-to-end without C6.
@@ -102,6 +106,7 @@ func NewStubProvider(creds ports.CredentialStore) *StubProvider {
 		ddaGroups:      make(map[string]*stubDDAGroup),
 		ddaGroupByIdem: make(map[string]string),
 		stmtEntries:    make(map[string][]ports.StatementEntry),
+		balances:       make(map[string]ports.Balance),
 		recs:           make(map[string]ports.RecResult),
 		recJornadaTxID: make(map[string]string),
 		solicRecs:      make(map[string]ports.SolicRecResult),

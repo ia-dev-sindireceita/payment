@@ -111,6 +111,10 @@ func (r *recProvider) GetStatement(_ context.Context, _ string, _ ports.Statemen
 	r.hits++
 	return ports.Statement{}, nil
 }
+func (r *recProvider) GetBalance(_ context.Context, _ string) (ports.Balance, error) {
+	r.hits++
+	return ports.Balance{}, nil
+}
 
 // fullSet wires a recProvider into every port of a ProviderSet.
 func fullSet(p *recProvider) bank.ProviderSet {
@@ -122,6 +126,7 @@ func fullSet(p *recProvider) bank.ProviderSet {
 		Boleto:       p,
 		DDA:          p,
 		Statement:    p,
+		Balance:      p,
 	}
 }
 
@@ -215,6 +220,9 @@ func TestRouterFailsClosedForNilPort(t *testing.T) {
 	if _, err := rt.Statement.GetStatement(context.Background(), "t", ports.StatementFilter{}); !errors.Is(err, shared.ErrUnavailable) {
 		t.Fatalf("want ErrUnavailable for a nil Statement port, got %v", err)
 	}
+	if _, err := rt.Balance.GetBalance(context.Background(), "t"); !errors.Is(err, shared.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable for a nil Balance port, got %v", err)
+	}
 	if _, err := rt.Bank.CreateCharge(context.Background(), "t", ports.ChargeRequest{}); err != nil {
 		t.Fatalf("wired Bank port must still work, got %v", err)
 	}
@@ -280,6 +288,10 @@ func TestAllRouterMethodsDispatchAndFailClosed(t *testing.T) {
 		"dda.SubmitGroup": func(c context.Context) error { return rt.DDA.SubmitPaymentGroup(c, "t", "g", "k") },
 		"statement.Get": func(c context.Context) error {
 			_, e := rt.Statement.GetStatement(c, "t", ports.StatementFilter{})
+			return e
+		},
+		"balance.Get": func(c context.Context) error {
+			_, e := rt.Balance.GetBalance(c, "t")
 			return e
 		},
 	}

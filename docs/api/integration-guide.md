@@ -26,7 +26,7 @@ Superfícies disponíveis em `/v1`:
 | Checkout hospedado | `POST/GET/DELETE /v1/checkout/{id}` | Página de pagamento hospedada (venda online) |
 | Boleto (BolePix) | `POST/GET/PUT/DELETE /v1/boletos/{id}` | Boleto registrado com multa/juros/desconto |
 | DDA / agendamento | `/v1/dda/*` | Consulta e pagamento de boletos no DDA |
-| Extrato | `GET /v1/statement` | Extrato da conta por período |
+| Saldo & Extrato | `GET /v1/balance`, `GET /v1/statement` | Saldo atual da conta e extrato por período |
 | Cobranças genéricas | `POST/GET /v1/charges/{id}` | Cobrança abstrata (compat) |
 
 Todas as rotas são autenticadas (deny-by-default). A única rota pública é
